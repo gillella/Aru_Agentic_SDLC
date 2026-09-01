@@ -1,10 +1,10 @@
-# Aru Code Factory
+# Aru Agentic SDLC
 
 > A small, fail-closed rules-and-guidelines kernel that moves one approved
 > GitHub issue to one safely merged pull request.
 
-**Project status: Complete and ready for consumer adoption — v0.2.2
-(2026-08-27).** Future kernel improvements should originate in evidence from
+**Project status: Complete and ready for consumer adoption — v0.2.8
+(2026-08-31).** Future kernel improvements should originate in evidence from
 real governed consumer projects.
 
 Aru helps a developer or coding agent answer four questions before changing a
@@ -12,14 +12,22 @@ software project:
 
 1. **What work is approved?** — the GitHub issue and Project Board.
 2. **What may this worker change?** — the exclusive claim and `touches:` paths.
-3. **Is this exact revision safe enough to merge?** — exact-head focused local
-   verification evidence and one authoritative reviewer distinct from the
-   author.
-4. **Who may merge it?** — only `scripts/merge_pr.py` with the expected head.
+3. **Is this exact revision safe enough to merge?** — the exact-head
+   `aru-governed-pr` server check plus, for Tier 2-3 changes, one authoritative
+   reviewer distinct from the author.
+4. **What is the governed merge path?** — `scripts/merge_pr.py` with the
+   expected head; stronger GitHub-side exclusivity is a consumer deployment
+   choice described below.
 
 It is intentionally a governance layer, not an autonomous agent platform. It
 does not schedule workers, run a private queue, deploy applications, manage
 credentials, monitor production, or replace GitHub.
+
+The [minimal kernel contract](docs/KERNEL-CONTRACT.md) is the one normative
+summary. It separates the **Kernel** (issue to safe merge), an optional
+**external Driver** (when to invoke the next bounded command), and
+**consumer policy** (additional risk controls, broader engineering checks,
+release, deploy, and production).
 
 ## See the whole system in one minute
 
@@ -30,12 +38,14 @@ flowchart LR
     RD -->|exclusive claim| IP[In Progress]
     IP -->|isolated worktree| CODE[Small change + focused tests]
     CODE --> PR[Pull request]
-    PR --> VERIFY{Exact-head local verification bound?}
-    VERIFY -->|No or failed| FIX[Fix current head + rerun focused checks]
+    PR --> VERIFY{Exact-head server verification green?}
+    VERIFY -->|No or failed| FIX[Fix current head or consumer verify script]
     FIX --> VERIFY
-    VERIFY -->|Yes| REV{Independent authoritative review complete?}
+    VERIFY -->|Yes| RISK{Risk tier 2 or 3?}
+    RISK -->|No| MERGE[merge_pr.py --expected-head]
+    RISK -->|Yes| REV{Independent authoritative review complete?}
     REV -->|Findings| FIX
-    REV -->|Clean| MERGE[merge_pr.py --expected-head]
+    REV -->|Clean| MERGE
     MERGE --> DONE[Done + safe cleanup]
 ```
 
@@ -47,23 +57,24 @@ The source of truth stays deliberately small:
 | Write boundary | `touches:` declaration |
 | Writer ownership | One `agent:<id>` claim |
 | Isolation | One Git worktree per issue |
-| Verification | Focused local verification evidence bound to the exact PR head |
-| Review | Exactly one `review:<authority>` label for the current head |
-| Merge | `scripts/merge_pr.py` |
+| Verification | `aru-governed-pr` on the exact PR head |
+| Review | None for Tier 0-1; one distinct current-head authority for Tier 2-3 |
+| Governed merge or merge-queue submission | `scripts/merge_pr.py` |
 | Deployment and production | The consumer repository and its operators |
 
 ## Is it usable for another project?
 
-**Yes, with explicit prerequisites.** Version 0.2.2 can govern a new project or
+**Yes, with explicit prerequisites.** Version 0.2.8 can govern a new project or
 be migrated into an existing project when all of these are true:
 
 - Git, Python 3.11+, and an authenticated GitHub CLI are available.
 - The repository has exactly one linked, open GitHub Project with the five
   statuses `Backlog`, `Ready`, `In Progress`, `In Review`, and `Done`.
 - New governed issues are added to that Project Board.
-- The repository can record exact-head focused local verification in PR bodies
-  and has at least one registered external reviewer or one smoke-testable,
-  distinct coding-agent reviewer.
+- The repository can run the installed `aru-governed-pr` workflow and its
+  consumer-owned `.aru/verify.sh`. Before admitting Tier 2-3 work, it also has
+  at least one registered external reviewer or one smoke-testable, distinct
+  coding-agent reviewer.
 - Developers and agents can read the canonical Aru directory through
   `ARU_SDLC_HOME`.
 
@@ -72,8 +83,9 @@ install CodeRabbit, Sourcery, CodeAnt, or coding-agent providers, publish an
 initial default branch, or merge conflicting files into an existing repository.
 Those are deliberate operator-owned setup steps.
 
-> **Important:** v0.2.x has no `aru code` loop, scheduler, or
-> `run-aru-factory` router. Use the six installed skills or the commands below.
+> **Important:** v0.2.x installs only the six skills listed below. It has no
+> command router or in-kernel loop; persistent continuation belongs to an
+> external Driver.
 
 ## Choose an adoption path
 
@@ -113,6 +125,11 @@ The installer exposes exactly six skills to supported local coding agents:
 - `remediate-ci-failure`
 - `address-pr-feedback`
 
+It also maintains the delimited Aru block in `~/.codex/AGENTS.md`. Existing
+non-Aru instructions are preserved. A recognized legacy all-Aru file is backed
+up before replacement so stale skill and command routes do not survive an
+upgrade.
+
 ### 2. Bootstrap a new local project
 
 ```bash
@@ -122,8 +139,17 @@ python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
 ```
 
 Add `--github --private` when you also want the helper to create a private
-GitHub repository, labels, and linked Project Board. The helper writes the
-governance scaffold but does not commit or push it.
+GitHub repository, labels, linked Project Board, and a minimal ruleset with no
+configured bypass actors that requires `aru-governed-pr` from GitHub Actions.
+The helper writes the governance scaffold but does not commit or push it.
+
+That portable ruleset authenticates the required check producer, but it cannot
+make the helper the only possible GitHub merge path or condition server-side
+review on Aru's path-derived tier. The helper-only merge rule is therefore a
+governed process rule. Organizations that need a tamper-resistant boundary can
+add consumer-owned controls supported by their GitHub plan, such as a pinned
+required workflow, a dedicated merge App identity, or team/file-pattern review
+rules. Those controls are intentionally outside the portable Kernel.
 
 ### 3. Migrate an existing project safely
 
@@ -138,155 +164,75 @@ python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
   --directory "$staging_dir"
 ```
 
-Review the staged `AGENTS.md`, `.github/`, `.aru/hooks/`, and `.gitignore`
-before applying them. The scaffold no longer creates a repository workflow:
-per-issue and per-PR verification is local-only, exact-head, and focused.
-If a project wants a release-only full suite, treat it as a separate local
-operator activity rather than a merge gate for ordinary issue work.
+Review the staged `AGENTS.md`, `.github/`, `.aru/`, and `.gitignore` before
+applying them. Bootstrap installs the consumer-owned `aru-governed-pr` workflow,
+which checks out the exact PR head, runs `.aru/verify.sh`, and validates the
+linked issue's `touches:` boundary against the actual diff. Customize the
+verification commands and branch rules for the consumer's risk policy.
 
 ### 4. Run one governed unit of work
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --json
 python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
-  --agent codex-local --claim --json
+  --agent codex-local --json
 ```
 
-When an operator has already verified multiple live coding lanes, repeat
-`--agent` in one JSON invocation to select and claim a bounded batch from one
-open-PR snapshot and one Ready-issue snapshot:
+`fetch_next_work.py` is read-only and accepts exactly one agent identity. It
+first returns that author's oldest open PR as feedback, verification,
+conflict, wait, or merge work. Only when there is no authored PR does it return
+the highest-priority complete, unblocked Ready issue. It never claims,
+promotes Backlog, repairs the board, allocates a batch, or starts another
+activation.
+
+If the result is an issue, claim that exact live issue explicitly:
 
 ```bash
-python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
-  --agent codex-a --agent claude-b --claim --json
+python3 "$ARU_SDLC_HOME/scripts/claim_issue.py" \
+  --issue 42 --agent codex-local
 ```
 
-The result contains at most one work item per explicit lane. This is a
-single-shot picker call, not a scheduler, daemon, worker handoff or presence
-registry, queue, capacity store, or polling loop; a later invocation reads a
-new authoritative snapshot.
+The Ready snapshot is fully paginated. Dependencies are read once in a bounded
+bulk query, and eligible issues are ordered by priority then issue number.
+`needs-human`, consumer epic containers, unresolved dependencies, malformed
+contracts, and contradictory priorities are skipped or reported. An idle
+result is terminal for that activation; it does not authorize another picker
+tick.
 
-An authored open PR occupies only that author's remediation lane, but its
-`touches:` paths reserve globally against free-lane assignment. Other explicit
-lanes may still receive independent Ready or safely recovered Backlog work in
-the same invocation when `touches:` paths, dependencies, claims, and
-review-authority constraints stay conflict-free.
+Work only in the worktree reported by `create_branch.py`. Local checks are
+optional preflight or audit evidence. Publish the branch and open the PR through
+`create_pr.py`; merge only after the exact-head `aru-governed-pr` server check
+and any risk-required authoritative review are complete.
 
-Board Ready count is lifecycle state, not executable capacity. One activation
-snapshot comprises the complete paginated open-Ready inventory and, when that
-inventory contains dependency references, one capped bulk GraphQL read for all
-deduplicated dependency states. The bulk read permits at most 100 references,
-fails closed above that bound, and is shared by every lane; the picker never
-queries dependencies per card or per lane. It deterministically classifies
-each Ready card under this precedence: `human_gated`, `epics`,
-`dependency_blocked`, `malformed`, then `executable_ready`. The categories
-therefore partition `total_ready`, even when a card matches more than one.
+## Review continuity
 
-When Ready cards are excluded, the activation-level `ready_classification`
-object has exactly these machine-readable keys: `total_ready`,
-`executable_ready`, `human_gated`, `epics`, `dependency_blocked`, and
-`malformed`. A consumer can render, for example,
-`7 Ready / 0 executable / 5 human-gated / 2 epics` without parsing prose.
-Batch output includes the object and one aggregate `Ready classification:`
-diagnostic only once, never in individual lanes. A legacy single-agent call
-adds them only when exclusion leaves the result idle. Batch classification
-retains its stricter issue-number and `touches:` validation; single-agent
-selection retains its legacy field handling. Per-card malformed metadata
-diagnostics remain ordered by issue number.
+Tier 0 documentation and Tier 1 ordinary code do not wait for authoritative
+review. Tier 2 sensitive/contract and Tier 3 production/destructive changes
+require one current-head authority distinct from the author. Unknown or
+unrecognized safe paths fail upward to Tier 2; malformed or unsafe paths fail
+to Tier 3. Installed external providers require
+`reviewer-registered:<service>`; eligible coding identities require a binding
+to a distinct GitHub actor. Authority selection order is an implementation
+detail, not a fairness, speed, or capacity promise.
 
-An idle result is terminal for that event-driven activation. Its diagnostics
-explain why visible Ready cards may not be executable; they do not authorize
-automatic triage, board repair, or another picker tick.
-
-Work only in the worktree reported by `create_branch.py`. After focused local
-verification, publish the branch and open the PR through `create_pr.py`.
-Whenever the verification commands or PR head change, refresh the PR-body
-evidence through `create_pr.py --refresh-verification`; that flow revalidates
-the allowlisted commands, executes them locally in the current worktree, and
-only then rebinds the exact head. Merge only after that exact-head local
-verification and the assigned authoritative review are complete.
-
-## Reviewer state machine
-
-Every PR current head has exactly one authority label. Operators register an
-installed external provider with `reviewer-registered:<service>`; ordinary
-bootstrap `review:*` labels are not registrations. Repository label definitions
-may declare one shared policy without a new state store:
-
-```text
-review-policy:primary=coderabbit
-review-policy:fallback-1=claude-code
-review-policy:fallback-2=openai-codex
-review-policy:fallback-3=xai-cursor
-review-policy:fallback-4=google-antigravity
-review-policy:timeout=120
-```
-
-Fallback ranks must be contiguous, authorities must be unique and supported,
-and every referenced external authority must be registered. Missing policy
-labels preserve the compatible default: the first registered external service
-is primary, the four coding families are ordered fallbacks, and timeout is 120
-seconds. Policy declarations, external registrations, and reviewer bindings are
-repository-shared; `ARU_CODING_REVIEWERS` remains machine-local.
-
-Inspect the effective sources and inventory without mutation; add the probe flag
-only when bounded local provider checks are desired:
-
-```bash
-python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --reviewer-status --json
-python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
-  --reviewer-status --probe-reviewers \
-  --agent <author-identity> --author-github-login <author-login> --json
-```
-
-External availability is observed on a PR, not guessed during status. Remove an
-expired or uninstalled service's `reviewer-registered:<service>` label. An
-explicit external unavailable/error response causes immediate fallback. A
-pending service retains authority until the configured timeout. Because the
-kernel itself has no scheduler, an external event or timer must invoke:
+The Kernel never waits or polls. For each pending Tier 2-3 authority assignment,
+an external Driver owns the single continuation event defined in the
+[canonical contract](docs/KERNEL-CONTRACT.md).
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
   --refresh-reviewer <PR> --json
 ```
 
-The helper evaluates the newest trusted, timestamped provider evidence. The
-clock starts at the current authority's latest GitHub label-assignment event,
-so a governed recovery receives its own complete configured pending window.
+The Driver rereads the current head and authority, invokes one bounded refresh,
+and stops. The helper evaluates trusted provider evidence and retains or changes
+authority. For Tier 2-3, a push invalidates earlier review; self-review,
+unresolved findings, no-op provider results, and stale or conflicting
+attestations block merge.
 
-Coding fallback smoke-tests liveness in Claude Code, OpenAI Codex, xAI Cursor,
-then Google Antigravity; it excludes the author identity and prefers another
-model family. Each identity must have a `reviewer-binding:<identity>=<github-login>`
-label, and that GitHub actor must differ from the PR author. Each machine
-declares its local pool in `ARU_CODING_REVIEWERS`. Entries use `family:identity`;
-Claude entries add the subscription argument as
-`claude-code:identity@subscription`. The current MacBook identities are
-`m1/m2/m3/mo/mx/mg`; the Mac mini uses `n1/n2/n3/no/nx/ng`. Adding or removing a
-Claude subscription changes only this configuration and its binding label.
-Missing, malformed, or duplicate configuration blocks coding fallback. Every
-configured Claude subscription is probed and successful bound subscriptions
-rotate deterministically. Paused reviews, cost or quota exhaustion, rate
-limiting, provider outage, unsupported bot-authored PRs, and explicit
-unavailable/error responses all count as unavailable. A successful check whose
-detail says it performed no review does not satisfy the exact-head gate. If no
-distinct coding agent has capacity, assignment does not change and the
-transition fails closed. Registered coding bindings with a missing local pool
-also fail visibly instead of silently degrading every assignment to
-external-only selection. If an assigned coding reviewer later aborts, hits
-quota, or explicitly becomes unavailable during substantive execution, recover
-immediately through the same helper with `--coding-reviewer-unavailable <reason>`;
-it audits and restores the first policy-listed registered external authority
-without leaving coding identity metadata behind.
-
-A coding-agent review is authoritative only when a formal GitHub Review from a
-GitHub actor other than the PR author contains the strict `aru-coding-review:v1`
-attestation. It must name the assigned reviewer and family, list the linked
-issues, confirm acceptance-criteria/diff/surrounding-code inspection, record
-focused verification and substantive findings, declare `APPROVE` or
-`REQUEST_CHANGES`, and bind the full 40-character current-head SHA. A new push
-invalidates it immediately. Self-review, generic approval prose, unresolved
-findings or threads, `REQUEST_CHANGES`, and malformed, spoofed, missing,
-duplicate, or conflicting evidence block `merge_pr.py`.
+If the repository uses GitHub's merge queue, helper submission is not a merged
+result. Keep the issue In Review until GitHub confirms that exact head merged;
+only then complete Done and cleanup.
 
 ## The seven-document map
 

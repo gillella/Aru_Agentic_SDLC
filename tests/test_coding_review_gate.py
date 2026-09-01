@@ -5,9 +5,25 @@ import json
 import pytest
 
 import merge_pr
+import merge_state
 
 HEAD = "a" * 40
 OLD_HEAD = "b" * 40
+
+
+@pytest.fixture(autouse=True)
+def governed_gate_inputs(monkeypatch):
+    monkeypatch.setattr(merge_pr, "pull_changed_paths", lambda _number: ["scripts/merge_pr.py"])
+    monkeypatch.setattr(
+        merge_pr,
+        "issue_gate",
+        lambda _issues, _paths: [{"issue": 508, "criteria": 1}],
+    )
+    monkeypatch.setattr(
+        merge_pr,
+        "merge_queue_snapshot",
+        lambda *_args: {"configured": False, "entry": None, "auto_merge": None},
+    )
 
 
 def coding_pr(*, labels=None, author_login="author-login"):
@@ -20,6 +36,8 @@ def coding_pr(*, labels=None, author_login="author-login"):
         "headRefOid": HEAD,
         "headRefName": "fix/issue-508-policy",
         "baseRefName": "main",
+        "baseRefOid": "c" * 40,
+        "mergeable": "MERGEABLE",
         "mergeStateStatus": "CLEAN",
         "labels": labels
         or [
@@ -163,7 +181,7 @@ def test_exact_head_request_changes_has_clear_blocking_status(monkeypatch):
     pr = coding_pr()
     monkeypatch.setattr(merge_pr, "pull_request", lambda _number: pr)
     monkeypatch.setattr(
-        merge_pr,
+        merge_state,
         "issue",
         lambda _number: {
             "body": "## Acceptance Criteria\n\n- [x] policy behavior verified",
@@ -224,7 +242,7 @@ def test_exact_head_coding_approval_plus_green_ci_passes_gate(monkeypatch):
     pr = coding_pr()
     monkeypatch.setattr(merge_pr, "pull_request", lambda _number: pr)
     monkeypatch.setattr(
-        merge_pr,
+        merge_state,
         "issue",
             lambda _number: {
                 "body": "## Acceptance Criteria\n\n- [x] policy behavior verified",

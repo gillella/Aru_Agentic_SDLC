@@ -2,70 +2,102 @@
 
 ## Unreleased
 
-- Made `fetch_next_work.py` batch selection reserve touches from every open
-  governed PR across all authors globally and fail closed on unreadable,
-  missing, or ambiguous reservations.
-- Made `fetch_next_work.py` return an actionable conflict remediation work
-  result carrying PR number, head, and reason when an authored open PR has
-  `mergeStateStatus: DIRTY`.
-- Made `fetch_next_work.py` obtain and validate live current-head
-  `mergeStateStatus` via a narrow repository read when active open PR records
-  lack merge state, classifying DIRTY conflicts before evaluating CI failure
-  while preserving snapshot-based reservations.
-- Updated `address-pr-feedback` and operational docs to instruct merging
-  `origin/main` into the feature branch (never rebase/force push), rerunning
-  focused verification, and refreshing exact-head evidence on DIRTY conflicts.
-- Clarified that the kernel has no scheduler so external reviewer 15-minute
-  fallback requires an external event/timer invoking `create_pr.py --refresh-reviewer`,
-  coding reviewer probes test liveness only, and substantive review execution
-  hitting quota triggers immediate governed unavailable recovery.
-- Removed the repository workflow file and stopped scaffolding one for adopted
-  repositories.
-- Replaced the repository-hosted merge gate with exact-head focused local
-  verification evidence stored in the PR body and refreshed through
-  `create_pr.py --refresh-verification`.
-- Made `check_ci.py` and `merge_pr.py` fail closed on missing, stale,
-  malformed, no-execution, or broad/full-suite verification evidence.
-- Updated active operating docs, templates, and runtime skills to require
-  exact-head focused local verification with honest project-specific commands
-  and to reserve any full suite for separate explicit release activity.
+- Installed a consumer-owned `aru-governed-pr` workflow that checks out the
+  exact PR head, runs `.aru/verify.sh`, and enforces the linked issue's
+  `touches:` boundary against the actual diff; merge queues rerun verification
+  on `merge_group` revisions, and bootstrap pins the required context to the
+  GitHub Actions App.
+- Made the exact-head server check the required verification authority and
+  local verification optional preflight or audit evidence; documented the
+  portable ruleset's server-enforcement boundary without claiming helper-only
+  merge is technically exclusive.
+- Established one short canonical contract separating the Kernel, external
+  Driver, and consumer policy; documented path-derived risk tiers, omitted the
+  authoritative-review wait for Tier 0-1, and retained one review plus one
+  continuation event for Tier 2-3.
+- Removed provider-order and reviewer-selection algorithms from policy prose,
+  along with repeated verification ceremony and mandatory merge preview
+  guidance.
+- Reconciled installed agent guidance with the six current skills and
+  `fetch_next_work.py`; the installer safely migrates the known legacy Codex
+  global guidance while preserving a backup.
+- Reduced each activation to one read-only selection for one agent and removed batch
+  allocation, automatic Backlog recovery, and epic reconciliation from the
+  Kernel lifecycle.
+- Removed the generic lifecycle-status setter, hardened exclusive claim acquire
+  and release races, and added restart-safe merge-queue finalization.
+- Authenticated required and provider check runs to their GitHub Apps, bound
+  reviewer evidence to the current head and assignment window, and made the
+  default branch dynamic.
+- Contained bootstrap and hook installation within trusted repository metadata;
+  symlinked scaffold paths, custom external hook paths, and unsafe hook targets
+  now fail closed.
+- Removed unauthenticated optional check-name configuration; wider consumer
+  verification belongs inside `.aru/verify.sh` or consumer-owned branch rules.
+
+## v0.2.8 - Consumer Repository App Routing - 2026-08-31
+
+- Passed the governed consumer repository to the GitHub App runner.
+- Classified malformed Ready dependency metadata without preventing selection
+  of later valid candidates.
+
+## v0.2.7 - Live Batch PR State Hotfix - 2026-08-31
+
+- Read live current-head merge state for batch PR recovery instead of trusting
+  an incomplete activation snapshot.
+
+## v0.2.6 - Board Liveness and Conflict Recovery - 2026-08-31
+
+- Restored bounded event-driven Backlog recovery when Ready is empty.
+- Added capacity-aware multi-lane assignment, structured Ready exclusions,
+  transactional status safeguards, and verified epic reconciliation.
+- Moved routine PR verification away from repository-hosted GitHub Actions to
+  the then-current local evidence model.
+
+## v0.2.5 - Bounded Multi-Lane Dispatch - 2026-08-28
+
+- Added one-snapshot bounded multi-lane work selection with global `touches:`
+  reservations and fail-closed inventory validation.
+- Hardened deleted-path write-boundary enforcement and reviewer-state recovery.
+- Added the governance audit and north-star evidence documents without growing
+  the seven-document operating surface.
+
+## v0.2.4 - Distributed Review and Coordination Efficiency - 2026-08-27
+
+- Added governed coding-reviewer identities and capacity probes while excluding
+  the author.
+- Replaced full-board Project scans with targeted status updates to reduce
+  GraphQL quota use.
+- Aligned Ready-contract validation across issue entry points.
+
+## v0.2.3 - Governed Reviewer Fallback - 2026-08-27
+
+- Added exact-head coding-agent reviewer fallback, identity bindings, formal
+  attestations, and guarded recovery from unavailable review capacity.
+- Hardened trusted external-provider evidence and GitHub App authentication.
 
 ## v0.2.2 - Consumer Adoption Ready - 2026-08-27
 
-- Expanded the README into a user-friendly adoption entry point.
-- Replaced the terse operations note with a complete graphical developer guide
-  covering prerequisites, new and existing repository adoption, GitHub setup,
-  the full lifecycle, every supported command, recovery, troubleshooting, and
-  a pilot checklist.
-- Documented the operator-owned setup that the kernel intentionally does not
-  automate, including initial publication, Project item admission, real CI,
-  branch protection, and external reviewer installation.
-- Reconciled every existing Project Board item to Done and archived the final
-  legacy branch heads before removing their obsolete worktrees and branches.
-- Marked the minimal kernel complete and ready for consumer-project pilots.
+- Expanded the README and operations guide for new and existing consumers.
+- Documented operator-owned setup and reconciled the reset-era board,
+  branches, and worktrees.
+- Marked the minimal kernel ready for consumer pilots.
 
 ## v0.2.1 - Reset Correctness Fixes - 2026-08-27
 
-- Scoped surface-budget checks to tracked kernel files so preserved external
-  worktrees and untracked operator files do not create false failures.
-- Replaced legacy Aru pre-push hooks during installation without chaining the
-  retired lifecycle implementation.
+- Scoped surface-budget checks to tracked kernel files.
+- Replaced legacy pre-push hooks without chaining retired lifecycle behavior.
 
 ## v0.2.0 - Minimal Kernel
 
 - Reset Aru to one issue-to-safe-merge lifecycle.
-- Removed scheduler, loop, presence, handoff, telemetry, review-capacity,
-  reassignment-lock, release, deploy, preview, incident, Slack, visualizer,
-  compatibility, and historical factory-product surfaces.
-- Replaced the oversized core with small fail-closed commands.
-- Reduced active documentation to seven operating files and runtime skills to
-  six.
-- Made reviewer assignment stable and deterministic without an open-PR
-  inventory or distributed lock.
-- Added hard surface-budget and forbidden-surface tests.
-- Preserved the pre-reset repository at
-  `pre-v0.2.0-2026-08-27` (commit
-  `388a22b3183e523ee67f857979448d2124e1a854`).
+- Removed the scheduler, loop, presence, handoff, telemetry, release, deploy,
+  preview, incident, Slack, visualizer, compatibility, and historical
+  factory-product surfaces.
+- Reduced the active surface to small fail-closed commands, six runtime skills,
+  and seven operating documents.
+- Preserved the pre-reset repository at tag `pre-v0.2.0-2026-08-27`
+  (`388a22b3183e523ee67f857979448d2124e1a854`).
 
 Feature development is frozen through 2026-09-26; only security and correctness
 fixes are admitted during the freeze.

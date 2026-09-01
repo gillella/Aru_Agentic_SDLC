@@ -10,19 +10,20 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
    authority.
 3. Fix actionable findings or resolve merge conflicts in the existing claimed worktree:
    - For review feedback: fix actionable findings in code.
-   - For a DIRTY merge state / merge conflict: merge `origin/main` into the
-     feature branch (never rebase or force push), resolving conflicts within
-     declared `touches:` boundaries.
-4. Run focused verification only, commit, and push.
-5. Update the PR `## Verification` commands and rebind them to the exact head
-   with `create_pr.py --refresh-verification <PR> --body-file <file>`.
-6. For review feedback, reply with the fixing commit and resolve the thread
+   - For a DIRTY merge state / merge conflict: resolve the repository's default
+     branch and merge `origin/<default-branch>` into the feature branch (never
+     rebase or force push), resolving conflicts within declared `touches:`
+     boundaries.
+4. Run `.aru/verify.sh` or narrower focused checks locally when useful, commit,
+   and push. Local output is preflight or audit evidence, not merge authority.
+5. For review feedback, reply with the fixing commit and resolve the thread
    through GitHub.
-7. Wait for fresh exact-head local verification and a fresh verdict from the
-   one assigned external or coding-agent authority.
+6. Wait for the exact-head `aru-governed-pr` server check and, for a Tier 2-3
+   change, a fresh verdict from the one assigned external or coding-agent
+   authority.
 
-Do not review your own work. Because the kernel has no scheduler, an external
-event or timer must invoke `create_pr.py --refresh-reviewer` for governed
-immediate unavailability or the effective policy timeout. Reviewer capacity probes
-verify liveness only; if substantive review execution hits quota, recover
-immediately with `create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable <reason>`.
+Do not review your own work or poll reviewer state. For Tier 2-3, after the
+push, the external Driver owns the one review-continuation event defined in
+`docs/KERNEL-CONTRACT.md`. If substantive coding review aborts or loses
+capacity, report the truthful reason through
+`create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable <reason>`.

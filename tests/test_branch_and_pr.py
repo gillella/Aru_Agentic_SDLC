@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import subprocess
 from datetime import datetime, timedelta, timezone
 
@@ -8,9 +7,7 @@ import pytest
 
 import create_branch
 import create_pr
-import common
-import local_verification
-import review_policy
+import reviewer_probe
 
 
 @pytest.fixture(autouse=True)
@@ -20,22 +17,14 @@ def configured_reviewers(monkeypatch):
         "claude-code:m1@1,claude-code:m2@2,claude-code:m3@3,"
         "openai-codex:mo,xai-cursor:mx,google-antigravity:mg",
     )
-    monkeypatch.setattr(local_verification, "run", lambda argv, **_kwargs: result(argv))
-    policy = review_policy.default_review_policy(("coderabbit",))
-    monkeypatch.setattr(create_pr, "load_repository_review_policy", lambda: (policy, (
-        "reviewer-registered:coderabbit",
-    )))
-
 
 def result(argv, *, ok=True, output="OK"):
     return subprocess.CompletedProcess(argv, 0 if ok else 1, output if ok else "", "")
-
 
 def external_states(**overrides):
     states = {service: create_pr.UNAVAILABLE for service in create_pr.EXTERNAL_REVIEWERS}
     states.update(overrides)
     return states
-
 
 def verification_body(*commands: str) -> str:
     return (
@@ -43,7 +32,6 @@ def verification_body(*commands: str) -> str:
         "## Verification\n\n"
         + "\n".join(f"- `{command}`" for command in commands)
     )
-
 
 def assignment_pr(*, created_at: datetime, state="pending"):
     check = []
@@ -80,6 +68,28 @@ def assignment_pr(*, created_at: datetime, state="pending"):
     }
 
 
+def provider_checks(pr):
+    return [
+        {
+            **check,
+            "app": {"slug": "coderabbitai"},
+            "head_sha": pr["headRefOid"],
+        }
+        for check in pr["statusCheckRollup"]
+    ]
+
+
+def external_state(pr, *, reviews=None, comments=None, checks=None, since=None):
+    return create_pr.external_state(
+        "coderabbit",
+        reviews=reviews or [],
+        comments=comments or [],
+        checks=provider_checks(pr) if checks is None else checks,
+        head=pr["headRefOid"],
+        since=since or datetime.fromisoformat(pr["createdAt"]),
+    )
+
+
 def install_refresh(
     monkeypatch,
     pr,
@@ -87,17 +97,23 @@ def install_refresh(
     updated_labels=None,
     comments=None,
     events=None,
-    statuses=None,
+    checks=None,
 ):
     responses = [pr]
     if updated_labels is not None:
         responses.append({"number": 42, "labels": updated_labels})
-    monkeypatch.setattr(create_pr, "gh_json", lambda _argv: responses.pop(0))
+
+    def json_response(argv):
+        if argv[0] == "api":
+            records = provider_checks(pr) if checks is None else checks
+            return [{"total_count": len(records), "check_runs": records}]
+        return responses.pop(0)
+
+    monkeypatch.setattr(create_pr, "gh_json", json_response)
     monkeypatch.setattr(create_pr, "repo_slug", lambda: "owner/repo")
-    evidence = iter([[], comments or [], events or [], statuses or []])
+    evidence = iter([[], comments or [], events or []])
     monkeypatch.setattr(create_pr, "gh_paginated", lambda _endpoint: next(evidence))
     monkeypatch.setattr(create_pr, "run", lambda _argv: None)
-
 
 def test_external_registration_reads_beyond_first_hundred_labels(monkeypatch):
     commands = []
@@ -113,7 +129,6 @@ def test_external_registration_reads_beyond_first_hundred_labels(monkeypatch):
     assert states["sourcery"] == create_pr.AVAILABLE
     assert commands[0][commands[0].index("--limit") + 1] == "1000"
 
-
 def test_authority_labels_alone_do_not_register_external_providers(monkeypatch):
     monkeypatch.setattr(
         create_pr,
@@ -122,9 +137,8 @@ def test_authority_labels_alone_do_not_register_external_providers(monkeypatch):
     )
     assert set(create_pr.registered_external_states().values()) == {create_pr.UNAVAILABLE}
 
-
 def test_author_family_is_deprioritized_and_author_identity_excluded(monkeypatch):
-    monkeypatch.setattr(common, "_reviewer_command", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(reviewer_probe, "_command", lambda name: f"/bin/{name}")
     calls = []
 
     def probe(argv):
@@ -154,8 +168,11 @@ def test_pending_external_under_two_minutes_does_not_fallback(monkeypatch):
     )
     outcome = create_pr.refresh_assignment(42, now=created + timedelta(minutes=1, seconds=59))
     assert outcome["authority"] == "coderabbit"
+    assert outcome["action"] == "retained"
     assert outcome["reason"] == "external-pending"
     assert outcome["remaining_seconds"] == 1
+    assert outcome["retry_at"] == "2026-08-27T12:15:00+00:00"
+    assert outcome["next_action"] == "refresh-reviewer"
 
 
 def test_pending_external_at_two_minutes_falls_back(monkeypatch):
@@ -243,8 +260,12 @@ def test_external_recovery_before_write_aborts_fallback(monkeypatch):
     initial = assignment_pr(created_at=created, state="unavailable")
     recovered = assignment_pr(created_at=created, state="available")
     monkeypatch.setattr(create_pr, "gh_json", lambda _argv: initial)
-    monkeypatch.setattr(create_pr, "repo_slug", lambda: "owner/repo")
-    monkeypatch.setattr(create_pr, "gh_paginated", lambda _endpoint: [])
+    decisions = iter(
+        [("external-unavailable", None), ("external-available", None)]
+    )
+    monkeypatch.setattr(
+        create_pr, "_external_decision", lambda *_args: next(decisions)
+    )
     monkeypatch.setattr(
         create_pr,
         "probe_coding_reviewer",
@@ -295,6 +316,9 @@ def test_explicit_external_error_falls_back_immediately(monkeypatch):
         "Unsupported bot-authored PR",
         "Payment required",
         "Unable to review due to capacity exhausted",
+        "Skipping PR review because a bot author is detected.",
+        "Review was skipped",
+        "No-op review",
     ],
 )
 def test_explicit_provider_unavailability_messages_are_detected(message):
@@ -305,10 +329,10 @@ def test_explicit_provider_unavailability_messages_are_detected(message):
         "body": message,
         "created_at": observed_at.isoformat(),
     }
-    assert create_pr.external_state(pr, "coderabbit", reviews=[], comments=[comment]) == create_pr.UNAVAILABLE
+    assert external_state(pr, comments=[comment]) == create_pr.UNAVAILABLE
 
 
-def test_review_failure_is_not_misclassified_as_provider_unavailability():
+def test_review_failure_remains_pending_not_provider_unavailable():
     observed_at = datetime.now(timezone.utc)
     pr = assignment_pr(created_at=observed_at)
     pr["statusCheckRollup"] = [
@@ -319,10 +343,10 @@ def test_review_failure_is_not_misclassified_as_provider_unavailability():
             "completedAt": observed_at.isoformat(),
         }
     ]
-    assert create_pr.external_state(pr, "coderabbit", reviews=[], comments=[]) == create_pr.AVAILABLE
+    assert external_state(pr) == create_pr.PENDING
 
 
-def test_external_refresh_degrades_safely_when_status_endpoint_fails(monkeypatch):
+def test_external_refresh_stops_when_check_run_inventory_is_unavailable(monkeypatch):
     created = datetime.now(timezone.utc) - timedelta(minutes=1)
     pr = assignment_pr(created_at=created, state="available")
     comment = {
@@ -343,20 +367,20 @@ def test_external_refresh_degrades_safely_when_status_endpoint_fails(monkeypatch
         raise create_pr.KernelError("commit status endpoint unavailable")
 
     monkeypatch.setattr(create_pr, "gh_paginated", evidence)
-    assert create_pr._external_decision(
-        42,
-        pr,
-        "coderabbit",
-        datetime.now(timezone.utc),
-    ) == ("external-unavailable", None)
-    comments.clear()
-    decision, _remaining = create_pr._external_decision(
-        42,
-        pr,
-        "coderabbit",
-        datetime.now(timezone.utc),
+    monkeypatch.setattr(
+        create_pr,
+        "gh_json",
+        lambda _argv: (_ for _ in ()).throw(
+            create_pr.KernelError("check-run endpoint unavailable")
+        ),
     )
-    assert decision == "external-pending"
+    with pytest.raises(create_pr.KernelError, match="endpoint unavailable"):
+        create_pr._external_decision(
+            42,
+            pr,
+            "coderabbit",
+            datetime.now(timezone.utc),
+        )
 
 
 def test_latest_external_evidence_wins_after_provider_recovery():
@@ -374,23 +398,18 @@ def test_latest_external_evidence_wins_after_provider_recovery():
         "submitted_at": (created + timedelta(minutes=2)).isoformat(),
     }
     assert (
-        create_pr.external_state(
-            pr,
-            "coderabbit",
-            reviews=[approval],
-            comments=[outage],
-        )
+        external_state(pr, reviews=[approval], comments=[outage])
         == create_pr.AVAILABLE
     )
 
 
-def test_latest_recovered_check_wins_over_old_provider_outage():
+def test_check_completion_does_not_claim_authoritative_review_availability():
     created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
     pr = assignment_pr(created_at=created)
     pr["statusCheckRollup"] = [
         {
             "name": "CodeRabbit",
-            "state": "SUCCESS",
+            "conclusion": "SUCCESS",
             "startedAt": (created + timedelta(minutes=3)).isoformat(),
         }
     ]
@@ -400,13 +419,8 @@ def test_latest_recovered_check_wins_over_old_provider_outage():
         "created_at": created.isoformat(),
     }
     assert (
-        create_pr.external_state(
-            pr,
-            "coderabbit",
-            reviews=[],
-            comments=[outage],
-        )
-        == create_pr.AVAILABLE
+        external_state(pr, comments=[outage])
+        == create_pr.PENDING
     )
 
 
@@ -433,10 +447,48 @@ def test_recovered_external_gets_full_timeout_from_assignment(monkeypatch):
     )
     assert outcome["reason"] == "external-pending"
     assert outcome["remaining_seconds"] == 1
+    assert outcome["retry_at"] == "2026-08-27T13:15:00+00:00"
+    assert outcome["next_action"] == "refresh-reviewer"
+
+
+def test_refresh_assigns_first_authority_when_current_diff_fails_up(monkeypatch):
+    observed = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
+    pr = assignment_pr(created_at=observed)
+    pr["labels"] = [
+        label for label in pr["labels"] if not label["name"].startswith("review:")
+    ]
+    updated = {
+        "number": 42,
+        "labels": [*pr["labels"], {"name": "review:coderabbit"}],
+    }
+    responses = iter([pr, updated])
+    monkeypatch.setattr(create_pr, "gh_json", lambda _argv: next(responses))
+    monkeypatch.setattr(
+        create_pr, "pull_changed_paths", lambda _number: ["scripts/merge_state.py"]
+    )
+    monkeypatch.setattr(
+        create_pr,
+        "choose_initial_reviewer",
+        lambda *_args, **_kwargs: ("coderabbit", None, None),
+    )
+    mutations = []
+    monkeypatch.setattr(
+        create_pr,
+        "replace_authority",
+        lambda *_args, **_kwargs: mutations.append("assigned"),
+    )
+
+    outcome = create_pr.refresh_assignment(42, now=observed)
+
+    assert mutations == ["assigned"]
+    assert outcome["action"] == "assigned"
+    assert outcome["authority"] == "coderabbit"
+    assert outcome["risk_tier"] == 2
+    assert outcome["retry_at"] == "2026-08-27T12:15:00+00:00"
 
 
 def test_no_external_or_coding_reviewer_fails_closed(monkeypatch):
-    monkeypatch.setattr(common, "_reviewer_command", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(reviewer_probe, "_command", lambda name: f"/bin/{name}")
     with pytest.raises(create_pr.KernelError, match="no external or distinct coding-agent"):
         create_pr.choose_initial_reviewer(
             9,
@@ -488,7 +540,7 @@ def test_mac_mini_uses_only_its_local_reviewer_pool(monkeypatch):
         "claude-code:n1@1,claude-code:n2@2,claude-code:n3@3,"
         "openai-codex:no,xai-cursor:nx,google-antigravity:ng",
     )
-    monkeypatch.setattr(common, "_reviewer_command", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(reviewer_probe, "_command", lambda name: f"/bin/{name}")
     reviewer = create_pr.probe_coding_reviewer(
         author_identity="n1",
         author_family="claude-code",
@@ -550,7 +602,7 @@ def test_new_claude_subscription_is_added_by_configuration_only(monkeypatch):
         runner=probe,
     )
     assert reviewer == ("claude-code", "m4", "claude-reviewer-4")
-    assert [call[1] for call in calls] == ["1", "2", "3", "4"]
+    assert [call[1] for call in calls] == ["4"]
 
 
 def test_all_twelve_binding_labels_fit_github_limit():
@@ -561,7 +613,7 @@ def test_all_twelve_binding_labels_fit_github_limit():
 
 
 def test_author_actor_canonicalization_excludes_equivalent_github_app_binding(monkeypatch):
-    monkeypatch.setattr(common, "_reviewer_command", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(reviewer_probe, "_command", lambda name: f"/bin/{name}")
 
     reviewer = create_pr.probe_coding_reviewer(
         author_identity="author",
@@ -633,116 +685,22 @@ def test_explicit_coding_reviewer_unavailability_recovers_to_registered_external
     assert events == ["audit", "replace"]
 
 
-def test_create_pr_binds_head_and_exactly_one_reviewer(monkeypatch):
-    record = {"number": 6, "labels": [{"name": "agent:codex-1"}]}
-    monkeypatch.setattr(create_pr, "issue", lambda _number: record)
-    monkeypatch.setattr(create_pr, "status_of", lambda _record: "In Progress")
-    monkeypatch.setattr(create_pr, "current_branch", lambda: "feat/issue-6-small-change")
-    monkeypatch.setattr(create_pr, "require_published_head", lambda _branch: "a" * 40)
-    monkeypatch.setattr(create_pr, "ensure_label", lambda *_args, **_kwargs: None)
-    commands = []
-    monkeypatch.setattr(create_pr, "run", lambda argv: commands.append(argv))
+def test_local_changed_paths_include_both_rename_sides(monkeypatch):
+    monkeypatch.setattr(create_pr, "default_branch_name", lambda: "develop")
     monkeypatch.setattr(
         create_pr,
-        "gh_json",
-        lambda _argv: {
-            "number": 12,
-            "url": "https://example/pr/12",
-            "headRefOid": "a" * 40,
-            "labels": [
-                {"name": "review:coderabbit"},
-                {"name": "author:codex-1"},
-                {"name": "author-family:openai-codex"},
-            ],
-        },
+        "git",
+        lambda argv: (
+            "R100\thooks/old.py\tsrc/new.py\nM\tREADME.md"
+            if argv[-1] == "origin/develop...HEAD"
+            else pytest.fail(argv)
+        ),
     )
-    statuses = []
-    monkeypatch.setattr(create_pr, "set_status", lambda number, status: statuses.append((number, status)))
-
-    outcome = create_pr.create(
-        6,
-        "feat: small",
-        verification_body("python3 -m pytest tests/test_branch_and_pr.py -q"),
-        "codex-1",
-        external_states=external_states(coderabbit=create_pr.AVAILABLE),
-        reviewer_actors={},
-        author_actor="author-login",
-    )
-    assert outcome["reviewer"] == "coderabbit"
-    assert outcome["head"] == "a" * 40
-    assert statuses == [(6, "In Review")]
-    body = commands[0][commands[0].index("--body") + 1]
-    assert body.count("Closes #6") == 1
-    payload = json.loads(body.split("<!-- aru-local-verification:v1 ", 1)[1].split(" -->", 1)[0])
-    assert payload == {
-        "commands": ["python3 -m pytest tests/test_branch_and_pr.py -q"],
-        "head": "a" * 40,
-        "results": [
-            {
-                "command": "python3 -m pytest tests/test_branch_and_pr.py -q",
-                "argv": ["python3", "-m", "pytest", "tests/test_branch_and_pr.py", "-q"],
-                "returncode": 0,
-            }
-        ],
-    }
-
-
-def test_create_pr_rejects_caller_closing_directive(monkeypatch):
-    record = {"number": 1, "labels": [{"name": "agent:codex-1"}]}
-    monkeypatch.setattr(create_pr, "issue", lambda _number: record)
-    monkeypatch.setattr(create_pr, "status_of", lambda _record: "In Progress")
-    with pytest.raises(create_pr.KernelError, match="closing directive"):
-        create_pr.create(1, "feat: bad", "Closes #99", "codex-1")
-
-
-def test_create_pr_rejects_missing_verification_section(monkeypatch):
-    record = {"number": 1, "labels": [{"name": "agent:codex-1"}]}
-    monkeypatch.setattr(create_pr, "issue", lambda _number: record)
-    monkeypatch.setattr(create_pr, "status_of", lambda _record: "In Progress")
-    monkeypatch.setattr(create_pr, "current_branch", lambda: "feat/issue-1-small-change")
-    monkeypatch.setattr(create_pr, "require_published_head", lambda _branch: "a" * 40)
-    with pytest.raises(create_pr.KernelError, match="Verification section"):
-        create_pr.create(1, "feat: bad", "Summary only", "codex-1")
-
-
-def test_refresh_verification_rebinds_current_head(monkeypatch):
-    commands = []
-    monkeypatch.setattr(
-        local_verification,
-        "gh_json",
-        lambda _argv: {
-            "number": 12,
-            "headRefOid": "b" * 40,
-            "body": "## Summary\n\nLive\n\nCloses #12\n",
-        },
-    )
-    monkeypatch.setattr(local_verification, "run", lambda argv, **_kwargs: commands.append(argv))
-    outcome = create_pr.refresh_verification(
-        12,
-        "## Summary\n\nUpdated\n\n## Verification\n\n- `python3 -m pytest tests/test_branch_and_pr.py -q`\n",
-        runner=lambda argv: result(argv),
-    )
-    assert outcome == {
-        "pr": 12,
-        "head": "b" * 40,
-        "checks": ["python3 -m pytest tests/test_branch_and_pr.py -q"],
-    }
-    body = commands[-1][commands[-1].index("--body") + 1]
-    payload = json.loads(body.split("<!-- aru-local-verification:v1 ", 1)[1].split(" -->", 1)[0])
-    assert payload["head"] == "b" * 40
-
-def test_refresh_verification_rejects_broad_suite_command(monkeypatch):
-    monkeypatch.setattr(
-        local_verification,
-        "gh_json",
-        lambda _argv: {
-            "number": 12,
-            "headRefOid": "b" * 40,
-            "body": "## Summary\n\nLive\n\nCloses #12\n",
-        },
-    )
-    with pytest.raises(create_pr.KernelError, match="broad or full-suite"):
-        create_pr.refresh_verification(12, verification_body("python3 -m pytest -q"))
+    assert create_pr.local_changed_paths() == [
+        "README.md",
+        "hooks/old.py",
+        "src/new.py",
+    ]
 
 
 def test_create_pr_revalidates_ownership_after_reviewer_selection(monkeypatch):
@@ -767,6 +725,7 @@ def test_create_pr_revalidates_ownership_after_reviewer_selection(monkeypatch):
     monkeypatch.setattr(create_pr, "issue", lambda _number: next(records))
     monkeypatch.setattr(create_pr, "current_branch", lambda: "feat/issue-6-small-change")
     monkeypatch.setattr(create_pr, "require_published_head", lambda _branch: "a" * 40)
+    monkeypatch.setattr(create_pr, "local_changed_paths", lambda: ["scripts/create_pr.py"])
     monkeypatch.setattr(create_pr, "ensure_label", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         create_pr,

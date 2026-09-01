@@ -6,10 +6,18 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Callable, Iterable
+
+from review_risk import review_risk_tier as review_risk_tier
+
+from touches import (
+    TouchesError,
+    parse_touches as _parse_touches,
+    path_allowed as _path_allowed,
+    safe_declared_path as _safe_declared_path,
+)
 
 STATUSES = ("Backlog", "Ready", "In Progress", "In Review", "Done")
 STATUS_PREFIX = "status:"
@@ -26,14 +34,16 @@ CODING_REVIEWERS = ("claude-code", "openai-codex", "xai-cursor", "google-antigra
 REVIEWER_CONFIG_ENV = "ARU_CODING_REVIEWERS"
 REVIEW_AUTHORITIES = EXTERNAL_REVIEWERS + CODING_REVIEWERS
 PROBE_PROMPT = "Reply exactly OK"
-CodingCandidate = tuple[str, str, str, str | None]
-ProbeRunner = Callable[[list[str]], subprocess.CompletedProcess[str]]
 REVIEW_UNAVAILABLE_RE = re.compile(
-    r"(?:\b(?:error|unavailable)\b|\b(?:quota exhausted|quota exceeded|"
+    r"(?:\b(?:provider|service|review(?:er)?) (?:is |was |encountered (?:an )?)?"
+    r"(?:unavailable|error(?:ed)?|failed)\b|\breview failed\b|"
+    r"\b(?:quota exhausted|quota exceeded|"
     r"rate[ -]?limit(?:ed|ing)?|reviews? paused|provider outage|service outage|"
     r"unsupported bot(?:-authored)? pr|cannot review|unable to review|"
     r"payment required|insufficient credits?|capacity exhausted|"
-    r"cost (?:limit|quota|cap) (?:reached|exceeded))\b)",
+    r"cost (?:limit|quota|cap) (?:reached|exceeded)|"
+    r"reviews? (?:was )?(?:skipped|not performed)|skipping (?:the )?(?:pr )?review|"
+    r"no[- ]?op(?: review)?|bot author (?:is |was )?detected|not eligible for review)\b)",
     re.IGNORECASE,
 )
 # Compatibility name for the external-service evidence paths.
@@ -69,7 +79,15 @@ class StatusPreconditionError(KernelError):
 
 
 def review_evidence_unavailable(record: dict[str, Any]) -> bool:
-    text = "\n".join(str(record.get(k) or "") for k in ("body", "description", "name", "context"))
+    output = record.get("output")
+    nested = output if isinstance(output, dict) else {}
+    text = "\n".join(
+        str(value or "")
+        for value in (
+            *(record.get(key) for key in ("body", "description", "name", "context")),
+            *(nested.get(key) for key in ("title", "summary", "text")),
+        )
+    )
     return bool(REVIEW_UNAVAILABLE_RE.search(text))
 
 
@@ -155,56 +173,6 @@ def registered_coding_actors() -> dict[str, str]:
             raise KernelError("coding reviewer identity binding is malformed or ambiguous")
         bindings[identity] = actor
     return bindings
-
-
-def coding_reviewer_candidates(
-    *,
-    author_identity: str,
-    author_actor: str = "",
-    reviewer_actors: dict[str, str] | None = None,
-) -> list[CodingCandidate]:
-    if not os.environ.get(REVIEWER_CONFIG_ENV, "").strip():
-        actors = registered_coding_actors() if reviewer_actors is None else reviewer_actors
-        if actors:
-            raise KernelError(f"{REVIEWER_CONFIG_ENV} is missing while reviewer bindings exist")
-        return []
-    author_identity = normalized_identity(author_identity)
-    author_actor = canonical_github_actor(author_actor)
-    actors = registered_coding_actors() if reviewer_actors is None else reviewer_actors
-    configured = configured_coding_reviewers()
-    candidates: list[CodingCandidate] = []
-    for family in CODING_REVIEWERS:
-        for identity, subscription in configured.get(family, ()):
-            actor = str(actors.get(identity) or "").lower()
-            if identity == author_identity or not actor or same_github_actor(actor, author_actor):
-                continue
-            candidates.append((family, identity, actor, subscription))
-    return candidates
-
-
-def _reviewer_command(name: str) -> str | None:
-    return shutil.which(name)
-
-
-def _probe_ok(result: subprocess.CompletedProcess[str]) -> bool:
-    return result.returncode == 0 and result.stdout.strip() == "OK"
-
-
-def probe_coding_candidate(candidate: CodingCandidate, runner: ProbeRunner) -> bool:
-    family, _identity, _actor, subscription = candidate
-    if family == "claude-code":
-        executable = str(Path.home() / ".local" / "bin" / "claude-sub")
-        return _probe_ok(runner([executable, str(subscription), "-p", PROBE_PROMPT]))
-    command_map = {
-        "openai-codex": ("codex", ["exec", "--skip-git-repo-check", PROBE_PROMPT]),
-        "xai-cursor": ("cursor-agent", ["-p", PROBE_PROMPT]),
-        "google-antigravity": ("agy", ["-p", PROBE_PROMPT]),
-    }
-    cmd_name, args = command_map[family]
-    executable = _reviewer_command(cmd_name)
-    if executable is None:
-        return False
-    return _probe_ok(runner([executable, *args]))
 
 
 def agent_family(identity: str) -> str:
@@ -391,6 +359,23 @@ def repo_slug(cwd: str | Path | None = None) -> str:
     return slug
 
 
+def default_branch_name(cwd: str | Path | None = None) -> str:
+    data = gh_json(["repo", "view", "--json", "defaultBranchRef"], cwd=cwd)
+    ref = data.get("defaultBranchRef") if isinstance(data, dict) else None
+    branch = ref.get("name") if isinstance(ref, dict) else None
+    if (
+        not isinstance(branch, str)
+        or not branch
+        or branch.startswith("-")
+        or branch.endswith(("/", ".", ".lock"))
+        or ".." in branch
+        or "//" in branch
+        or re.search(r"[\x00-\x20~^:?*\\[]", branch)
+    ):
+        raise KernelError("unable to resolve a safe default branch")
+    return branch
+
+
 def label_names(record: dict[str, Any]) -> list[str]:
     labels = record.get("labels", [])
     if not isinstance(labels, list):
@@ -442,41 +427,18 @@ def status_label(status: str) -> str:
 
 
 def parse_touches(body: str) -> list[str]:
-    inline = re.findall(r"(?im)^\s*touches:\s*(.+?)\s*$", body or "")
-    sections = re.findall(r"(?ims)^###\s+touches:\s*$\n(.*?)(?=^#{1,3}\s+|\Z)", body or "")
-    declarations = [*inline, *(section.strip() for section in sections)]
-    if len(declarations) != 1:
-        raise KernelError("issue must contain exactly one touches: declaration")
-    declaration = declarations[0]
-    if len(declaration.splitlines()) != 1:
-        raise KernelError("touches: declaration must be a single line")
-    paths = [part.strip() for part in declaration.split(",") if part.strip()]
-    if not paths:
-        raise KernelError("touches: must declare at least one path")
-    if any(not safe_declared_path(path) for path in paths):
-        raise KernelError("touches: contains an unsafe path")
-    return paths
+    try:
+        return _parse_touches(body)
+    except TouchesError as exc:
+        raise KernelError(str(exc)) from exc
 
 
 def safe_declared_path(value: str) -> bool:
-    if "\\" in value or value.startswith(("/", "~", "-")):
-        return False
-    raw = value[:-3] if value.endswith("/**") else value
-    path = PurePosixPath(raw)
-    return bool(raw and raw != "." and ".." not in path.parts)
+    return _safe_declared_path(value)
 
 
 def path_allowed(path: str, declared: Iterable[str]) -> bool:
-    candidate = PurePosixPath(path).as_posix()
-    if candidate.startswith("./"):
-        candidate = candidate[2:]
-    if not safe_declared_path(candidate):
-        return False
-    for rule in declared:
-        prefix = rule[:-3].rstrip("/") if rule.endswith("/**") else None
-        if candidate == rule or (prefix and (candidate == prefix or candidate.startswith(prefix + "/"))):
-            return True
-    return False
+    return _path_allowed(path, declared)
 
 
 def acceptance_items(body: str) -> list[tuple[bool, str]]:
@@ -791,6 +753,14 @@ def set_status(
                 f"{rollback_error}; original item-edit failure: {item_error}"
             ) from rollback_error
         raise
+    settled_issue = status_of(issue(number, cwd=cwd))
+    settled_project = project_item_status(number, cwd=cwd)
+    if settled_issue != status or settled_project != status:
+        raise KernelError(
+            f"issue #{number} status transition did not settle: issue "
+            f"{settled_issue!r}, Project card {settled_project!r}, expected "
+            f"{status!r}; stop and reconcile GitHub authority"
+        )
 
 
 def json_print(data: Any) -> None:

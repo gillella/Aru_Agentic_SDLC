@@ -1,0 +1,43 @@
+name: Aru governed pull request
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+concurrency:
+  group: aru-governed-pr-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  governed-pr:
+    name: aru-governed-pr
+    if: ${{ github.event_name == 'merge_group' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the exact pull-request head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run repository-owned affected verification
+        run: bash .aru/verify.sh
+
+      - name: Enforce the issue write boundary against the actual diff
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARU_PR_NUMBER: ${{ github.event.pull_request.number }}
+          ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python .aru/hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
+          --expected-head "$ARU_EXPECTED_HEAD"

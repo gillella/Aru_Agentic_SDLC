@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The sole fail-closed merge and close-out authority."""
+"""The governed fail-closed merge and close-out helper."""
 
 from __future__ import annotations
 
@@ -21,25 +21,42 @@ from common import (
     REVIEW_AUTHORITIES,
     REVIEW_SERVICES,
     KernelError,
-    acceptance_items,
     gh_paginated,
     gh_json,
-    issue,
     json_print,
     label_names,
     same_github_actor,
+    review_risk_tier,
     review_evidence_unavailable,
     repo_slug,
     run,
-    set_status,
-    status_of,
 )
 from fetch_pr_feedback import fetch_feedback
+from merge_state import (
+    base_snapshot,
+    close_out,
+    issue_gate,
+    linked_issues,
+    merge_queue_snapshot,
+    pull_changed_paths,
+    pull_request,
+)
+from review_evidence import (
+    UNAVAILABLE,
+    authority_assigned_at,
+    evidence_time,
+    external_state,
+)
 
 REVIEW_ACTORS = {
     "coderabbit": {"coderabbitai", "coderabbitai[bot]"},
     "sourcery": {"sourcery-ai", "sourcery-ai[bot]", "sourcery"},
     "codeant": {"codeant-ai", "codeant-ai[bot]"},
+}
+REVIEW_APP_SLUGS = {
+    "coderabbit": {"coderabbitai"},
+    "sourcery": {"sourcery-ai", "sourcery"},
+    "codeant": {"codeant-ai", "codeant"},
 }
 CODEANT_STATUS_MARKER_RE = re.compile(
     r"<!--\s*codeant-review-status:(.*?)-->", re.DOTALL
@@ -47,10 +64,7 @@ CODEANT_STATUS_MARKER_RE = re.compile(
 CODEANT_MARKER_PREFIX_RE = re.compile(r"<!--\s*codeant-review-status", re.IGNORECASE)
 CODEANT_STATUS_RECORD_KEYS = {"label", "commit", "started", "finished", "done"}
 CODEANT_FULL_REVIEW_LABEL = "Reviewed your PR"
-CODEANT_STATUS_LABELS = {
-    CODEANT_FULL_REVIEW_LABEL,
-    "Incremental review completed",
-}
+CODEANT_STATUS_LABELS = {CODEANT_FULL_REVIEW_LABEL, "Incremental review completed"}
 CODING_REVIEW_MARKER_RE = re.compile(
     r"<!--\s*aru-coding-review:v1\s+(.*?)-->", re.DOTALL
 )
@@ -97,30 +111,6 @@ def _actor_is_trusted(actor: Any, service: str) -> bool:
     return True
 
 
-def pull_request(number: int) -> dict[str, Any]:
-    data = gh_json(
-        [
-            "pr",
-            "view",
-            str(number),
-            "--json",
-            (
-                "number,title,body,state,isDraft,headRefOid,headRefName,baseRefName,"
-                "mergeStateStatus,labels,statusCheckRollup,reviewDecision,author,url,"
-                "mergedAt,mergeCommit"
-            ),
-        ]
-    )
-    if not isinstance(data, dict) or data.get("number") != number:
-        raise KernelError(f"pull request #{number} is unavailable")
-    return data
-
-
-def linked_issues(body: str) -> list[int]:
-    pattern = r"(?im)^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\s*$"
-    return sorted({int(value) for value in re.findall(pattern, body or "")})
-
-
 def assigned_service(pr: dict[str, Any]) -> str:
     labels = [name for name in label_names(pr) if name.startswith(REVIEW_PREFIX)]
     if len(labels) != 1:
@@ -155,40 +145,44 @@ def review_check_matches(record: dict[str, Any], service: str) -> bool:
     return name in aliases
 
 
-def successful_service_check(pr: dict[str, Any], service: str) -> bool:
-    rollup = pr.get("statusCheckRollup")
-    if not isinstance(rollup, list):
+def successful_service_check(
+    pr: dict[str, Any],
+    service: str,
+    checks: list[dict[str, Any]],
+    assigned_at: datetime,
+) -> bool:
+    head = str(pr.get("headRefOid") or "")
+    summary = pr.get("statusCheckRollup")
+    if not isinstance(summary, list):
         raise KernelError("review check state is incomplete")
+    summarized = [
+        record
+        for record in summary
+        if isinstance(record, dict) and review_check_matches(record, service)
+    ]
+    if len(summarized) > 1:
+        raise KernelError("assigned review service returned ambiguous checks")
+    if len(summarized) != 1 or check_state(summarized[0]) != "success":
+        return False
     matches = [
         record
-        for record in rollup
-        if isinstance(record, dict) and review_check_matches(record, service)
+        for record in checks
+        if review_check_matches(record, service)
     ]
     if len(matches) > 1:
         raise KernelError("assigned review service returned ambiguous checks")
-    if len(matches) != 1 or check_state(matches[0]) != "success":
+    if len(matches) != 1:
         return False
-    statuses = [
-        record
-        for record in review_statuses(str(pr.get("headRefOid") or ""))
-        if review_check_matches(record, service)
-    ]
-    if not statuses:
-        return True
-    timestamps = [
-        str(record.get("updated_at") or record.get("created_at") or "")
-        for record in statuses
-    ]
-    if any(not timestamp for timestamp in timestamps):
-        raise KernelError("assigned review service status timestamp is incomplete")
-    latest = max(timestamps)
-    current = [
-        record for record, timestamp in zip(statuses, timestamps) if timestamp == latest
-    ]
-    states = {
-        (check_state(record), review_evidence_unavailable(record)) for record in current
-    }
-    return states == {("success", False)}
+    match = matches[0]
+    app = match.get("app")
+    return bool(
+        isinstance(app, dict)
+        and app.get("slug") in REVIEW_APP_SLUGS[service]
+        and match.get("head_sha") == head
+        and check_state(match) == "success"
+        and not review_evidence_unavailable(match)
+        and evidence_time(match, subject="external reviewer check") >= assigned_at
+    )
 
 
 def pull_reviews(number: int) -> list[dict[str, Any]]:
@@ -201,13 +195,37 @@ def pull_comments(number: int) -> list[dict[str, Any]]:
     return gh_paginated(f"repos/{slug}/issues/{number}/comments?per_page=100")
 
 
-def review_statuses(head: str) -> list[dict[str, Any]]:
+def pull_events(number: int) -> list[dict[str, Any]]:
     slug = repo_slug()
-    return gh_paginated(f"repos/{slug}/commits/{head}/statuses?per_page=100")
+    return gh_paginated(f"repos/{slug}/issues/{number}/events?per_page=100")
+
+
+def pull_review_checks(head: str) -> list[dict[str, Any]]:
+    pages = gh_json(
+        [
+            "api", "--paginate", "--slurp",
+            f"repos/{repo_slug()}/commits/{head}/check-runs?per_page=100&filter=latest",
+        ]
+    )
+    if (
+        not isinstance(pages, list)
+        or any(not isinstance(page, dict) for page in pages)
+        or any(not isinstance(page.get("check_runs"), list) for page in pages)
+    ):
+        raise KernelError("review check-run inventory is malformed")
+    checks = [record for page in pages for record in page["check_runs"]]
+    totals = {page.get("total_count") for page in pages}
+    if (
+        any(not isinstance(record, dict) for record in checks)
+        or len(totals) != 1
+        or totals.pop() != len(checks)
+    ):
+        raise KernelError("review check-run inventory is incomplete")
+    return checks
 
 
 def _successful_service_review(
-    reviews: list[dict[str, Any]], head: str, service: str
+    reviews: list[dict[str, Any]], head: str, service: str, assigned_at: datetime
 ) -> bool:
     approved = []
     for review in reviews:
@@ -219,17 +237,21 @@ def _successful_service_review(
             state = str(review.get("state") or "").upper()
             if state == "CHANGES_REQUESTED":
                 return False
-            if state == "APPROVED":
+            if (
+                state == "APPROVED"
+                and not review_evidence_unavailable(review)
+                and evidence_time(review, subject="external reviewer evidence")
+                >= assigned_at
+            ):
                 approved.append(review)
     return bool(approved)
 
 
-def successful_service_review(number: int, head: str, service: str) -> bool:
-    return _successful_service_review(pull_reviews(number), head, service)
-
-
 def _trusted_changes_requested_at_head(
-    reviews: list[dict[str, Any]], head: str, service: str
+    reviews: list[dict[str, Any]],
+    head: str,
+    service: str,
+    assigned_at: datetime,
 ) -> bool:
     for review in reviews:
         if not isinstance(review, dict):
@@ -237,14 +259,21 @@ def _trusted_changes_requested_at_head(
         actor = review.get("user") or review.get("author")
         commit_id = review.get("commit_id") or (review.get("commit") or {}).get("oid")
         state = str(review.get("state") or "").upper()
-        if _actor_is_trusted(actor, service) and commit_id == head:
+        if (
+            _actor_is_trusted(actor, service)
+            and commit_id == head
+            and evidence_time(review, subject="external reviewer evidence")
+            >= assigned_at
+        ):
             if state == "CHANGES_REQUESTED":
                 return True
     return False
 
 
-def trusted_codeant_review_history(reviews: list[dict[str, Any]], head: str) -> bool:
-    if _trusted_changes_requested_at_head(reviews, head, "codeant"):
+def trusted_codeant_review_history(
+    reviews: list[dict[str, Any]], head: str, assigned_at: datetime
+) -> bool:
+    if _trusted_changes_requested_at_head(reviews, head, "codeant", assigned_at):
         return False
     for review in reviews:
         actor = review.get("user") or review.get("author")
@@ -255,6 +284,8 @@ def trusted_codeant_review_history(reviews: list[dict[str, Any]], head: str) -> 
             and isinstance(commit_id, str)
             and re.fullmatch(r"[0-9a-fA-F]{40}", commit_id)
             and state in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
+            and evidence_time(review, subject="external reviewer evidence")
+            >= assigned_at
         ):
             return True
     return False
@@ -298,12 +329,19 @@ def parse_codeant_status_payload(
     return True, payload
 
 
-def validate_codeant_status_comments(comments: list[dict[str, Any]], head: str) -> bool:
+def validate_codeant_status_comments(
+    comments: list[dict[str, Any]], head: str, assigned_at: datetime
+) -> bool:
     trusted_payloads: list[list[dict[str, Any]]] = []
     for comment in comments:
         if not isinstance(comment, dict):
             raise KernelError("comment evidence is malformed")
+        actor = comment.get("user") or comment.get("author")
         valid, payload = parse_codeant_status_payload(comment)
+        if _actor_is_trusted(actor, "codeant") and (not valid or payload is not None) and (
+            evidence_time(comment, subject="external reviewer evidence") < assigned_at
+        ):
+            continue
         if not valid:
             return False
         if payload is not None:
@@ -319,6 +357,7 @@ def validate_codeant_status_comments(comments: list[dict[str, Any]], head: str) 
         for record in records
         if record["label"] == CODEANT_FULL_REVIEW_LABEL
         and record["commit"].lower() == head.lower()
+        and _parse_ts(record["finished"]) >= assigned_at
     ]
     if len(full_head_records) != 1:
         return False
@@ -326,13 +365,14 @@ def validate_codeant_status_comments(comments: list[dict[str, Any]], head: str) 
 
 
 def successful_codeant_status_review(
-    number: int, head: str, reviews: list[dict[str, Any]] | None = None
+    head: str,
+    reviews: list[dict[str, Any]],
+    comments: list[dict[str, Any]],
+    assigned_at: datetime,
 ) -> bool:
-    reviews = pull_reviews(number) if reviews is None else reviews
-    if not trusted_codeant_review_history(reviews, head):
+    if not trusted_codeant_review_history(reviews, head, assigned_at):
         return False
-    comments = pull_comments(number)
-    return validate_codeant_status_comments(comments, head)
+    return validate_codeant_status_comments(comments, head, assigned_at)
 
 
 def _one_identity_label(pr: dict[str, Any], prefix: str) -> str | None:
@@ -530,45 +570,38 @@ def exact_head_review(
             issue_numbers or linked_issues(str(pr.get("body") or "")),
         )
     reviews = pull_reviews(number)
-    if _trusted_changes_requested_at_head(reviews, head, service):
+    comments = pull_comments(number)
+    events = pull_events(number)
+    checks = pull_review_checks(head)
+    assigned_at = authority_assigned_at(pr, events, service)
+    if external_state(
+        service,
+        reviews=reviews,
+        comments=comments,
+        checks=checks,
+        head=head,
+        since=assigned_at,
+    ) == UNAVAILABLE:
         return False
-    if service == "codeant":
-        if successful_service_check(pr, service) or _successful_service_review(
-            reviews, head, service
-        ):
-            return True
-        return successful_codeant_status_review(number, head, reviews)
-    if successful_service_check(pr, service) or _successful_service_review(reviews, head, service):
+    if _trusted_changes_requested_at_head(reviews, head, service, assigned_at):
+        return False
+    if _successful_service_review(reviews, head, service, assigned_at):
         return True
-    return False
+    if service == "codeant":
+        if successful_codeant_status_review(head, reviews, comments, assigned_at):
+            return True
+    return successful_service_check(pr, service, checks, assigned_at)
 
 
-def base_snapshot(pr: dict[str, Any]) -> tuple[str, int]:
-    slug = repo_slug()
-    base = str(pr["baseRefName"])
-    head = str(pr["headRefOid"])
-    commit = gh_json(["api", f"repos/{slug}/commits/{base}"])
-    compare = gh_json(["api", f"repos/{slug}/compare/{base}...{head}"])
-    base_sha = commit.get("sha") if isinstance(commit, dict) else None
-    behind = compare.get("behind_by") if isinstance(compare, dict) else None
-    if not isinstance(base_sha, str) or len(base_sha) != 40 or not isinstance(behind, int):
-        raise KernelError("base comparison is incomplete")
-    return base_sha, behind
-
-
-def issue_gate(numbers: list[int]) -> list[dict[str, object]]:
-    if not numbers:
-        raise KernelError("PR body must contain a closing issue directive")
-    evidence: list[dict[str, object]] = []
-    for number in numbers:
-        record = issue(number)
-        items = acceptance_items(str(record.get("body") or ""))
-        if status_of(record) != "In Review":
-            raise KernelError(f"issue #{number} is not In Review")
-        if not items or any(not done for done, _ in items):
-            raise KernelError(f"issue #{number} has incomplete Acceptance Criteria")
-        evidence.append({"issue": number, "criteria": len(items)})
-    return evidence
+def require_mergeable(pr: dict[str, Any], queue: dict[str, object]) -> None:
+    submitted = queue["entry"] is not None or queue["auto_merge"] is not None
+    merge_state = pr.get("mergeStateStatus")
+    if not submitted and pr.get("mergeable") != "MERGEABLE":
+        raise KernelError("PR is not currently mergeable")
+    allowed = merge_state in {"CLEAN", "UNSTABLE"}
+    queued_behind = merge_state == "BEHIND" and bool(queue["configured"])
+    if not allowed and not queued_behind and not submitted:
+        raise KernelError(f"PR merge state is {merge_state}")
 
 
 def evaluate(number: int, expected_head: str) -> dict[str, object]:
@@ -576,31 +609,39 @@ def evaluate(number: int, expected_head: str) -> dict[str, object]:
     if pr.get("state") != "OPEN" or pr.get("isDraft"):
         raise KernelError("PR is not an open, ready pull request")
     head = pr.get("headRefOid")
-    if head != expected_head or not isinstance(head, str) or len(head) != 40:
+    if (
+        head != expected_head
+        or not isinstance(head, str)
+        or not re.fullmatch(r"[0-9a-fA-F]{40}", head)
+    ):
         raise KernelError("expected head does not match the current PR head")
-    if pr.get("mergeStateStatus") not in {"CLEAN", "HAS_HOOKS", "UNSTABLE"}:
-        raise KernelError(f"PR merge state is {pr.get('mergeStateStatus')}")
+    base_sha = base_snapshot(pr)
+    queue = merge_queue_snapshot(number, expected_head, base_sha)
+    require_mergeable(pr, queue)
 
+    changed_paths = pull_changed_paths(number)
+    risk_tier = review_risk_tier(changed_paths)
     issues = linked_issues(str(pr.get("body") or ""))
-    issue_evidence = issue_gate(issues)
+    issue_evidence = issue_gate(issues, changed_paths)
     ci = ci_verdict(number)
     if ci["head"] != head or ci["state"] != "success":
-        raise KernelError("exact-current-head focused local verification is not successful")
+        raise KernelError("exact-current-head required GitHub checks are not successful")
     feedback = fetch_feedback(number)
     if feedback:
         raise KernelError(f"{len(feedback)} unresolved review thread(s)")
-    service = assigned_service(pr)
-    if service in CODING_REVIEWERS:
-        verdict = coding_review_verdict(pr, pull_reviews(number), service, issues)
-        if verdict == "REQUEST_CHANGES":
-            raise KernelError(f"{service} exact-head authoritative review requested changes")
-        if verdict != "APPROVE":
+    if pr.get("reviewDecision") == "CHANGES_REQUESTED":
+        raise KernelError("a submitted review still requests changes")
+    service: str | None = None
+    if risk_tier >= 2:
+        service = assigned_service(pr)
+        if service in CODING_REVIEWERS:
+            verdict = coding_review_verdict(pr, pull_reviews(number), service, issues)
+            if verdict == "REQUEST_CHANGES":
+                raise KernelError(f"{service} exact-head authoritative review requested changes")
+            if verdict != "APPROVE":
+                raise KernelError(f"{service} has no successful exact-head verdict")
+        elif not exact_head_review(pr, number, service, issues):
             raise KernelError(f"{service} has no successful exact-head verdict")
-    elif not exact_head_review(pr, number, service, issues):
-        raise KernelError(f"{service} has no successful exact-head verdict")
-    base_sha, behind = base_snapshot(pr)
-    if behind:
-        raise KernelError(f"PR head is behind {pr['baseRefName']} by {behind} commit(s)")
     return {
         "pr": number,
         "head": head,
@@ -608,54 +649,103 @@ def evaluate(number: int, expected_head: str) -> dict[str, object]:
         "base_sha": base_sha,
         "branch": pr["headRefName"],
         "issues": issue_evidence,
+        "changed_paths": changed_paths,
+        "risk_tier": risk_tier,
         "ci": ci["checks"],
-        "reviewer": service,
+        "reviewer": service or "not-required",
         "feedback": 0,
+        "merge_queue": queue["configured"],
+        "queue_entry": queue["entry"],
+        "auto_merge": queue["auto_merge"],
     }
-
-
-def close_out(numbers: list[int]) -> None:
-    for number in numbers:
-        record = issue(number)
-        set_status(number, "Done")
-        if record.get("state") != "CLOSED":
-            run(["gh", "issue", "close", str(number), "--reason", "completed"])
 
 
 def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str, object]:
     gates = evaluate(number, expected_head)
     if dry_run:
         return {"merged": False, "gates": gates}
-
-    live = pull_request(number)
-    if live.get("headRefOid") != expected_head:
-        raise KernelError("PR head changed after gate evaluation")
-    current_base, behind = base_snapshot(live)
-    if current_base != gates["base_sha"] or behind:
-        raise KernelError("base changed after gate evaluation")
-    run(
-        [
-            "gh",
-            "pr",
-            "merge",
-            str(number),
-            "--merge",
-            "--delete-branch",
-            "--match-head-commit",
-            expected_head,
-        ]
-    )
-    merged = pull_request(number)
-    if not merged.get("mergedAt") or merged.get("headRefOid") != expected_head:
-        raise KernelError("GitHub did not confirm the expected-head merge")
     issue_numbers = [int(item["issue"]) for item in gates["issues"]]
-    close_out(issue_numbers)
+    if gates["queue_entry"] is not None or gates["auto_merge"] is not None:
+        return {
+            "merged": False,
+            "queued": gates["queue_entry"] is not None,
+            "auto_merge": gates["auto_merge"] is not None,
+            "pr": number,
+            "head": expected_head,
+            "issues": issue_numbers,
+            "next_action": "finalize-queued-merge",
+        }
+    live_gates = evaluate(number, expected_head)
+    if live_gates != gates:
+        raise KernelError("merge authority changed during final gate evaluation")
+    command = ["gh", "pr", "merge", str(number)]
+    if not gates["merge_queue"]:
+        command.append("--merge")
+    command.extend(["--delete-branch", "--match-head-commit", expected_head])
+    run(command)
+    merged = pull_request(number)
+    if merged.get("headRefOid") != expected_head:
+        raise KernelError("PR head changed during merge submission")
+    if not merged.get("mergedAt"):
+        if not gates["merge_queue"]:
+            raise KernelError("GitHub did not confirm the expected-head merge")
+        queued = merge_queue_snapshot(number, expected_head, str(gates["base_sha"]))
+        if queued["entry"] is None and queued["auto_merge"] is None:
+            raise KernelError("GitHub did not confirm merge-queue or auto-merge submission")
+        return {
+            "merged": False,
+            "queued": queued["entry"] is not None,
+            "auto_merge": queued["auto_merge"] is not None,
+            "pr": number,
+            "head": expected_head,
+            "issues": issue_numbers,
+            "next_action": "finalize-queued-merge",
+        }
+    return finalize_queued(number, expected_head)
+
+
+def finalize_queued(number: int, expected_head: str) -> dict[str, object]:
+    pr = pull_request(number)
+    if pr.get("state") != "MERGED" or not pr.get("mergedAt"):
+        raise KernelError("queued PR has not merged yet")
+    if pr.get("headRefOid") != expected_head:
+        raise KernelError("expected head does not match the merged PR head")
+    merge_commit = (pr.get("mergeCommit") or {}).get("oid")
+    if not isinstance(merge_commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", merge_commit):
+        raise KernelError("merged PR has no exact merge commit")
+    changed_paths = pull_changed_paths(number)
+    numbers = linked_issues(str(pr.get("body") or ""))
+    issue_gate(
+        numbers, changed_paths, allow_closed=True, allow_done=True
+    )
+    ci = ci_verdict(number)
+    if ci["head"] != expected_head or ci["state"] != "success":
+        raise KernelError("exact-head required GitHub checks are not successful")
+    feedback = fetch_feedback(number)
+    if feedback:
+        raise KernelError(f"{len(feedback)} unresolved post-queue review thread(s)")
+    if pr.get("reviewDecision") == "CHANGES_REQUESTED":
+        raise KernelError("a submitted post-queue review requests changes")
+    risk_tier = review_risk_tier(changed_paths)
+    service: str | None = None
+    if risk_tier >= 2:
+        service = assigned_service(pr)
+        if service in CODING_REVIEWERS:
+            verdict = coding_review_verdict(pr, pull_reviews(number), service, numbers)
+            if verdict != "APPROVE":
+                raise KernelError(f"{service} post-queue exact-head review is not approved")
+        elif not exact_head_review(pr, number, service, numbers):
+            raise KernelError(f"{service} post-queue exact-head review is not approved")
+    evidence = close_out(numbers, changed_paths)
     return {
         "merged": True,
+        "finalized": True,
         "pr": number,
         "head": expected_head,
-        "merge_commit": (merged.get("mergeCommit") or {}).get("oid"),
-        "issues": issue_numbers,
+        "merge_commit": merge_commit,
+        "issues": [int(item["issue"]) for item in evidence],
+        "risk_tier": risk_tier,
+        "reviewer": service or "not-required",
     }
 
 
@@ -664,16 +754,26 @@ def main() -> int:
     parser.add_argument("--pr", type=int, required=True)
     parser.add_argument("--expected-head", required=True)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--finalize", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
     try:
-        result = merge(args.pr, args.expected_head, dry_run=args.dry_run)
+        if args.finalize and args.dry_run:
+            raise KernelError("--finalize and --dry-run cannot be combined")
+        result = (
+            finalize_queued(args.pr, args.expected_head)
+            if args.finalize
+            else merge(args.pr, args.expected_head, dry_run=args.dry_run)
+        )
     except KernelError as exc:
         parser.error(str(exc))
     if args.json:
         json_print(result)
     else:
-        print("merge gates passed" if args.dry_run else f"merged PR #{args.pr}")
+        message = f"finalized PR #{args.pr}" if args.finalize else "merge gates passed" if args.dry_run else (
+            f"merged PR #{args.pr}" if result["merged"] else f"submitted PR #{args.pr} for GitHub merge"
+        )
+        print(message)
     return 0
 
 

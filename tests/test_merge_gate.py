@@ -11,12 +11,16 @@ def base_pr(**overrides):
     pr = {
         "number": 10,
         "body": "Closes #7",
+        "createdAt": "2026-08-27T09:00:00Z",
         "state": "OPEN",
         "isDraft": False,
         "headRefOid": "a" * 40,
         "headRefName": "feat/issue-7-change",
         "baseRefName": "main",
+        "baseRefOid": "b" * 40,
+        "mergeable": "MERGEABLE",
         "mergeStateStatus": "CLEAN",
+        "reviewDecision": None,
         "labels": [{"name": "review:coderabbit"}],
         "statusCheckRollup": [{"context": "CodeRabbit", "state": "SUCCESS"}],
     }
@@ -27,15 +31,14 @@ def base_pr(**overrides):
 def install_happy_gate(monkeypatch, pr=None):
     pr = pr or base_pr()
     monkeypatch.setattr(merge_pr, "pull_request", lambda _number: pr)
-    monkeypatch.setattr(merge_pr, "issue_gate", lambda _numbers: [{"issue": 7, "criteria": 1}])
-    monkeypatch.setattr(
-        merge_pr,
-        "ci_verdict",
-        lambda _number: {"head": "a" * 40, "state": "success", "checks": ["Verify"]},
-    )
+    monkeypatch.setattr(merge_pr, "pull_changed_paths", lambda _number: ["scripts/merge_pr.py"])
+    monkeypatch.setattr(merge_pr, "review_risk_tier", lambda _paths: 2)
+    monkeypatch.setattr(merge_pr, "issue_gate", lambda *_args: [{"issue": 7, "criteria": 1}])
+    monkeypatch.setattr(merge_pr, "ci_verdict", lambda _n: {"head": "a" * 40, "state": "success", "checks": ["Verify"]})
     monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _number: [])
     monkeypatch.setattr(merge_pr, "exact_head_review", lambda *_args: True)
-    monkeypatch.setattr(merge_pr, "base_snapshot", lambda _pr: ("b" * 40, 0))
+    monkeypatch.setattr(merge_pr, "base_snapshot", lambda _pr: "b" * 40)
+    monkeypatch.setattr(merge_pr, "merge_queue_snapshot", lambda *_args: {"configured": False, "entry": None, "auto_merge": None})
     return pr
 
 
@@ -62,38 +65,98 @@ def test_evaluate_blocks_missing_review(monkeypatch):
         merge_pr.evaluate(10, "a" * 40)
 
 
-def test_evaluate_blocks_stale_local_verification(monkeypatch):
+def test_evaluate_blocks_missing_required_github_check(monkeypatch):
     install_happy_gate(monkeypatch)
     monkeypatch.setattr(
         merge_pr,
         "ci_verdict",
         lambda _number: {"head": "a" * 40, "state": "pending", "checks": []},
     )
-    with pytest.raises(merge_pr.KernelError, match="focused local verification"):
+    with pytest.raises(merge_pr.KernelError, match="required GitHub checks"):
         merge_pr.evaluate(10, "a" * 40)
 
 
 def test_merge_rechecks_head_and_base(monkeypatch):
     pr = install_happy_gate(monkeypatch)
+    gates = {
+        "head": "a" * 40,
+        "base_sha": "b" * 40,
+        "issues": [{"issue": 7}],
+        "merge_queue": False,
+        "queue_entry": None,
+        "auto_merge": None,
+    }
+    evaluations = []
     monkeypatch.setattr(
         merge_pr,
         "evaluate",
-        lambda *_args: {
-            "head": "a" * 40,
-            "base_sha": "b" * 40,
-            "issues": [{"issue": 7}],
-        },
+        lambda *_args: evaluations.append(True) or gates,
     )
     calls = []
     monkeypatch.setattr(merge_pr, "run", lambda argv: calls.append(argv))
     monkeypatch.setattr(merge_pr, "close_out", lambda numbers: calls.append(["close", *numbers]))
-    snapshots = iter([pr, {**pr, "mergedAt": "now", "mergeCommit": {"oid": "c" * 40}}])
-    monkeypatch.setattr(merge_pr, "pull_request", lambda _number: next(snapshots))
-    monkeypatch.setattr(merge_pr, "base_snapshot", lambda _pr: ("b" * 40, 0))
+    monkeypatch.setattr(
+        merge_pr,
+        "pull_request",
+        lambda _number: {**pr, "mergedAt": "now", "mergeCommit": {"oid": "c" * 40}},
+    )
+    monkeypatch.setattr(
+        merge_pr,
+        "finalize_queued",
+        lambda number, head: calls.append(["finalize", number, head])
+        or {
+            "merged": True,
+            "finalized": True,
+            "pr": number,
+            "head": head,
+            "merge_commit": "c" * 40,
+            "issues": [7],
+        },
+    )
     result = merge_pr.merge(10, "a" * 40)
     assert result["merged"] is True
+    assert len(evaluations) == 2
     assert "--match-head-commit" in calls[0]
-    assert calls[-1] == ["close", 7]
+    assert calls[-1] == ["finalize", 10, "a" * 40]
+
+
+def test_immediate_merge_does_not_close_out_when_post_merge_evidence_drifts(
+    monkeypatch,
+):
+    pr = install_happy_gate(monkeypatch)
+    snapshots = iter(
+        [
+            pr,
+            pr,
+            {
+                **pr,
+                "state": "MERGED",
+                "mergedAt": "now",
+                "mergeCommit": {"oid": "c" * 40},
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        merge_pr,
+        "pull_request",
+        lambda _number: next(snapshots),
+    )
+    monkeypatch.setattr(merge_pr, "run", lambda _argv: None)
+    monkeypatch.setattr(
+        merge_pr,
+        "finalize_queued",
+        lambda *_args: (_ for _ in ()).throw(
+            merge_pr.KernelError("post-merge authority changed")
+        ),
+    )
+    monkeypatch.setattr(
+        merge_pr,
+        "close_out",
+        lambda _numbers: pytest.fail("drifted post-merge evidence must stay In Review"),
+    )
+
+    with pytest.raises(merge_pr.KernelError, match="post-merge authority changed"):
+        merge_pr.merge(10, "a" * 40)
 
 
 def test_review_label_must_be_unique():
@@ -141,6 +204,7 @@ def make_codeant_comment(
     return {
         "id": 1,
         "body": body,
+        "created_at": "2026-08-27T10:05:00Z",
         "user": {"login": login, "type": actor_type},
     }
 
@@ -155,6 +219,7 @@ def make_review(
         "id": 1,
         "commit_id": commit_id,
         "state": state,
+        "submitted_at": "2026-08-27T10:05:00Z",
         "user": {"login": login, "type": actor_type},
     }
 
@@ -167,14 +232,17 @@ def install_codeant_pr(monkeypatch, head: str, pr_number: int = 146, feedback: l
         statusCheckRollup=[],
     )
     monkeypatch.setattr(merge_pr, "pull_request", lambda _number: pr)
-    monkeypatch.setattr(merge_pr, "issue_gate", lambda _numbers: [{"issue": 7, "criteria": 1}])
-    monkeypatch.setattr(
-        merge_pr,
-        "ci_verdict",
-        lambda _number: {"head": head, "state": "success", "checks": ["Verify"]},
-    )
+    monkeypatch.setattr(merge_pr, "pull_changed_paths", lambda _number: ["scripts/merge_pr.py"])
+    monkeypatch.setattr(merge_pr, "review_risk_tier", lambda _paths: 2)
+    monkeypatch.setattr(merge_pr, "issue_gate", lambda *_args: [{"issue": 7, "criteria": 1}])
+    monkeypatch.setattr(merge_pr, "ci_verdict", lambda _n: {"head": head, "state": "success", "checks": ["Verify"]})
     monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _number: feedback or [])
-    monkeypatch.setattr(merge_pr, "base_snapshot", lambda _pr: ("b" * 40, 0))
+    monkeypatch.setattr(merge_pr, "base_snapshot", lambda _pr: "b" * 40)
+    monkeypatch.setattr(merge_pr, "merge_queue_snapshot", lambda *_args: {"configured": False, "entry": None, "auto_merge": None})
+    monkeypatch.setattr(merge_pr, "pull_events", lambda _number: [])
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [])
+    monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [])
+    monkeypatch.setattr(merge_pr, "pull_review_checks", lambda _head: [])
     return pr
 
 
@@ -724,69 +792,3 @@ def test_codeant_blocks_on_unresolved_feedback(monkeypatch):
 
     with pytest.raises(merge_pr.KernelError, match="1 unresolved review thread"):
         merge_pr.evaluate(146, head)
-
-
-def test_preserve_coderabbit_and_sourcery_evidence_paths(monkeypatch):
-    head = "a" * 40
-    # 1. CodeRabbit check success
-    pr_cr = base_pr(labels=[{"name": "review:coderabbit"}], statusCheckRollup=[{"context": "CodeRabbit", "state": "SUCCESS"}])
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [])
-    monkeypatch.setattr(
-        merge_pr,
-        "review_statuses",
-        lambda _head: [
-            {
-                "context": "CodeRabbit",
-                "state": "success",
-                "description": "Review completed",
-                "created_at": "2026-08-27T12:00:00Z",
-            }
-        ],
-    )
-    assert merge_pr.exact_head_review(pr_cr, 10, "coderabbit") is True
-
-    # 2. Sourcery APPROVED review
-    pr_sc = base_pr(labels=[{"name": "review:sourcery"}], statusCheckRollup=[])
-    sourcery_approved = make_review(commit_id=head, state="APPROVED", login="sourcery-ai[bot]", actor_type="Bot")
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [sourcery_approved])
-    assert merge_pr.exact_head_review(pr_sc, 10, "sourcery") is True
-
-    # 3. CodeAnt APPROVED review
-    pr_ca = base_pr(labels=[{"name": "review:codeant"}], statusCheckRollup=[])
-    codeant_approved = make_review(commit_id=head, state="APPROVED", login="codeant-ai[bot]", actor_type="Bot")
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [codeant_approved])
-    assert merge_pr.exact_head_review(pr_ca, 10, "codeant") is True
-
-    # 4. Human APPROVED review does not satisfy coderabbit or codeant
-    pr_cr_no_check = base_pr(labels=[{"name": "review:coderabbit"}], statusCheckRollup=[])
-    human_approved = make_review(commit_id=head, state="APPROVED", login="human-reviewer", actor_type="User")
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [human_approved])
-    monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [])
-    assert merge_pr.exact_head_review(pr_cr_no_check, 10, "coderabbit") is False
-    assert merge_pr.exact_head_review(pr_ca, 10, "codeant") is False
-
-    # 5. Sourcery conflicting APPROVED + CHANGES_REQUESTED review fails
-    sourcery_changes = make_review(commit_id=head, state="CHANGES_REQUESTED", login="sourcery-ai[bot]", actor_type="Bot")
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [sourcery_approved, sourcery_changes])
-    assert merge_pr.exact_head_review(pr_sc, 10, "sourcery") is False
-
-
-def test_rate_limited_success_status_does_not_satisfy_coderabbit(monkeypatch):
-    pr = base_pr(
-        labels=[{"name": "review:coderabbit"}],
-        statusCheckRollup=[{"context": "CodeRabbit", "state": "SUCCESS"}],
-    )
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [])
-    monkeypatch.setattr(
-        merge_pr,
-        "review_statuses",
-        lambda _head: [
-            {
-                "context": "CodeRabbit",
-                "state": "success",
-                "description": "Review rate limited",
-                "created_at": "2026-08-27T12:00:00Z",
-            }
-        ],
-    )
-    assert merge_pr.exact_head_review(pr, 10, "coderabbit") is False
