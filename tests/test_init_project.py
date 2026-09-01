@@ -62,7 +62,12 @@ def test_kernel_workflow_is_read_only_exact_head_and_immutable():
     job = workflow["jobs"]["governed-pr"]
     assert job["name"] == "aru-governed-pr"
     assert job["runs-on"] == ["self-hosted", "macOS", "ARM64", "aru-ci"]
-    checkout = job["steps"][0]
+    preflight = job["steps"][0]
+    assert preflight["name"] == "Validate self-hosted runner trust boundary"
+    assert "ARU_HEAD_REPOSITORY" in preflight["env"]
+    assert "command -v python3" in preflight["run"]
+    assert "command -v gh" in preflight["run"]
+    checkout = job["steps"][1]
     assert checkout["with"]["ref"] == (
         "${{ github.event.pull_request.head.sha || github.sha }}"
     )

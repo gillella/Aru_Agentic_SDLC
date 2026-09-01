@@ -20,8 +20,10 @@ description: Bootstrap a repository with the Aru minimal issue-to-safe-merge ker
 5. With `--github`, confirm the minimal ruleset has no configured bypass actors
    and requires `aru-governed-pr` from GitHub Actions. Confirm at least one
    repository-level macOS arm64 runner with label `aru-ci` is online before
-   admitting work; the workflow has no GitHub-hosted fallback. Do not claim
-   that this portable rule makes `merge_pr.py` technically exclusive; keep
+   admitting work; the workflow has no GitHub-hosted fallback and rejects
+   cross-repository fork PRs before checkout. Confirm Python 3.11+, pip, and
+   `gh` are installed on every labeled runner. Do not claim that this portable
+   rule makes `merge_pr.py` technically exclusive; keep
    stronger security, engineering, release, and deployment controls in the
    consumer.
 6. Report generated files and any GitHub step that could not be completed.

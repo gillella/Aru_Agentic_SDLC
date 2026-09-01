@@ -117,8 +117,10 @@ runner. The default workflow does not upload artifacts or use Actions caches.
 Any storage-producing step is an explicit consumer policy choice.
 
 Runners are repository-level, maintained and patched by the operator, and used
-only for trusted governed repositories. Workflows retain read-only permissions,
-never use `pull_request_target`, and do not expose deployment secrets. Machine
+only for trusted governed repositories. Before checkout, every job rejects a
+cross-repository fork PR and proves that Python 3.11+, pip, and `gh` are on the
+runner. Workflows retain read-only permissions, never use
+`pull_request_target`, and do not expose deployment secrets. Machine
 availability, electricity, storage, operating-system maintenance, and physical
 security are operator-owned costs and responsibilities.
 

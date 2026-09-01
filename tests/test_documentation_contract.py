@@ -84,3 +84,9 @@ def test_governed_workflows_use_only_budget_free_self_hosted_macs():
         assert "actions/setup-python" not in workflow
         assert "cache:" not in workflow
         assert "pull_request_target" not in workflow
+        assert workflow.index("Validate self-hosted runner trust boundary") < workflow.index(
+            "Check out the exact pull-request head"
+        )
+        assert "Fork pull requests cannot execute" in workflow
+        assert "sys.version_info >= (3, 11)" in workflow
+        assert "command -v gh" in workflow

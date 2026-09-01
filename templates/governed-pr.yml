@@ -22,6 +22,21 @@ jobs:
     runs-on: [self-hosted, macOS, ARM64, aru-ci]
     timeout-minutes: 20
     steps:
+      - name: Validate self-hosted runner trust boundary
+        env:
+          ARU_EVENT_NAME: ${{ github.event_name }}
+          ARU_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ARU_REPOSITORY: ${{ github.repository }}
+        run: |
+          if [[ "$ARU_EVENT_NAME" == "pull_request" && "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ]]; then
+            echo "::error::Fork pull requests cannot execute on persistent self-hosted runners."
+            exit 1
+          fi
+          command -v python3
+          python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+          python3 -m pip --version
+          command -v gh
+
       - name: Check out the exact pull-request head
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

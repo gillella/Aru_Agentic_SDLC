@@ -446,7 +446,10 @@ storage consumption while retaining GitHub's orchestration, audit trail, and
 check identity. The operator owns runner patching, availability, electricity,
 disk capacity, and physical security. Use repository-level runners only for
 trusted governed repositories; keep workflow permissions read-only and never
-use `pull_request_target` for these persistent machines.
+use `pull_request_target` for these persistent machines. The first workflow
+step runs before checkout: it rejects cross-repository fork PRs and fails if
+Python 3.11+, pip, or `gh` is unavailable. Do not register an `aru-ci` label on
+a machine that fails this prerequisite.
 
 Keep `.aru/verify.sh` proportional to consumer risk:
 
