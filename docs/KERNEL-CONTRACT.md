@@ -45,7 +45,7 @@ Initial authority follows a validated repository policy declared by optional
 `review-policy:fallback-N=<authority>`, and
 `review-policy:timeout=<seconds>` label definitions. Missing declarations use
 the compatible default: first registered external provider, then the four
-coding families, with a 900-second timeout. Bootstrap authority labels do not
+coding families, with a 120-second timeout. Bootstrap authority labels do not
 register providers. Unsupported, duplicate, non-contiguous, contradictory, or
 unregistered external declarations fail closed. A coding slot must pass its
 bounded probe (verifying liveness only), and the author identity and GitHub

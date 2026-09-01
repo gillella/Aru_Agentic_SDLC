@@ -13,7 +13,7 @@ Follow the validated repository `review-policy:primary=<authority>`, contiguous
 `review-policy:fallback-N=<authority>`, and
 `review-policy:timeout=<seconds>` label definitions. Without them, use the first
 registered external provider, then Claude Code, OpenAI Codex, xAI Cursor, and
-Google Antigravity with a 900-second timeout. Inspect the effective policy with
+Google Antigravity with a 120-second timeout. Inspect the effective policy with
 `create_pr.py --reviewer-status --json`. On explicit unavailability or timeout,
 invoke `create_pr.py --refresh-reviewer <PR>` (the kernel itself has no
 scheduler) to evaluate fallbacks and smoke-test coding capacity (verifying

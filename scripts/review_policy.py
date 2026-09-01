@@ -29,7 +29,7 @@ PRIMARY_PREFIX = "review-policy:primary="
 FALLBACK_PREFIX = "review-policy:fallback-"
 TIMEOUT_PREFIX = "review-policy:timeout="
 POLICY_PREFIX = "review-policy:"
-DEFAULT_TIMEOUT_SECONDS = 15 * 60
+DEFAULT_TIMEOUT_SECONDS = 2 * 60
 MIN_TIMEOUT_SECONDS = 60
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 _FALLBACK_RE = re.compile(r"review-policy:fallback-([1-9][0-9]*)=(.+)")

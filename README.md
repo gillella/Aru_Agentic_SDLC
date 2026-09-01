@@ -219,13 +219,13 @@ review-policy:fallback-1=claude-code
 review-policy:fallback-2=openai-codex
 review-policy:fallback-3=xai-cursor
 review-policy:fallback-4=google-antigravity
-review-policy:timeout=900
+review-policy:timeout=120
 ```
 
 Fallback ranks must be contiguous, authorities must be unique and supported,
 and every referenced external authority must be registered. Missing policy
 labels preserve the compatible default: the first registered external service
-is primary, the four coding families are ordered fallbacks, and timeout is 900
+is primary, the four coding families are ordered fallbacks, and timeout is 120
 seconds. Policy declarations, external registrations, and reviewer bindings are
 repository-shared; `ARU_CODING_REVIEWERS` remains machine-local.
 

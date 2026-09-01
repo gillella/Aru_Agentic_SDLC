@@ -258,7 +258,7 @@ def _external_decision(
     pr: dict[str, Any],
     authority: str,
     observed_at: datetime,
-    timeout_seconds: int = 15 * 60,
+    timeout_seconds: int = 2 * 60,
 ) -> tuple[str, int | None]:
     slug = repo_slug()
     reviews = gh_paginated(f"repos/{slug}/pulls/{number}/reviews?per_page=100")

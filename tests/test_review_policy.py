@@ -37,7 +37,7 @@ def test_missing_policy_labels_preserve_external_first_defaults():
     )
     assert policy.primary == "coderabbit"
     assert policy.fallbacks == review_policy.CODING_REVIEWERS
-    assert policy.timeout_seconds == 900
+    assert policy.timeout_seconds == 120
     assert set(policy.sources.values()) == {"kernel-default"}
 
 

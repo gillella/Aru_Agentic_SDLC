@@ -53,7 +53,7 @@ Done. Do not create another lifecycle store.
 `review-policy:fallback-N=<authority>`, and
 `review-policy:timeout=<seconds>` label definitions. Without them, the first
 registered external provider is primary, the four coding families are ordered
-fallbacks, and timeout is 900 seconds. Referenced external reviewers require
+fallbacks, and timeout is 120 seconds. Referenced external reviewers require
 `reviewer-registered:<service>`; coding identities remain machine-local and
 bound. A coding slot must pass its bounded probe (which verifies liveness only);
 an unavailable slot advances. The author identity and GitHub actor are never

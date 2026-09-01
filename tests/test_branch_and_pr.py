@@ -143,7 +143,7 @@ def test_author_family_is_deprioritized_and_author_identity_excluded(monkeypatch
     assert calls[0][0] == "/bin/codex"
 
 
-def test_pending_external_under_15_minutes_does_not_fallback(monkeypatch):
+def test_pending_external_under_two_minutes_does_not_fallback(monkeypatch):
     created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
     pr = assignment_pr(created_at=created)
     install_refresh(monkeypatch, pr)
@@ -152,13 +152,13 @@ def test_pending_external_under_15_minutes_does_not_fallback(monkeypatch):
         "probe_coding_reviewer",
         lambda **_kwargs: pytest.fail("capacity probe must not run before timeout"),
     )
-    outcome = create_pr.refresh_assignment(42, now=created + timedelta(minutes=14, seconds=59))
+    outcome = create_pr.refresh_assignment(42, now=created + timedelta(minutes=1, seconds=59))
     assert outcome["authority"] == "coderabbit"
     assert outcome["reason"] == "external-pending"
     assert outcome["remaining_seconds"] == 1
 
 
-def test_pending_external_at_15_minutes_falls_back(monkeypatch):
+def test_pending_external_at_two_minutes_falls_back(monkeypatch):
     created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
     pr = assignment_pr(created_at=created)
     updated = [
@@ -181,7 +181,7 @@ def test_pending_external_at_15_minutes_falls_back(monkeypatch):
         "replace_authority",
         lambda *_args: events.append("replace"),
     )
-    outcome = create_pr.refresh_assignment(42, now=created + timedelta(minutes=15))
+    outcome = create_pr.refresh_assignment(42, now=created + timedelta(minutes=2))
     assert outcome == {
         "pr": 42,
         "authority": "claude-code",
@@ -429,7 +429,7 @@ def test_recovered_external_gets_full_timeout_from_assignment(monkeypatch):
     )
     outcome = create_pr.refresh_assignment(
         42,
-        now=assigned + timedelta(minutes=14, seconds=59),
+        now=assigned + timedelta(minutes=1, seconds=59),
     )
     assert outcome["reason"] == "external-pending"
     assert outcome["remaining_seconds"] == 1

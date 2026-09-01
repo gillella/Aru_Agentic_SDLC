@@ -241,12 +241,12 @@ review-policy:fallback-1=claude-code
 review-policy:fallback-2=openai-codex
 review-policy:fallback-3=xai-cursor
 review-policy:fallback-4=google-antigravity
-review-policy:timeout=900
+review-policy:timeout=120
 ```
 
 Fallback ranks are contiguous from 1. Authorities are unique and supported;
 referenced external authorities must be registered. Missing declarations keep
-the default shown above, followed by the four coding families and a 900-second
+the default shown above, followed by the four coding families and a 120-second
 timeout. Malformed or contradictory policy fails closed. A selected coding
 identity is assigned only after its bounded probe returns exactly `OK`
 (verifying liveness only); the author identity and GitHub actor are excluded.
