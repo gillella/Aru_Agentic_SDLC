@@ -20,6 +20,7 @@ from common import (
     canonical_github_actor,
     configured_coding_reviewers,
     gh_json,
+    normalized_identity,
     probe_coding_candidate,
     registered_coding_actors,
     same_github_actor,
@@ -334,6 +335,9 @@ def reviewer_status(
     except KernelError as exc:
         actors = {}
         errors.append(str(exc))
+    normalized_author_identity = (
+        normalized_identity(author_identity) if author_identity.strip() else ""
+    )
     normalized_author_actor = canonical_github_actor(author_actor)
     coding: list[dict[str, object]] = []
     for family in CODING_REVIEWERS:
@@ -341,7 +345,7 @@ def reviewer_status(
             actor = str(actors.get(identity) or "")
             eligible = bool(
                 actor
-                and identity != author_identity
+                and identity != normalized_author_identity
                 and not same_github_actor(actor, normalized_author_actor)
             )
             probe_state = "not-requested"

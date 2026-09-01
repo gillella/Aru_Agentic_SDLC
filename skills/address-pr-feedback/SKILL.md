@@ -23,6 +23,6 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
 
 Do not review your own work. Because the kernel has no scheduler, an external
 event or timer must invoke `create_pr.py --refresh-reviewer` for governed
-immediate-unavailability or 15-minute pending fallback. Reviewer capacity probes
+immediate unavailability or the effective policy timeout. Reviewer capacity probes
 verify liveness only; if substantive review execution hits quota, recover
 immediately with `create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable <reason>`.

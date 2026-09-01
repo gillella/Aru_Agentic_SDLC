@@ -180,7 +180,7 @@ def test_reviewer_status_reports_sources_bindings_probes_and_unused_trials(monke
     )
     status = review_policy.reviewer_status(
         probe=True,
-        author_identity="mo",
+        author_identity="MO",
         author_actor="author-login",
         runner=result,
     )
