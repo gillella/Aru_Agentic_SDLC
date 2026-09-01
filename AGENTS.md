@@ -15,7 +15,7 @@ deploys software, sends notifications, or owns consumer runtime.
 - GitHub issue plus Project Board: lifecycle state.
 - `touches:`: write boundary.
 - Git worktree: implementation isolation.
-- exact-head CI: verification authority.
+- exact-head focused local verification evidence: verification authority.
 - exactly one `review:<authority>` label: external-service or independent
   coding-agent review authority for the current PR head.
 - `scripts/merge_pr.py`: only merge authority.
@@ -39,8 +39,10 @@ Done. Do not create another lifecycle store.
 3. Claim it before editing.
 4. Create one `.worktrees/<branch>` checkout.
 5. Make the smallest change and run focused tests.
-6. Open a PR containing `Closes #N`; wait for current-head CI and the one
-   assigned authoritative reviewer.
+6. Open a PR containing `Closes #N`, record only focused local verification
+   commands in the PR body, and bind them to the exact head with
+   `create_pr.py --refresh-verification`; wait only for that exact-head local
+   verification evidence and the one assigned authoritative reviewer.
 7. Resolve every finding and merge only with `merge_pr.py --expected-head`.
 8. Verify Done and remove only clean, closed Factory worktrees.
 
@@ -50,35 +52,39 @@ Done. Do not create another lifecycle store.
 registered by `reviewer-registered:<service>` labels and locally configured,
 bound coding-reviewer identities. The issue number rotates the starting slot,
 so consecutive PRs distribute across eligible authorities without stored
-capacity state. A coding slot must pass its bounded probe; an unavailable slot
-advances to the next candidate. The author identity and GitHub actor are never
-eligible. Authority labels provisioned by bootstrap do not register providers.
-Exactly one authority label remains.
+capacity state. A coding slot must pass its bounded probe (which verifies
+liveness only); an unavailable slot advances to the next candidate. The author
+identity and GitHub actor are never eligible. Authority labels provisioned by
+bootstrap do not register providers. Exactly one authority label remains.
 An explicit unavailable/error response causes immediate fallback; a merely
 pending external assignment is retained until 15 minutes after assignment, then
-falls back. Paused reviews, cost or quota exhaustion, rate limiting, provider
-outage, unsupported bot-authored PRs, and explicit unavailable/error responses
-are unavailable and cannot satisfy the merge gate through a nominally
-successful no-op status.
-The newest trusted, timestamped provider evidence determines availability. A
-governed authority-label transition starts a new 15-minute pending window.
+becomes eligible for fallback. Because the kernel itself has no scheduler, an
+external event or timer must invoke `create_pr.py --refresh-reviewer <PR>`.
+Paused reviews, cost or quota exhaustion, rate limiting, provider outage,
+unsupported bot-authored PRs, and explicit unavailable/error responses are
+unavailable and cannot satisfy the merge gate through a nominally successful
+no-op status. The newest trusted, timestamped provider evidence determines
+availability. A governed authority-label transition starts a new 15-minute
+pending window.
 
-For coding assignment, smoke-test actual capacity in `claude-code`, `openai-codex`,
-`xai-cursor`, `google-antigravity` order, excluding the author identity and
-preferring a different model family. Claude selection probes every configured
-`claude-sub` subscription. A candidate also requires one explicit
-`reviewer-binding:<identity>=<github-login>` registration whose actor differs
-from the PR author. `ARU_CODING_REVIEWERS` is the local allowlist using
-`family:identity` entries and `claude-code:identity@subscription` for each
-Claude subscription. Only configured identities are probed; subscription
-additions and removals are configuration changes. Missing, malformed,
-duplicate, or unbound configuration, or no distinct reviewer responding
-exactly `OK`, keeps the existing authority and fails closed.
+For coding assignment, smoke-test actual capacity (verifying liveness only) in
+`claude-code`, `openai-codex`, `xai-cursor`, `google-antigravity` order,
+excluding the author identity and preferring a different model family. Claude
+selection probes every configured `claude-sub` subscription. A candidate also
+requires one explicit `reviewer-binding:<identity>=<github-login>` registration
+whose actor differs from the PR author. `ARU_CODING_REVIEWERS` is the local
+allowlist using `family:identity` entries and
+`claude-code:identity@subscription` for each Claude subscription. Only
+configured identities are probed; subscription additions and removals are
+configuration changes. Missing, malformed, duplicate, or unbound configuration,
+or no distinct reviewer responding exactly `OK`, keeps the existing authority
+and fails closed.
 
 If an assigned coding reviewer later returns an explicit unavailable/error
-state or aborts without a verdict, use `create_pr.py --refresh-reviewer <PR>
---coding-reviewer-unavailable <reason>` to audit and recover to the first
-registered external authority. Do not edit authority labels by hand.
+state, aborts without a verdict, or hits quota during substantive execution,
+use `create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable <reason>`
+to audit and recover immediately to the first registered external authority. Do
+not edit authority labels by hand.
 
 A coding agent may author or remediate code and may authoritatively review code
 written by a different agent. It must never review its own PR under normal
@@ -90,10 +96,10 @@ or multiple authorities blocks merge.
 
 ## Failure behavior
 
-Missing, partial, stale, contradictory, or unauthenticated issue, CI, review,
-identity, board, or Git data blocks the transition. During a GitHub outage,
-preserve already-claimed local work and stop coordination. Never invent
-fallback state.
+Missing, partial, stale, contradictory, or unauthenticated issue, pull-request
+verification evidence, review, identity, board, or Git data blocks the
+transition. During a GitHub outage, preserve already-claimed local work and
+stop coordination. Never invent fallback state.
 
 ## Scope boundary
 

@@ -10,7 +10,7 @@
 | worktree isolation | first implementation edit | `create_branch.py` |
 | closure link | PR creation | `create_pr.py` |
 | ordered reviewer plus 15-minute fallback | review authority | `create_pr.py` |
-| current-head CI | merge | `check_ci.py`, `merge_pr.py` |
+| exact-head focused local verification | merge | `create_pr.py`, `check_ci.py`, `merge_pr.py` |
 | unresolved findings | merge | `fetch_pr_feedback.py`, `merge_pr.py` |
 | current-head external or coding-agent verdict | merge | `merge_pr.py` |
 | base/head race | merge | `merge_pr.py --expected-head` |

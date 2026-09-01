@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+- Made `fetch_next_work.py` batch selection reserve touches from every open
+  governed PR across all authors globally and fail closed on unreadable,
+  missing, or ambiguous reservations.
+- Made `fetch_next_work.py` return an actionable conflict remediation work
+  result carrying PR number, head, and reason when an authored open PR has
+  `mergeStateStatus: DIRTY`.
+- Made `fetch_next_work.py` obtain and validate live current-head
+  `mergeStateStatus` via a narrow repository read when active open PR records
+  lack merge state, classifying DIRTY conflicts before evaluating CI failure
+  while preserving snapshot-based reservations.
+- Updated `address-pr-feedback` and operational docs to instruct merging
+  `origin/main` into the feature branch (never rebase/force push), rerunning
+  focused verification, and refreshing exact-head evidence on DIRTY conflicts.
+- Clarified that the kernel has no scheduler so external reviewer 15-minute
+  fallback requires an external event/timer invoking `create_pr.py --refresh-reviewer`,
+  coding reviewer probes test liveness only, and substantive review execution
+  hitting quota triggers immediate governed unavailable recovery.
+- Removed the repository workflow file and stopped scaffolding one for adopted
+  repositories.
+- Replaced the repository-hosted merge gate with exact-head focused local
+  verification evidence stored in the PR body and refreshed through
+  `create_pr.py --refresh-verification`.
+- Made `check_ci.py` and `merge_pr.py` fail closed on missing, stale,
+  malformed, no-execution, or broad/full-suite verification evidence.
+- Updated active operating docs, templates, and runtime skills to require
+  exact-head focused local verification with honest project-specific commands
+  and to reserve any full suite for separate explicit release activity.
+
 ## v0.2.2 - Consumer Adoption Ready - 2026-08-27
 
 - Expanded the README into a user-friendly adoption entry point.

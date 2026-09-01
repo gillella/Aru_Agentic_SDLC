@@ -1,17 +1,20 @@
 ---
 name: remediate-ci-failure
-description: Diagnose and fix a failing current-head CI check on an authored PR.
+description: Repair stale or failing exact-head local verification on an authored PR.
 ---
 
-# Remediate CI
+# Remediate Local Verification
 
 1. Confirm the PR head and that you own the implementation branch.
-2. Read complete failing logs with `gh run view --log-failed`.
-3. Reproduce the failure locally.
+2. Read the PR `## Verification` section and identify the stale, malformed, or
+   prohibited focused command entry.
+3. Re-run only the focused local verification needed for the current head.
 4. Apply the smallest fix inside the existing claimed worktree and
    `touches:` budget.
-5. Run focused local verification, commit, and push.
-6. Re-read the new head and wait for fresh CI and a fresh exact-head verdict
-   from the one assigned external or distinct coding-agent reviewer.
+5. Commit and push if code changed, then refresh the PR-body evidence with
+   `create_pr.py --refresh-verification <PR> --body-file <file>`.
+6. Re-read the new head and wait for fresh exact-head local verification and a
+   fresh verdict from the one assigned external or distinct coding-agent
+   reviewer.
 
-Never treat a stale successful run as current-head evidence.
+Never treat stale or broad verification text as current-head evidence.

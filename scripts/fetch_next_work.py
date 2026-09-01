@@ -12,6 +12,7 @@ from check_ci import ci_verdict
 from claim_issue import claim, safe_agent
 from common import (
     AGENT_PREFIX,
+    AUTHOR_PREFIX,
     REPOSITORY_AUTH,
     KernelError,
     StatusPreconditionError,
@@ -30,9 +31,10 @@ from fetch_pr_feedback import fetch_feedback
 from merge_pr import evaluate
 
 MAX_DEPENDENCY_REFERENCES = 100
-_RECOVERY_CANDIDATE_PATTERN = (
-    r"(?im)^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\s*$"
-)
+_RECOVERY_CANDIDATE_PATTERN = r"(?im)^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\s*$"
+_MERGE_STATE_STATUSES = {
+    "BEHIND", "BLOCKED", "CLEAN", "DIRTY", "DRAFT", "HAS_HOOKS", "UNKNOWN", "UNSTABLE"
+}
 
 
 class _RecoveryDriftError(KernelError):
@@ -40,20 +42,8 @@ class _RecoveryDriftError(KernelError):
 
 
 def authored_prs(agent: str) -> list[dict]:
-    data = gh_json(
-        [
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--search",
-            f"label:author:{agent}",
-            "--limit",
-            "100",
-            "--json",
-            "number,title,headRefOid,labels,isDraft,mergeStateStatus",
-        ]
-    )
+    query = ["pr", "list", "--state", "open", "--search", f"label:author:{agent}", "--limit", "100"]
+    data = gh_json([*query, "--json", "number,title,headRefOid,labels,isDraft,mergeStateStatus"])
     if not isinstance(data, list):
         raise KernelError("GitHub returned malformed pull-request inventory")
     return sorted(data, key=lambda item: int(item["number"]))
@@ -71,20 +61,8 @@ def ready_issues() -> list[dict]:
 
 
 def backlog_issues() -> list[dict]:
-    records = gh_json(
-        [
-            "issue",
-            "list",
-            "--state",
-            "open",
-            "--limit",
-            "200",
-            "--label",
-            "status:backlog",
-            "--json",
-            "number,title,body,state,labels,assignees,url",
-        ]
-    )
+    query = ["issue", "list", "--state", "open", "--limit", "200", "--label", "status:backlog"]
+    records = gh_json([*query, "--json", "number,title,body,state,labels,assignees,url"])
     if not isinstance(records, list) or any(
         not isinstance(record, dict)
         or not isinstance(record.get("number"), int)
@@ -132,13 +110,10 @@ def _dependency_states(records: list[dict], *, inventory_name: str) -> dict[int,
 
     owner, name = repo_slug().split("/", 1)
     fields = " ".join(
-        f"issue_{number}:issue(number:{number}){{number state}}"
-        for number in numbers
+        f"issue_{number}:issue(number:{number}){{number state}}" for number in numbers
     )
     query = (
-        "query($owner:String!,$name:String!){"
-        f"repository(owner:$owner,name:$name){{{fields}}}"
-        "}"
+        f"query($owner:String!,$name:String!){{repository(owner:$owner,name:$name){{{fields}}}}}"
     )
     data = gh_json(
         [
@@ -178,12 +153,25 @@ def _dependency_states(records: list[dict], *, inventory_name: str) -> dict[int,
 
 
 def has_review_comments(number: int) -> bool:
-    comments = gh_json(
-        ["api", f"repos/{repo_slug()}/pulls/{number}/comments?per_page=1"]
-    )
+    comments = gh_json(["api", f"repos/{repo_slug()}/pulls/{number}/comments?per_page=1"])
     if not isinstance(comments, list):
         raise KernelError("GitHub returned malformed review comments")
     return bool(comments)
+
+
+def _pr_live_merge_state(number: int, head: str) -> str:
+    record = gh_json(
+        ["pr", "view", str(number), "--json", "number,headRefOid,state,mergeStateStatus"]
+    )
+    if (
+        not isinstance(record, dict)
+        or record.get("number") != number
+        or record.get("headRefOid") != head
+        or str(record.get("state") or "").upper() != "OPEN"
+        or record.get("mergeStateStatus") not in _MERGE_STATE_STATUSES
+    ):
+        raise KernelError(f"GitHub returned malformed pull request reread for #{number}")
+    return str(record["mergeStateStatus"])
 
 
 def _open_pr_work(pr: dict) -> dict[str, object]:
@@ -193,16 +181,36 @@ def _open_pr_work(pr: dict) -> dict[str, object]:
         if feedback:
             return {"type": "feedback", "pr": number, "items": feedback}
     ci = ci_verdict(number)
+    head = str(ci["head"])
+    merge_state = pr.get("mergeStateStatus")
+    if not isinstance(merge_state, str) or not merge_state:
+        merge_state = _pr_live_merge_state(number, head)
+    elif merge_state not in _MERGE_STATE_STATUSES:
+        raise KernelError(f"GitHub returned malformed pull request snapshot for #{number}")
+    if merge_state == "DIRTY":
+        return {
+            "type": "conflict",
+            "pr": number,
+            "head": head,
+            "reason": "PR merge state is DIRTY",
+        }
     if ci["state"] == "failure":
-        return {"type": "ci", "pr": number, "head": ci["head"], "checks": ci["checks"]}
+        return {"type": "ci", "pr": number, "head": head, "checks": ci["checks"]}
     reviews = [name for name in label_names(pr) if name.startswith("review:")]
     if ci["state"] == "success" and len(reviews) == 1:
         try:
-            evaluate(number, str(ci["head"]))
+            evaluate(number, head)
         except KernelError as exc:
-            return {"type": "wait", "pr": number, "head": ci["head"], "reason": str(exc)}
-        return {"type": "merge", "pr": number, "head": ci["head"]}
-    return {"type": "wait", "pr": number, "head": ci["head"], "ci": ci["state"]}
+            if str(exc) == "PR merge state is DIRTY":
+                return {
+                    "type": "conflict",
+                    "pr": number,
+                    "head": head,
+                    "reason": str(exc),
+                }
+            return {"type": "wait", "pr": number, "head": head, "reason": str(exc)}
+        return {"type": "merge", "pr": number, "head": head}
+    return {"type": "wait", "pr": number, "head": head, "ci": ci["state"]}
 
 
 def select(agent: str) -> dict[str, object]:
@@ -275,7 +283,9 @@ def _backlog_dependency_records(records: list[dict]) -> list[dict]:
     ]
 
 
-def _recoverable_backlog(records: list[dict]) -> tuple[list[tuple[int, dict]], dict[int, list[str]]]:
+def _recoverable_backlog(
+    records: list[dict],
+) -> tuple[list[tuple[int, dict]], dict[int, list[str]]]:
     candidates, rejected = triage_backlog.backlog_candidates(
         records,
         extra_errors=_extra_backlog_errors,
@@ -319,7 +329,8 @@ def _recovery_issue_record(number: int) -> dict:
 def _live_recovery_errors(
     record: dict,
     *,
-    reserved_paths: list[list[str]] | None = None,
+    active_reserved_paths: list[list[str]] | None = None,
+    selected_reserved_paths: list[list[str]] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     if str(record.get("state") or "").upper() != "OPEN":
@@ -331,17 +342,23 @@ def _live_recovery_errors(
         )
     )
     errors.extend(_extra_backlog_errors(record))
-    if reserved_paths is not None:
+    if active_reserved_paths is not None or selected_reserved_paths is not None:
         touches = parse_touches(str(record.get("body") or ""))
-        if any(_touches_overlap(touches, reserved) for reserved in reserved_paths):
-            errors.append("touches conflict with active lane work")
+        conflict = _touches_conflict_error(
+            touches,
+            active_reserved_paths=active_reserved_paths,
+            selected_reserved_paths=selected_reserved_paths,
+        )
+        if conflict is not None:
+            errors.append(conflict)
     return errors
 
 
 def _promote_recovery_candidate(
     record: dict,
     *,
-    reserved_paths: list[list[str]] | None = None,
+    active_reserved_paths: list[list[str]] | None = None,
+    selected_reserved_paths: list[list[str]] | None = None,
 ) -> tuple[dict, list[str]]:
     number = int(record["number"])
     live_record = record
@@ -353,7 +370,8 @@ def _promote_recovery_candidate(
         live_touches = parse_touches(str(live_record.get("body") or ""))
         live_errors = _live_recovery_errors(
             live_record,
-            reserved_paths=reserved_paths,
+            active_reserved_paths=active_reserved_paths,
+            selected_reserved_paths=selected_reserved_paths,
         )
         if live_errors:
             raise _RecoveryDriftError("; ".join(live_errors))
@@ -378,8 +396,7 @@ def _recover_single_issue() -> dict[str, object] | None:
             live_record, _live_touches = _promote_recovery_candidate(record)
         except _RecoveryDriftError as exc:
             diagnostics.extend(
-                f"Backlog issue #{number} {error}; skipped"
-                for error in str(exc).split("; ")
+                f"Backlog issue #{number} {error}; skipped" for error in str(exc).split("; ")
             )
             continue
         diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
@@ -395,9 +412,7 @@ def _recover_single_issue() -> dict[str, object] | None:
 def _backlog_diagnostics(rejected: dict[int, list[str]]) -> list[str]:
     messages: list[str] = []
     for number in sorted(rejected):
-        messages.extend(
-            f"Backlog issue #{number} {error}; skipped" for error in rejected[number]
-        )
+        messages.extend(f"Backlog issue #{number} {error}; skipped" for error in rejected[number])
     return messages
 
 
@@ -414,19 +429,33 @@ def _linked_issue_numbers(body: str) -> list[int]:
     return sorted({int(value) for value in re.findall(_RECOVERY_CANDIDATE_PATTERN, body or "")})
 
 
-def _active_lane_reserved_paths(prs_by_author: dict[str, list[dict]], agents: list[str]) -> list[list[str]]:
+def _governed_open_prs(prs: list[dict]) -> dict[str, dict]:
+    governed: dict[str, dict] = {}
+    for pr in prs:
+        number = _batch_number(pr, "Open PR")
+        author_labels = [name for name in label_names(pr) if name.startswith(AUTHOR_PREFIX)]
+        if not author_labels:
+            continue
+        if len(author_labels) > 1:
+            raise KernelError(f"Open PR #{number} has contradictory author labels")
+        author = safe_agent(author_labels[0][len(AUTHOR_PREFIX) :])
+        if author in governed:
+            raise KernelError(f"Open PRs for author '{author}' are ambiguous")
+        governed[author] = pr
+    return governed
+
+
+def _governed_reserved_paths(governed_prs: dict[str, dict]) -> list[list[str]]:
     reserved: list[list[str]] = []
-    for agent in agents:
-        prs = prs_by_author[agent]
-        if not prs:
-            continue
-        linked = _linked_issue_numbers(str(prs[0].get("body") or ""))
+    for pr in governed_prs.values():
+        number = int(pr["number"])
+        linked = _linked_issue_numbers(str(pr.get("body") or ""))
         if len(linked) != 1:
-            continue
-        try:
-            reserved.append(parse_touches(str(issue(linked[0]).get("body") or "")))
-        except KernelError:
-            continue
+            if not linked:
+                raise KernelError(f"Open PR #{number} has no linked issue")
+            raise KernelError(f"Open PR #{number} has multiple linked issues")
+        linked_issue = issue(linked[0])
+        reserved.append(parse_touches(str(linked_issue.get("body") or "")))
     return reserved
 
 
@@ -438,26 +467,11 @@ def _batch_number(record: dict, kind: str) -> int:
 
 
 def _prs_by_batch_author(prs: list[dict], agents: list[str]) -> dict[str, list[dict]]:
-    # Batch checks stay isolated: authored_prs() keeps label search; select() skips touches.
-    requested = set(agents)
-    authored = {agent: [] for agent in agents}
-    for pr in prs:
-        number = _batch_number(pr, "Open PR")
-        author_labels = [
-            name for name in label_names(pr) if name.startswith("author:")
-        ]
-        if not author_labels:
-            continue
-        if len(author_labels) > 1:
-            raise KernelError(
-                f"Open PR #{number} has contradictory author labels"
-            )
-        matching = [name[7:] for name in author_labels if name[7:] in requested]
-        if not matching:
-            continue
-        authored[matching[0]].append(pr)
-    for agent in agents:
-        authored[agent].sort(key=lambda item: item["number"])
+    governed = _governed_open_prs(prs)
+    authored: dict[str, list[dict]] = {agent: [] for agent in agents}
+    for agent, pr in governed.items():
+        if agent in authored:
+            authored[agent].append(pr)
     return authored
 
 
@@ -481,33 +495,38 @@ def _touches_overlap(left: list[str], right: list[str]) -> bool:
     return False
 
 
+def _touches_conflict_error(
+    touches: list[str],
+    *,
+    active_reserved_paths: list[list[str]] | None = None,
+    selected_reserved_paths: list[list[str]] | None = None,
+) -> str | None:
+    if active_reserved_paths and any(
+        _touches_overlap(touches, reserved) for reserved in active_reserved_paths
+    ):
+        return "touches conflict with active lane work"
+    if selected_reserved_paths and any(
+        _touches_overlap(touches, reserved) for reserved in selected_reserved_paths
+    ):
+        return "touches conflict with earlier selected recovery candidate"
+    return None
+
+
 def _ready_candidates(
     records: list[dict],
     issue_states: dict[int, str],
     *,
     batch: bool = False,
-) -> tuple[
-    list[tuple[int, int, dict, list[str]]],
-    list[str],
-    dict[str, int],
-]:
+) -> tuple[list[tuple[int, int, dict, list[str]]], list[str], dict[str, int]]:
     priorities = {f"priority:p{value}": value for value in range(4)}
     ready: list[tuple[int, int, dict, list[str]]] = []
     diagnostics: list[tuple[int, str]] = []
     classification = {
-        "total_ready": len(records),
-        "executable_ready": 0,
-        "human_gated": 0,
-        "epics": 0,
-        "dependency_blocked": 0,
-        "malformed": 0,
+        "total_ready": len(records), "executable_ready": 0, "human_gated": 0,
+        "epics": 0, "dependency_blocked": 0, "malformed": 0,
     }
     for record in records:
-        number = (
-            _batch_number(record, "Ready issue")
-            if batch
-            else int(record["number"])
-        )
+        number = _batch_number(record, "Ready issue") if batch else int(record["number"])
         labels = label_names(record)
         category = _pre_dependency_category(labels)
         if category:
@@ -518,9 +537,7 @@ def _ready_candidates(
             classification["dependency_blocked"] += 1
             continue
         priority_labels = [name for name in labels if name.startswith("priority:")]
-        if len(priority_labels) > 1 or any(
-            name not in priorities for name in priority_labels
-        ):
+        if len(priority_labels) > 1 or any(name not in priorities for name in priority_labels):
             classification["malformed"] += 1
             diagnostics.append(
                 (
@@ -570,11 +587,7 @@ def _classification_summary(classification: dict[str, int]) -> str | None:
 def _batch_ready_candidates(
     records: list[dict],
     issue_states: dict[int, str] | None = None,
-) -> tuple[
-    list[tuple[int, int, dict, list[str]]],
-    list[str],
-    dict[str, int],
-]:
+) -> tuple[list[tuple[int, int, dict, list[str]]], list[str], dict[str, int]]:
     ready, diagnostics, classification = _ready_candidates(
         records,
         dependency_states(records) if issue_states is None else issue_states,
@@ -589,46 +602,54 @@ def _batch_ready_candidates(
 def select_batch(agents: list[str]) -> dict[str, object]:
     agents = _batch_agents(agents)
     prs_snapshot = open_prs()
-    issues_snapshot = ready_issues()
-    prs_by_author = _prs_by_batch_author(prs_snapshot, agents)
+    governed_prs = _governed_open_prs(prs_snapshot)
     lanes: list[dict[str, object]] = []
     free_lanes: list[dict[str, object]] = []
 
     for agent in agents:
         lane: dict[str, object] = {"agent": agent}
-        if prs_by_author[agent]:
-            lane["work"] = _open_pr_work(prs_by_author[agent][0])
+        if agent in governed_prs:
+            lane["work"] = _open_pr_work(governed_prs[agent])
         else:
             free_lanes.append(lane)
         lanes.append(lane)
 
-    active_reserved_paths = _active_lane_reserved_paths(prs_by_author, agents)
-    candidates, diagnostics, classification = _batch_ready_candidates(
-        issues_snapshot,
-        dependency_states(issues_snapshot),
-    )
-    if not candidates and free_lanes and not issues_snapshot:
-        candidates, diagnostics, classification = _recover_batch_candidates(
-            len(free_lanes),
-            active_reserved_paths,
+    diagnostics: list[str] = []
+    classification: dict[str, int] | None = None
+
+    if free_lanes:
+        issues_snapshot = ready_issues()
+        candidates, diagnostics, classification = _batch_ready_candidates(
+            issues_snapshot,
+            dependency_states(issues_snapshot),
         )
-    reserved_paths: list[list[str]] = []
-    candidate_index = 0
-    for lane in free_lanes:
-        while candidate_index < len(candidates):
-            _priority, _number, record, touches = candidates[candidate_index]
-            candidate_index += 1
-            if any(_touches_overlap(touches, reserved) for reserved in reserved_paths):
-                continue
-            lane["work"] = {
-                "type": "issue",
-                "issue": _number,
-                "title": record["title"],
-            }
-            reserved_paths.append(touches)
-            break
+        if not candidates and not issues_snapshot:
+            active_reserved = _governed_reserved_paths(governed_prs)
+            candidates, diagnostics, classification = _recover_batch_candidates(
+                len(free_lanes), active_reserved
+            )
+            reserved_paths = list(active_reserved)
+        elif candidates:
+            reserved_paths = _governed_reserved_paths(governed_prs)
         else:
-            lane["work"] = {"type": "idle"}
+            reserved_paths = []
+
+        candidate_index = 0
+        for lane in free_lanes:
+            while candidate_index < len(candidates):
+                _priority, _number, record, touches = candidates[candidate_index]
+                candidate_index += 1
+                if any(_touches_overlap(touches, reserved) for reserved in reserved_paths):
+                    continue
+                lane["work"] = {
+                    "type": "issue",
+                    "issue": _number,
+                    "title": record["title"],
+                }
+                reserved_paths.append(touches)
+                break
+            else:
+                lane["work"] = {"type": "idle"}
 
     result: dict[str, object] = {
         "schema": "aru.fetch-next-work.batch/v1",
@@ -636,7 +657,7 @@ def select_batch(agents: list[str]) -> dict[str, object]:
         "diagnostics": diagnostics,
         "claim_status": "not-requested",
     }
-    if _classification_summary(classification):
+    if classification and _classification_summary(classification):
         result["ready_classification"] = classification
     return result
 
@@ -651,49 +672,49 @@ def _recover_batch_candidates(
         diagnostics.extend(_backlog_diagnostics(rejected))
     if lane_count <= 0 or not candidates:
         return [], diagnostics, {
-            "total_ready": 0,
-            "executable_ready": 0,
-            "human_gated": 0,
-            "epics": 0,
-            "dependency_blocked": 0,
-            "malformed": 0,
+            "total_ready": 0, "executable_ready": 0, "human_gated": 0,
+            "epics": 0, "dependency_blocked": 0, "malformed": 0,
         }
+    selected: list[tuple[int, int, dict, list[str]]] = []
+    selected_reserved_paths: list[list[str]] = []
     for priority, record in candidates:
+        if len(selected) >= lane_count:
+            break
         number = int(record["number"])
         touches = parse_touches(str(record.get("body") or ""))
-        if any(_touches_overlap(touches, reserved) for reserved in reserved_paths):
-            diagnostics.append(
-                f"Backlog issue #{number} touches conflict with active lane work; skipped"
-            )
+        conflict = _touches_conflict_error(
+            touches,
+            active_reserved_paths=reserved_paths,
+            selected_reserved_paths=selected_reserved_paths,
+        )
+        if conflict is not None:
+            diagnostics.append(f"Backlog issue #{number} {conflict}; skipped")
             continue
         try:
             live_record, live_touches = _promote_recovery_candidate(
                 record,
-                reserved_paths=reserved_paths,
+                active_reserved_paths=reserved_paths,
+                selected_reserved_paths=selected_reserved_paths,
             )
         except _RecoveryDriftError as exc:
             diagnostics.extend(
-                f"Backlog issue #{number} {error}; skipped"
-                for error in str(exc).split("; ")
+                f"Backlog issue #{number} {error}; skipped" for error in str(exc).split("; ")
             )
             continue
-        diagnostics.append("Ready snapshot empty; recovered 1 Backlog candidate")
-        diagnostics.append(f"Promoted Backlog issue #{number} to Ready")
-        return [(priority, number, live_record, live_touches)], diagnostics, {
-            "total_ready": 0,
-            "executable_ready": 0,
-            "human_gated": 0,
-            "epics": 0,
-            "dependency_blocked": 0,
-            "malformed": 0,
-        }
-    return [], diagnostics, {
-        "total_ready": 0,
-        "executable_ready": 0,
-        "human_gated": 0,
-        "epics": 0,
-        "dependency_blocked": 0,
-        "malformed": 0,
+        selected.append((priority, number, live_record, live_touches))
+        selected_reserved_paths.append(live_touches)
+
+    if selected:
+        count = len(selected)
+        noun = "candidate" if count == 1 else "candidates"
+        diagnostics.append(f"Ready snapshot empty; recovered {count} Backlog {noun}")
+        diagnostics.extend(
+            f"Promoted Backlog issue #{number} to Ready"
+            for _priority, number, _record, _touches in selected
+        )
+    return selected, diagnostics, {
+        "total_ready": 0, "executable_ready": 0, "human_gated": 0,
+        "epics": 0, "dependency_blocked": 0, "malformed": 0,
     }
 
 

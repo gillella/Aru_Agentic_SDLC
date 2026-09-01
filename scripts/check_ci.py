@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Read exact-current-head CI state for one pull request."""
+"""Read exact-current-head focused local verification state for one pull request."""
 
 from __future__ import annotations
 
 import argparse
 import time
 
-from common import KernelError, REVIEW_SERVICES, gh_json, json_print
+from common import KernelError, gh_json, json_print
+from local_verification import local_verification_status
 
 
 def check_name(record: dict) -> str:
@@ -14,11 +15,6 @@ def check_name(record: dict) -> str:
     if not isinstance(name, str) or not name:
         raise KernelError("CI returned a nameless check")
     return name
-
-
-def is_review_check(name: str) -> bool:
-    normalized = name.lower().replace(" ", "").replace("-", "")
-    return any(service in normalized for service in REVIEW_SERVICES)
 
 
 def check_state(record: dict) -> str:
@@ -34,25 +30,13 @@ def check_state(record: dict) -> str:
 
 
 def ci_verdict(number: int) -> dict[str, object]:
-    pr = gh_json(["pr", "view", str(number), "--json", "number,headRefOid,statusCheckRollup"])
+    pr = gh_json(["pr", "view", str(number), "--json", "number,headRefOid,body"])
     head = pr.get("headRefOid")
-    rollup = pr.get("statusCheckRollup")
-    if not isinstance(head, str) or len(head) != 40 or not isinstance(rollup, list):
-        raise KernelError("CI state is incomplete")
-    checks = [
-        {"name": check_name(record), "state": check_state(record)}
-        for record in rollup
-        if isinstance(record, dict) and not is_review_check(check_name(record))
-    ]
-    if not checks:
-        state = "pending"
-    elif any(check["state"] == "failure" for check in checks):
-        state = "failure"
-    elif any(check["state"] == "pending" for check in checks):
-        state = "pending"
-    else:
-        state = "success"
-    return {"pr": number, "head": head, "state": state, "checks": checks}
+    body = pr.get("body")
+    if not isinstance(head, str) or len(head) != 40:
+        raise KernelError("local verification state is incomplete")
+    result = local_verification_status(body, head)
+    return {"pr": number, "head": head, "state": result["state"], "checks": result["checks"]}
 
 
 def wait_for_ci(number: int, timeout: int, interval: int) -> dict[str, object]:

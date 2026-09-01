@@ -30,9 +30,9 @@ the deploy platform, and not the process that wakes the next command.
 
 The destination is: a project can take an idea through a governed Ready gate,
 implement it under exclusive claim and a path budget, merge only with
-exact-head CI and one distinct reviewer, and later require consumer-owned
-deploy evidence before promotion — without Aru owning scheduling, runtime, or
-production.
+exact-head focused local verification and one distinct reviewer, and later
+require consumer-owned deploy evidence before promotion — without Aru owning
+scheduling, runtime, or production.
 
 Today the kernel covers one approved GitHub issue through one safely merged
 pull request. That is the foundation, not the whole destination.
@@ -46,7 +46,7 @@ adding a fifteenth command, or putting an orchestrator inside this repository.
 | --- | --- | --- |
 | **Kernel** | What is authorized, blocked, and evidenced for one issue → one merge? | This repository. Small, fail-closed, no daemon. |
 | **Orchestration** | Who wakes the next kernel command, and when? | Outside this repository: a human cadence, cron, Hermes, or another agent loop. |
-| **Scaffolding** | How does a new or existing project adopt the kernel and hold the workflow? | Init, skills, templates, consumer CI. May live here as copies; truth of "it works" is a consumer repo. |
+| **Scaffolding** | How does a new or existing project adopt the kernel and hold the workflow? | Init, skills, templates, consumer verification/runbooks. May live here as copies; truth of "it works" is a consumer repo. |
 | **Deploy** | May this revision ship, roll back, or promote? | Consumer-owned ship and runtime. The kernel may later *require evidence* for those stages. Aru is not a deploy platform. |
 
 Mixing layers is how the pre-v0.2 factory got large. A new kernel *component*
@@ -164,8 +164,9 @@ on the v0.2 contract.
 
 - Scheduler or any in-repo waiter for stalled review.
 - New review providers.
-- Ideation/intake product, deploy product, or replacing `compileall` consumer
-  CI with a kernel-owned test runner.
+- Ideation/intake product, deploy product, or inventing a kernel-owned runner
+  in place of consumer-owned exact-head focused local verification bound by
+  the sanctioned Factory helper.
 - Treating ruleset JSON in this repo as a substitute for applying the ruleset
   on GitHub.
 
@@ -185,8 +186,8 @@ because Phase 1 feels slow.
 - Hook and `common.py` accept the same `touches:` forms.
 - README/CHANGELOG version identity matches tags and HEAD.
 - One consumer repository has a merged PR that used claim → worktree →
-  exact-head CI → one distinct reviewer → `merge_pr.py`, with no preview-era
-  leftover in that walk.
+  exact-head focused local verification → one distinct reviewer →
+  `merge_pr.py`, with no preview-era leftover in that walk.
 
 ### Phase 2 — Ideation to Ready
 
@@ -223,26 +224,31 @@ documents and GitHub issue forms over a new script.
 
 ### Phase 3 — Implementation scaffolding
 
-**Goal.** Adopted projects run *real* verification, and worktrees plus skills
-hold up under ordinary agent use. The kernel still has no daemon.
+**Goal.** Adopted projects carry honest project-specific focused verification
+commands, and the sanctioned Factory helper binds that local evidence to the
+exact head while worktrees plus skills hold up under ordinary agent use. The
+kernel still has no daemon or state store.
 
 **In scope.**
 
-- Consumer CI that is the project's real test/lint/build, not the bootstrap
-  `python3 -m compileall` baseline.
+- Consumer-owned exact-head focused local verification whose commands are the
+  project's honest lint/test/build slice, not the bootstrap
+  `python3 -m compileall` baseline, and whose evidence is executed and bound
+  by the sanctioned Factory helper rather than a repository workflow gate.
 - Skills and worktree helpers that remain correct when hooks are installed,
   `ARU_SDLC_HOME` is set, and agents follow `implement-next-issue`.
 - Bootstrap honesty: init does not claim a repo is governed until reviewers,
-  Project Board, and real CI exist (checklist already says this; make the
-  generated output match).
+  Project Board, and honest project-specific focused verification commands
+  exist (checklist already says this; make the generated output match).
 
 **Out of scope.**
 
-- Aru-owned CI runners, preview stacks, or a 15th kernel command that "runs
-  the consumer tests."
+- Repository workflow gates, Actions-required merge gates, Aru-owned runners,
+  preview stacks, or a 15th kernel command that "runs the consumer tests."
 - Reintroducing a factory visualizer or worker fleet so scaffolding "feels
   attended."
-- Kernel changes whose only evidence is a template edit with no consumer
+- Any kernel daemon or state store that tracks verification or review progress,
+  and kernel changes whose only evidence is a template edit with no consumer
   walk.
 
 **Admission.** Phase 1 is done. Phase 2 may overlap if intake scaffolding is
@@ -251,8 +257,10 @@ used the change.
 
 **Done when.**
 
-- At least one governed consumer uses required checks that are its real suite,
-  not compileall.
+- At least one governed consumer records exact-head focused local verification,
+  executed by the sanctioned Factory helper, using honest project-specific
+  commands rather than the bootstrap `python3 -m compileall` baseline or a
+  repository workflow gate.
 - One full implement-next-issue walk on that consumer succeeds without
   undocumented operator rescue.
 - Kernel command count, skill count, and operating-document count still meet
@@ -291,10 +299,10 @@ without kernel patches that reintroduce a waiter.
 **Done when.**
 
 - A closed-loop run can take Ready work to merge by calling published kernel
-  commands only.
+  commands plus the consumer's focused local verification commands.
 - Deleting the orchestrator leaves the kernel fully usable by a human.
-- `tests/test_surface.py` still forbids the factory filenames and a
-  `schedule:` GitHub Actions cron in this repo's CI.
+- `tests/test_surface.py` still forbids the factory filenames and retains
+  the requirement that `.github/workflows` be absent in this repo.
 
 ### Phase 5 — Ship governance
 

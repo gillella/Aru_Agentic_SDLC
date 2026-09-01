@@ -585,7 +585,7 @@ def evaluate(number: int, expected_head: str) -> dict[str, object]:
     issue_evidence = issue_gate(issues)
     ci = ci_verdict(number)
     if ci["head"] != head or ci["state"] != "success":
-        raise KernelError("exact-current-head CI is not successful")
+        raise KernelError("exact-current-head focused local verification is not successful")
     feedback = fetch_feedback(number)
     if feedback:
         raise KernelError(f"{len(feedback)} unresolved review thread(s)")

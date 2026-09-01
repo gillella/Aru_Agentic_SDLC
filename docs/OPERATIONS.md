@@ -26,10 +26,10 @@ agents using Aru to guide another software project.
 
 ## 1. What Aru is
 
-Aru is a compact governance layer around GitHub, Git, CI, and authoritative code
-review. It supplies rules and small mechanical helpers for moving one approved
-issue to one merged pull request without losing ownership, scope, or exact-head
-verification.
+Aru is a compact governance layer around GitHub, Git, exact-head local
+verification, and authoritative code review. It supplies rules and small
+mechanical helpers for moving one approved issue to one merged pull request
+without losing ownership, scope, or exact-head verification.
 
 The kernel is useful when a team wants coding agents and human developers to
 follow the same visible process without introducing another project database or
@@ -44,7 +44,7 @@ flowchart LR
     APPROVED[Approved issue] --> OWNED[One owner]
     OWNED --> BOUNDED[Declared paths]
     BOUNDED --> ISOLATED[Isolated worktree]
-    ISOLATED --> VERIFIED[Exact-head CI]
+    ISOLATED --> VERIFIED[Exact-head local verification]
     VERIFIED --> REVIEWED[One authoritative reviewer]
     REVIEWED --> MERGED[Mechanical merge]
     MERGED --> CLOSED[Done and cleaned]
@@ -102,9 +102,9 @@ flowchart TB
     TOUCHES[touches: paths] -->|limits writes| WORKTREE[Git worktree]
     CLAIM --> WORKTREE
     WORKTREE --> CHANGE[Implementation]
-    CHANGE --> CI[Exact-head CI]
+    CHANGE --> VERIFY[Exact-head local verification]
     CHANGE --> REVIEW[One external or coding-agent authority]
-    CI --> GATE[merge_pr.py]
+    VERIFY --> GATE[merge_pr.py]
     REVIEW --> GATE
     GATE --> MAIN[Default branch]
     MAIN --> CONSUMER[Consumer-owned deploy and production]
@@ -117,17 +117,18 @@ flowchart TB
 | Who owns the edit? | Exactly one `agent:<id>` label and assignee |
 | Which files may change? | The issue's single `touches:` declaration |
 | Where may implementation happen? | The issue's `.worktrees/<branch>` checkout |
-| Did tests pass for this code? | CI attached to the exact current PR head |
+| Did tests pass for this code? | Focused local verification evidence attached to the exact current PR head |
 | Who reviewed it? | The external service or coding family named by the only `review:<authority>` label |
 | May it merge? | `merge_pr.py --expected-head` succeeds |
 | May it deploy? | Only the consumer project's own policy answers this |
 
 ### Fail-closed means stop, not guess
 
-If an issue, board, claim, path boundary, PR head, CI result, review verdict, or
-Git identity is missing, stale, partial, contradictory, or unauthenticated, the
-next transition is blocked. The developer fixes the evidence or waits for the
-authority to return; they do not invent fallback state.
+If an issue, board, claim, path boundary, PR head, local verification evidence,
+review verdict, or Git identity is missing, stale, partial, contradictory, or
+unauthenticated, the next transition is blocked. The developer fixes the
+evidence or waits for the authority to return; they do not invent fallback
+state.
 
 ## 4. Prerequisites
 
@@ -157,7 +158,7 @@ The consumer repository needs:
 - one Project `Status` field with the five exact lifecycle options;
 - the Aru `status:*`, `type:*`, `priority:*`, `agent:*`, `author:*`,
   `author-family:*`, `review:*`, and fallback `reviewer:*` labels;
-- a pull-request CI workflow;
+- exact-head focused local verification refreshed in the PR body;
 - at least one registered external reviewer or one distinct coding-agent
   reviewer whose capacity probe succeeds.
 
@@ -192,7 +193,7 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr 123 --json
 ```
 
 If `ARU_GITHUB_APP_RUNNER` is unset, repository commands use ordinary `gh`.
-This is the portable behavior for CI and consumer repositories where the local
+This is the portable behavior for automation and consumer repositories where the local
 wrapper is absent. If the variable is set but the path is missing or not
 executable, Aru stops instead of silently changing identity.
 
@@ -229,12 +230,14 @@ The bootstrap `review:*` authority labels do not register providers.
 `create_pr.py` combines registered external services with locally configured,
 bound coding identities in one stable pool. The issue number rotates the first
 slot. A selected coding identity is assigned only after its bounded probe
-returns exactly `OK`; an unavailable candidate advances to the next slot. The
-author identity and GitHub actor are excluded. This needs no scheduler, private
-queue, or capacity ledger. The assigned authority must produce verifiable
-current-head evidence. On explicit
+returns exactly `OK` (which verifies liveness only); an unavailable candidate
+advances to the next slot. The author identity and GitHub actor are excluded.
+This needs no scheduler, private queue, or capacity ledger. The assigned
+authority must produce verifiable current-head evidence. On explicit
 unavailability it falls back immediately; while merely pending it retains the
-service for less than 15 minutes and falls back at 15 minutes.
+service for less than 15 minutes and becomes eligible for fallback at 15
+minutes. Because the kernel itself has no scheduler, an external event or timer
+must invoke `create_pr.py --refresh-reviewer <PR>`.
 
 If reviewer bindings exist but `ARU_CODING_REVIEWERS` is missing, assignment
 fails visibly rather than silently collapsing the pool to external services.
@@ -326,8 +329,7 @@ example-app/
 │   └── pre-push
 ├── .github/
 │   ├── ISSUE_TEMPLATE/governed-task.yml
-│   ├── PULL_REQUEST_TEMPLATE.md
-│   └── workflows/ci.yml
+│   └── PULL_REQUEST_TEMPLATE.md
 ├── .git/hooks/
 ├── .gitignore
 └── AGENTS.md
@@ -357,7 +359,7 @@ The helper intentionally does not:
 - commit or push the generated files;
 - establish an initial remote default-branch baseline;
 - configure branch rulesets;
-- tailor CI to the project's language and test suite;
+- choose any separate release-only full-suite activity the project wants;
 - install an external reviewer or coding-agent provider;
 - add existing issues to the new Project.
 
@@ -374,9 +376,11 @@ feature, not a migration engine.
 
 1. Start from a clean project branch or worktree.
 2. Generate the minimal scaffold outside the project.
-3. Compare each generated file with the project's current governance and CI.
+3. Compare each generated file with the project's current governance and local
+   verification policy.
 4. Merge only the rules and hooks the project can actually support.
-5. Run the project's full relevant verification before merging the adoption.
+5. Run focused local verification for the migrated governance surfaces before
+   merging the adoption.
 
 Generate the comparison scaffold:
 
@@ -393,8 +397,7 @@ Reconcile these surfaces deliberately:
 | --- | --- |
 | `AGENTS.md` | Preserve stricter local safety and product rules |
 | Issue template | Keep required acceptance criteria and `touches:` input |
-| PR template | Keep `Closes #N`, verification, and surface-change evidence |
-| CI workflow | Replace the sample compilation step with real project checks |
+| PR template | Keep `Closes #N`, focused verification commands, and surface-change evidence |
 | `.gitignore` | Merge entries; do not overwrite project-specific ignores |
 | `.aru/hooks/` | Retain versioned hook sources for the consumer project |
 | `.git/hooks/` | Install after reviewing any existing user-owned hooks |
@@ -436,19 +439,23 @@ and can consume the shared GraphQL allowance after only a few transitions.
 Missing, duplicated, malformed, or truncated targeted evidence still blocks
 the update.
 
-### CI
+### Local verification
 
-The generated workflow only compiles Python files. Replace or extend it with
-the consumer project's real focused checks, for example:
+The scaffold does not generate a repository workflow. Record focused local
+verification for each PR head in the PR body, for example:
 
-- unit or integration tests related to the issue;
+- issue acceptance predicates;
+- unit or integration tests directly affected by the issue;
 - lint and formatting validation;
 - type checking;
-- application build;
-- schema or migration validation when relevant.
+- changed-path compile or build checks;
+- schema, migration, invariant, or secret validation when relevant.
 
-The required CI result must be attached to the exact current PR head. A green
-result from an earlier commit becomes historical after any new push.
+Do not use a repository-wide test suite as a normal issue or PR merge gate.
+If operators want a full suite for a release or milestone, run it separately as
+an explicit local activity outside the per-issue merge authority. After any new
+push or verification edit, refresh the exact-head PR-body evidence with
+`create_pr.py --refresh-verification`.
 
 ### Reviewer providers
 
@@ -564,7 +571,8 @@ sequenceDiagram
     participant GH as GitHub issue/project
     participant A as Developer or agent
     participant WT as Git worktree
-    participant CI as CI + reviewer
+    participant LV as Local verification
+    participant R as Independent reviewer
     participant M as merge_pr.py
 
     O->>GH: Approve complete Backlog issue
@@ -573,8 +581,10 @@ sequenceDiagram
     A->>WT: Create isolated issue branch
     A->>WT: Implement within touches and test
     A->>GH: Push branch and open PR
-    GH->>CI: Verify exact current head
-    CI-->>GH: Green CI and authoritative verdict
+    A->>LV: Run focused commands in exact-head worktree
+    LV-->>GH: create_pr.py binds exact-head evidence
+    GH->>R: Request review for the current head
+    R-->>GH: Authoritative verdict for the exact head
     A->>M: Merge PR with expected head
     M->>GH: Recheck gates, merge, mark Done
     A->>WT: Remove only safe closed worktree
@@ -629,37 +639,50 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" \
   --json
 ```
 
-The picker first resumes that agent's open feedback, CI failure, merge-ready PR,
-or waiting PR. Only then does it fetch every page of Ready issues. It excludes
-issues labeled `needs-human` or `type:epic`, then orders eligible work by
-priority (`P0` → `P1` → `P2` → `P3`) and ascending issue number within each
-priority. Missing priority defaults to `P2`. An issue with contradictory or
-unsupported priority metadata is skipped with a diagnostic, so it cannot block
-other valid Ready work.
+For a single agent, the picker first resumes that agent's open feedback, failed
+exact-head local verification, merge-ready PR, or waiting PR. Only then does
+it fetch every page of Ready issues. It excludes issues labeled `needs-human`
+or `type:epic`, then orders eligible work by priority (`P0` → `P1` → `P2` →
+`P3`) and ascending issue number within each priority. Missing priority
+defaults to `P2`. An issue with contradictory or unsupported priority metadata
+is skipped with a diagnostic, so it cannot block other valid Ready work.
+
+For multiple explicit agents in one JSON batch, an authored open PR occupies
+only that author's remediation lane, but its `touches:` reserve globally
+against free-lane assignment. Other free lanes continue from the same shared
+Ready snapshot and may receive independent conflict-free work in the same
+invocation. Free-lane selection fails closed on contradictory authorship,
+dependency inventory drift, malformed `touches:` metadata, active-PR `touches:`
+overlap, and candidate-candidate `touches:` overlap.
 
 If that Ready snapshot is empty, the same invocation may perform one bounded
 idle-recovery pass: fetch one Backlog snapshot, evaluate mechanical eligibility
-once, then narrow its pre-promotion recheck to the one chosen Backlog issue and
-its declared dependencies before promoting at most one highest-priority
-eligible issue. Promotion requires the transactional `set_status(...,
-expected_current="Backlog")` API and fails closed on any drift. Batch mode
-preserves its lane schema but also fails closed by promoting at most one issue
-per invocation, leaving remaining lanes idle rather than risking overlapping or
-partial promotions; if the chosen recovery issue's `touches:` overlap active
-lane work that the current open PR state can prove, recovery rejects that issue
-instead of promoting it. This recovery path does not run when Ready is
-non-empty, even if every visible Ready card is human-gated, epic, malformed,
+once, then narrow each pre-promotion recheck to the chosen Backlog issue and
+its declared dependencies before promoting as many highest-priority eligible
+independent issues as free capacity allows from that one snapshot. Promotion
+requires the transactional `set_status(..., expected_current="Backlog")` API
+and fails closed on any drift. Batch mode preserves its lane schema, skips
+snapshot candidates whose `touches:` overlap active lane work or earlier
+selected recovery candidates, and stops terminally on reread or promotion write
+failures instead of masking partial mutation. If a later recovery reread or
+promotion write fails after earlier promotions succeeded, the invocation raises
+before returning JSON diagnostics; the already-promoted cards remain `Ready`
+and a later invocation will see them, and no claims occur after that
+exception. This recovery path does not run when Ready is non-empty, even if
+every visible Ready card is human-gated, epic, malformed,
 or dependency-blocked. It never polls, retries, loops over the whole board
 again, refreshes a second Backlog snapshot, or persists state. GraphQL
 partials, quota errors, status drift, eligibility drift, and promotion write
 failures remain terminal.
 
 When idle recovery runs, diagnostics add deterministic `Backlog issue #N ...;
-skipped` messages for rejected Backlog cards and `Promoted Backlog issue #N to
-Ready` for each successful promotion. Batch recovery keeps `ready_classification`
-bound to the original Ready snapshot and reports any recovered Backlog work only
-through additive diagnostics. If no Backlog issue is mechanically eligible, the
-invocation returns idle after that one bounded pass.
+skipped` messages for rejected Backlog cards, one `Ready snapshot empty;
+recovered N Backlog candidate(s)` summary, and `Promoted Backlog issue #N to
+Ready` for each successful promotion. Batch recovery keeps
+`ready_classification` bound to the original Ready snapshot and reports any
+recovered Backlog work only through additive diagnostics when the invocation
+returns normally. If no Backlog issue is mechanically eligible, the invocation
+returns idle after that one bounded pass.
 
 You may claim a known issue explicitly:
 
@@ -705,7 +728,7 @@ python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
   --issue 42 \
   --agent "$agent_id" \
   --title "feat: export monthly statements" \
-  --body "Implements the approved statement export and focused coverage."
+  --body-file /path/to/pr-body.md
 ```
 
 The helper:
@@ -713,6 +736,8 @@ The helper:
 - verifies issue ownership and branch identity;
 - confirms the published remote head equals local `HEAD`;
 - appends `Closes #42`;
+- validates the `## Verification` section, rejects broad or full-suite
+  commands, and binds the focused command list to the exact head;
 - adds `author:<agent>` and `author-family:<family>`;
 - assigns the first explicitly registered available external
   `review:<authority>` label,
@@ -720,16 +745,34 @@ The helper:
   available;
 - moves the issue to `In Review`.
 
-### Step 7: wait for current-head evidence
+### Step 7: wait for exact-head evidence
 
 ```bash
-python3 "$ARU_SDLC_HOME/scripts/check_ci.py" --pr 123 --wait --json
+python3 "$ARU_SDLC_HOME/scripts/check_ci.py" --pr 123 --json
 python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr 123 --json
 ```
 
-If CI fails, diagnose the complete current-head logs and make the smallest
-repair. If review findings exist, address every unresolved finding. Any new push
-requires fresh current-head CI and review evidence.
+If local verification is stale or malformed, rerun only the focused commands
+needed for the current head and refresh the PR body; waiting does not create
+verification evidence. If review findings exist, address every unresolved
+finding. If the PR has mergeStateStatus `DIRTY` (a merge conflict with base
+branch `main`), merge `origin/main` into the feature branch within the claimed
+worktree (never rebase or force push), resolve conflicts within declared
+`touches:` boundaries, rerun focused verification, and refresh exact-head
+evidence. Any new push requires fresh exact-head local verification and review
+evidence.
+
+Refresh local verification after each push or verification edit:
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
+  --refresh-verification 123 \
+  --body-file /path/to/pr-body.md
+```
+
+The refresh flow revalidates the allowlisted commands, executes them locally
+in the current exact-head worktree, stops on the first nonzero exit, and only
+then binds the PR body marker.
 
 Refresh the authority after an explicit provider failure or while waiting:
 
@@ -738,12 +781,13 @@ python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
   --refresh-reviewer 123 --json
 ```
 
-Pending for less than 15 minutes retains the external authority. At exactly 15
-minutes the helper probes the distinct coding-agent pool and, only after a
-successful capacity test, replaces the one authority and records the exact head,
-old authority, reviewer identity, timestamp, and fallback reason on the PR.
-The timeout is measured from the latest persisted label-assignment event for
-the current authority.
+Pending for less than 15 minutes retains the external authority. At 15 minutes,
+an external event or timer invoking `create_pr.py --refresh-reviewer <PR>`
+probes the distinct coding-agent pool (verifying liveness only) and, only after
+a successful capacity test, replaces the one authority and records the exact
+head, old authority, reviewer identity, timestamp, and fallback reason on the
+PR. The kernel itself has no scheduler. The timeout is measured from the latest
+persisted label-assignment event for the current authority.
 
 ### Step 8: dry-run and merge
 
@@ -772,9 +816,10 @@ python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" \
   --json
 ```
 
-The merge helper re-reads the PR, exact head, CI, authoritative verdict, unresolved
-threads, base state, linked issue state, and acceptance criteria immediately
-before merging. It then marks the linked issue Done.
+The merge helper re-reads the PR, exact head, exact-head local verification,
+authoritative verdict, unresolved threads, base state, linked issue state, and
+acceptance criteria immediately before merging. It then marks the linked issue
+Done.
 
 ### Step 9: clean safely
 
@@ -800,8 +845,8 @@ Dirty, unregistered, open-PR, and user-created worktrees are retained.
 | `create-github-issue` | Filing one issue with the Ready contract |
 | `triage-backlog` | Validating Backlog and promoting complete work |
 | `implement-next-issue` | Claiming and implementing one Ready issue |
-| `remediate-ci-failure` | Current-head CI fails on an authored PR |
-| `address-pr-feedback` | An authored PR has unresolved review findings |
+| `remediate-ci-failure` | Exact-head focused local verification failed on an authored PR |
+| `address-pr-feedback` | An authored PR has unresolved review findings or DIRTY merge conflicts |
 
 The skills guide agents through the same helpers described here. They do not
 create a scheduler, autonomous loop, or second work queue.
@@ -815,13 +860,13 @@ create a scheduler, autonomous loop, or second work queue.
 | `init_project.py` | Generate a minimal consumer scaffold | Refuses conflicting overwrites |
 | `update_issue_status.py` | Move one issue between the five states or reconcile one epic | Updates status label and Project field together; epic mode checks or applies bounded child-only closure |
 | `triage_backlog.py` | Validate and promote Backlog issues | Rejects incomplete contracts and open dependencies |
-| `fetch_next_work.py` | Resume or select one unit of work | Prioritizes authored PR state; only empty Ready snapshots may trigger one bounded Backlog recovery pass |
+| `fetch_next_work.py` | Resume or select bounded lane work | In batch mode, authored PRs occupy only their own remediation lanes while their touches reserve globally against free-lane assignment; only empty Ready snapshots may trigger one bounded Backlog recovery pass that can fill multiple free lanes from one safe snapshot |
 | `claim_issue.py` | Acquire or release exclusive ownership | Re-reads state and fails on claim races |
 | `create_branch.py` | Create the issue branch and worktree | Requires In Progress plus the exact claimant |
 | `create_pr.py` | Open the governed PR | Requires published exact head and appends `Closes #N` |
-| `check_ci.py` | Read or wait for current-head CI | Fails closed on incomplete or ambiguous check data |
+| `check_ci.py` | Read exact-head local verification state | Fails closed on stale, malformed, or broad verification evidence |
 | `fetch_pr_feedback.py` | Read unresolved review findings | Rejects truncated review-thread inventory |
-| `merge_pr.py` | Evaluate and perform the only sanctioned merge | Requires expected head, green CI, review, and clean threads |
+| `merge_pr.py` | Evaluate and perform the only sanctioned merge | Requires expected head, exact-head local verification, review, and clean threads |
 | `cleanup_worktrees.py` | Remove eligible Factory worktrees | Retains dirty, open, and ambiguous worktrees |
 | `revert_merge.py` | Create governed reverse gear | Requires a separate approved revert issue |
 
@@ -850,22 +895,25 @@ The state machine is deterministic:
 | Rotated coding candidate fails its bounded probe | any | Advance to the next candidate without recording private state |
 | Assigned external is available or has completed review | any | Retain external |
 | Assigned external is pending | `< 15m` | Retain external; no fallback |
-| Assigned external is pending | `>= 15m` | Probe and assign a distinct coding agent |
+| Assigned external is pending | `>= 15m` | External event/timer invokes refresh; probe and assign a distinct coding agent |
 | Assigned external explicitly reports unavailable/error | any | Probe and assign a distinct coding agent immediately |
 | No distinct coding agent answers exactly `OK` | any | Keep authority unchanged and fail closed |
-| Assigned coding reviewer explicitly aborts or becomes unavailable | any | Audit and recover to first registered external authority |
+| Assigned coding reviewer explicitly aborts, hits quota, or becomes unavailable | any | Audit and recover immediately to first registered external authority |
 
 Paused reviews, cost or quota exhaustion, rate limiting, provider outage,
 unsupported bot-authored PRs, and explicit unavailable/error responses are
 unavailable. A successful status whose detail reports one of those no-op states
 cannot satisfy exact-head review.
 Coding probes run in Claude Code, OpenAI Codex, xAI Cursor, Google Antigravity
-order after moving the author's model family behind other families. Claude
-executes every `claude-sub` probe declared in `ARU_CODING_REVIEWERS`, then
-rotates deterministically across the successful bound subscriptions. An
-identity is eligible only when
-its `reviewer-binding:<identity>=<github-login>` exists and the bound actor is
-not the PR author.
+order after moving the author's model family behind other families. The probe
+tests liveness only and does not guarantee that full review execution will not
+hit quota or rate limits. If substantive review execution later hits quota, cost
+limits, or errors, recover immediately with
+`--coding-reviewer-unavailable <reason>`. Claude executes every `claude-sub`
+probe declared in `ARU_CODING_REVIEWERS`, then rotates deterministically across
+the successful bound subscriptions. An identity is eligible only when its
+`reviewer-binding:<identity>=<github-login>` exists and the bound actor is not
+the PR author.
 
 The helper replaces the authority label as one labels update and then verifies
 that exactly one supported `review:*` label remains. A fallback PR comment
@@ -959,7 +1007,8 @@ python3 "$ARU_SDLC_HOME/scripts/revert_merge.py" \
   --agent codex-local
 ```
 
-The reverse change follows the normal PR, CI, external-review, and merge path.
+The reverse change follows the normal PR, exact-head local verification,
+external-review, and merge path.
 Never rewrite shared default-branch history.
 
 ### Recover the pre-reset framework
@@ -986,10 +1035,12 @@ Use it for history and recovery evidence, not as a second active kernel.
 | Push says a path is outside `touches:` | Diff exceeds the declared write boundary | Stop, update the approved issue, then retry |
 | Direct push to main/master is refused | Local Aru hook is working | Push an issue branch and merge a PR |
 | PR creation says exact head is unpublished | Local `HEAD` differs from the remote branch | Push the current issue branch, then retry |
-| CI was green before the latest push | Evidence belongs to an older SHA | Wait for current-head CI |
+| Local verification was valid before the latest push | Evidence belongs to an older SHA | Re-run focused checks and refresh the PR body for the new head |
 | Merge reports zero or multiple reviewers | Review-label authority is ambiguous | Leave exactly one supported review label |
+| `PR merge state is DIRTY` / conflict | Feature branch conflicts with base branch | Merge `origin/main` into the feature branch (never rebase/force push), rerun focused checks, and refresh exact-head evidence |
 | External reviewer is unavailable | Cost, quota, rate, outage, unsupported PR, or explicit error evidence exists | Run `create_pr.py --refresh-reviewer <PR>` immediately |
-| External reviewer is still pending | It has not produced a verdict | Wait until 15 minutes; then run the reviewer refresh |
+| External reviewer is still pending | It has not produced a verdict | Wait until 15 minutes; then an external event/timer runs the reviewer refresh (kernel has no scheduler) |
+| Coding reviewer hits quota during review | Substantive review execution exhausted capacity | Run `create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable "quota exhausted"` immediately |
 | Coding fallback has no capacity | Every distinct smoke test failed | Keep the existing authority and stop; do not fabricate a reviewer |
 | Coding review is rejected | Identity, actor, payload, head, verdict, or findings are invalid | Obtain one fresh formal attestation from the assigned non-author reviewer |
 | Review thread inventory is truncated | GitHub did not return complete evidence | Stop and retry when complete data is available |
@@ -1005,7 +1056,7 @@ Use it for history and recovery evidence, not as a second active kernel.
 - issue-contract validation;
 - exclusive claims and path boundaries;
 - worktree isolation;
-- exact-head CI and one external-or-coding authoritative review gate;
+- exact-head focused local verification and one external-or-coding authoritative review gate;
 - mechanical merge and safe worktree cleanup;
 - governed revert creation.
 
@@ -1065,8 +1116,8 @@ true.
 
 ### Verification and review
 
-- [ ] Consumer-specific CI runs the real focused checks.
-- [ ] CI results are attached to the exact PR head.
+- [ ] Operators know the focused local verification commands for each PR type.
+- [ ] Exact-head local verification is refreshed in the PR body after each push.
 - [ ] At least one external reviewer is registered or one distinct coding-agent
       capacity probe succeeds.
 - [ ] Operators know the immediate-unavailability and exact 15-minute reviewer
@@ -1079,7 +1130,7 @@ true.
 - [ ] One agent claimed it and created an isolated worktree.
 - [ ] The path hook rejected a deliberate out-of-budget test change.
 - [ ] The PR received `Closes #N` and exactly one authoritative reviewer label.
-- [ ] Current-head CI and review completed.
+- [ ] Exact-head local verification and review completed.
 - [ ] `merge_pr.py --dry-run` passed before the real merge.
 - [ ] The issue reached Done and cleanup retained nothing unsafe.
 

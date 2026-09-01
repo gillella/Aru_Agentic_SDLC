@@ -12,8 +12,9 @@ software project:
 
 1. **What work is approved?** — the GitHub issue and Project Board.
 2. **What may this worker change?** — the exclusive claim and `touches:` paths.
-3. **Is this exact revision safe enough to merge?** — current-head CI and one
-   authoritative reviewer distinct from the author.
+3. **Is this exact revision safe enough to merge?** — exact-head focused local
+   verification evidence and one authoritative reviewer distinct from the
+   author.
 4. **Who may merge it?** — only `scripts/merge_pr.py` with the expected head.
 
 It is intentionally a governance layer, not an autonomous agent platform. It
@@ -29,10 +30,10 @@ flowchart LR
     RD -->|exclusive claim| IP[In Progress]
     IP -->|isolated worktree| CODE[Small change + focused tests]
     CODE --> PR[Pull request]
-    PR --> CI{Exact-head CI green?}
-    CI -->|No| FIX[Fix current head]
-    FIX --> CI
-    CI -->|Yes| REV{Assigned authoritative review complete?}
+    PR --> VERIFY{Exact-head local verification bound?}
+    VERIFY -->|No or failed| FIX[Fix current head + rerun focused checks]
+    FIX --> VERIFY
+    VERIFY -->|Yes| REV{Independent authoritative review complete?}
     REV -->|Findings| FIX
     REV -->|Clean| MERGE[merge_pr.py --expected-head]
     MERGE --> DONE[Done + safe cleanup]
@@ -46,7 +47,7 @@ The source of truth stays deliberately small:
 | Write boundary | `touches:` declaration |
 | Writer ownership | One `agent:<id>` claim |
 | Isolation | One Git worktree per issue |
-| Verification | CI result for the exact PR head |
+| Verification | Focused local verification evidence bound to the exact PR head |
 | Review | Exactly one `review:<authority>` label for the current head |
 | Merge | `scripts/merge_pr.py` |
 | Deployment and production | The consumer repository and its operators |
@@ -60,8 +61,9 @@ be migrated into an existing project when all of these are true:
 - The repository has exactly one linked, open GitHub Project with the five
   statuses `Backlog`, `Ready`, `In Progress`, `In Review`, and `Done`.
 - New governed issues are added to that Project Board.
-- The repository has CI and at least one registered external reviewer or one
-  smoke-testable, distinct coding-agent reviewer.
+- The repository can record exact-head focused local verification in PR bodies
+  and has at least one registered external reviewer or one smoke-testable,
+  distinct coding-agent reviewer.
 - Developers and agents can read the canonical Aru directory through
   `ARU_SDLC_HOME`.
 
@@ -137,8 +139,10 @@ python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
 ```
 
 Review the staged `AGENTS.md`, `.github/`, `.aru/hooks/`, and `.gitignore`
-before applying them. Keep the consumer project's real build and test commands
-in its CI; the generated CI is only a minimal Python compilation baseline.
+before applying them. The scaffold no longer creates a repository workflow:
+per-issue and per-PR verification is local-only, exact-head, and focused.
+If a project wants a release-only full suite, treat it as a separate local
+operator activity rather than a merge gate for ordinary issue work.
 
 ### 4. Run one governed unit of work
 
@@ -161,6 +165,12 @@ The result contains at most one work item per explicit lane. This is a
 single-shot picker call, not a scheduler, daemon, worker handoff or presence
 registry, queue, capacity store, or polling loop; a later invocation reads a
 new authoritative snapshot.
+
+An authored open PR occupies only that author's remediation lane, but its
+`touches:` paths reserve globally against free-lane assignment. Other explicit
+lanes may still receive independent Ready or safely recovered Backlog work in
+the same invocation when `touches:` paths, dependencies, claims, and
+review-authority constraints stay conflict-free.
 
 Board Ready count is lifecycle state, not executable capacity. One activation
 snapshot comprises the complete paginated open-Ready inventory and, when that
@@ -189,8 +199,12 @@ explain why visible Ready cards may not be executable; they do not authorize
 automatic triage, board repair, or another picker tick.
 
 Work only in the worktree reported by `create_branch.py`. After focused local
-verification, publish the branch and open the PR through `create_pr.py`. Merge
-only after exact-head CI and the assigned authoritative review are complete.
+verification, publish the branch and open the PR through `create_pr.py`.
+Whenever the verification commands or PR head change, refresh the PR-body
+evidence through `create_pr.py --refresh-verification`; that flow revalidates
+the allowlisted commands, executes them locally in the current worktree, and
+only then rebinds the exact head. Merge only after that exact-head local
+verification and the assigned authoritative review are complete.
 
 ## Reviewer state machine
 
@@ -199,12 +213,13 @@ installed external provider with `reviewer-registered:<service>`; ordinary
 bootstrap `review:*` labels are not registrations. At creation, `create_pr.py`
 combines registered external services and bound identities from the local
 `ARU_CODING_REVIEWERS` pool in a stable order. The issue number rotates the
-starting slot. A selected coding identity must pass its bounded capacity probe;
-an unavailable candidate advances to the next slot. This distributes
-consecutive PRs without a queue or capacity ledger. An explicit external
-unavailable/error response causes immediate fallback. A pending service retains
-authority for 14 minutes 59 seconds; at 15 minutes it becomes eligible for
-immediate fallback through:
+starting slot. A selected coding identity must pass its bounded capacity probe
+(verifying liveness only); an unavailable candidate advances to the next slot.
+This distributes consecutive PRs without a queue or capacity ledger. An explicit
+external unavailable/error response causes immediate fallback. A pending service
+retains authority for 14 minutes 59 seconds; at 15 minutes it becomes eligible
+for fallback. Because the kernel itself has no scheduler, an external event or
+timer must invoke:
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
@@ -215,26 +230,27 @@ The helper evaluates the newest trusted, timestamped provider evidence. The
 clock starts at the current authority's latest GitHub label-assignment event,
 so a governed recovery receives its own complete 15-minute pending window.
 
-Coding fallback smoke-tests Claude Code, OpenAI Codex, xAI Cursor, then Google
-Antigravity; it excludes the author identity and prefers another model family.
-Each identity must have a `reviewer-binding:<identity>=<github-login>` label,
-and that GitHub actor must differ from the PR author. Each machine declares its
-local pool in `ARU_CODING_REVIEWERS`. Entries use `family:identity`; Claude
-entries add the subscription argument as `claude-code:identity@subscription`.
-The current MacBook identities are `m1/m2/m3/mo/mx/mg`; the Mac mini uses
-`n1/n2/n3/no/nx/ng`. Adding or removing a Claude subscription changes only this
-configuration and its binding label. Missing, malformed, or duplicate
-configuration blocks coding fallback. Every configured Claude subscription is
-probed and successful bound subscriptions rotate deterministically. Paused
-reviews, cost or quota exhaustion, rate limiting, provider outage, unsupported
-bot-authored PRs, and explicit unavailable/error responses all count as
-unavailable. A successful check whose detail says it performed no review does
-not satisfy the exact-head gate. If no distinct coding
-agent has capacity, assignment does not change and the transition fails closed.
-Registered coding bindings with a missing local pool also fail visibly instead
-of silently degrading every assignment to external-only selection.
-If an assigned coding reviewer later aborts or explicitly becomes unavailable,
-recover through the same helper with `--coding-reviewer-unavailable <reason>`;
+Coding fallback smoke-tests liveness in Claude Code, OpenAI Codex, xAI Cursor,
+then Google Antigravity; it excludes the author identity and prefers another
+model family. Each identity must have a `reviewer-binding:<identity>=<github-login>`
+label, and that GitHub actor must differ from the PR author. Each machine
+declares its local pool in `ARU_CODING_REVIEWERS`. Entries use `family:identity`;
+Claude entries add the subscription argument as
+`claude-code:identity@subscription`. The current MacBook identities are
+`m1/m2/m3/mo/mx/mg`; the Mac mini uses `n1/n2/n3/no/nx/ng`. Adding or removing a
+Claude subscription changes only this configuration and its binding label.
+Missing, malformed, or duplicate configuration blocks coding fallback. Every
+configured Claude subscription is probed and successful bound subscriptions
+rotate deterministically. Paused reviews, cost or quota exhaustion, rate
+limiting, provider outage, unsupported bot-authored PRs, and explicit
+unavailable/error responses all count as unavailable. A successful check whose
+detail says it performed no review does not satisfy the exact-head gate. If no
+distinct coding agent has capacity, assignment does not change and the
+transition fails closed. Registered coding bindings with a missing local pool
+also fail visibly instead of silently degrading every assignment to
+external-only selection. If an assigned coding reviewer later aborts, hits
+quota, or explicitly becomes unavailable during substantive execution, recover
+immediately through the same helper with `--coding-reviewer-unavailable <reason>`;
 it audits and restores the first registered external authority without leaving
 coding identity metadata behind.
 

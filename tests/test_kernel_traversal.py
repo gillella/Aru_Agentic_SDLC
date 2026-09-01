@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 import copy
+import subprocess
 
 import claim_issue
 import create_pr
+import local_verification
 import merge_pr
 import triage_backlog
 
 
 def status_label(status: str) -> str:
     return "status:" + status.lower().replace(" ", "-")
+
+
+def verification_body(command: str) -> str:
+    return (
+        "## Summary\n\nSummary\n\n"
+        "## Verification\n\n"
+        f"- `{command}`"
+    )
 
 
 def traverse(monkeypatch, number: int) -> dict:
@@ -84,6 +94,11 @@ def traverse(monkeypatch, number: int) -> dict:
     monkeypatch.setattr(create_pr, "require_published_head", lambda _branch: "a" * 40)
     monkeypatch.setattr(create_pr, "ensure_label", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(create_pr, "run", lambda _argv: None)
+    monkeypatch.setattr(
+        local_verification,
+        "run",
+        lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, "", ""),
+    )
     reviewer = "coderabbit"
 
     def pr_snapshot(_argv):
@@ -99,7 +114,7 @@ def traverse(monkeypatch, number: int) -> dict:
     created = create_pr.create(
         number,
         "feat: tiny",
-        "Summary",
+        verification_body("pytest tests/test_kernel_traversal.py -q"),
         "codex-1",
         external_states={
             "coderabbit": create_pr.AVAILABLE,

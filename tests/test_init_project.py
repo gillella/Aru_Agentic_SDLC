@@ -39,7 +39,6 @@ def test_scaffold_creates_only_minimal_governance(tmp_path):
         "AGENTS.md",
         ".github/ISSUE_TEMPLATE/governed-task.yml",
         ".github/PULL_REQUEST_TEMPLATE.md",
-        ".github/workflows/ci.yml",
         ".gitignore",
         ".aru/hooks/pre-push",
         ".aru/hooks/enforce_touches.py",
@@ -47,6 +46,14 @@ def test_scaffold_creates_only_minimal_governance(tmp_path):
     assert (target / ".git").is_dir()
     assert not (target / "skills").exists()
     assert not (target / "scripts").exists()
+
+
+def test_scaffolded_pr_template_uses_unchecked_verification_placeholders(tmp_path):
+    target = tmp_path / "consumer"
+    init_project.scaffold("consumer", target)
+    template = (target / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
+    assert "- [ ] Replace with each focused command actually run on this exact head." in template
+    assert "pytest path/to/affected_test.py -q" not in template
 
 
 def test_scaffold_refuses_to_overwrite_user_content(tmp_path):
