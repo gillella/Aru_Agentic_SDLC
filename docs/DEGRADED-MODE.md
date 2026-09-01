@@ -14,3 +14,8 @@ read completely:
 A local implementation may continue only when its claim and `touches:` budget
 were established before the outage. It may not publish or transition state
 until GitHub is authoritative again.
+
+An external Driver must cancel or defer any scheduled continuation whose PR
+head or authority cannot be reread. Consumer deployment and incident policy
+remains consumer-owned; degraded Kernel state never authorizes production
+action.

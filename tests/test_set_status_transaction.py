@@ -46,12 +46,28 @@ def test_set_status_expected_current_contract(
     monkeypatch, issue_status, project_status, expected, should_fail
 ):
     commands = []
-    issue_rec = {"number": 7, "state": "OPEN", "labels": [{"name": f"status:{issue_status.lower()}"}]}
-    monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_rec)
-    monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: project_status)
+    settled = False
+
+    def issue_record(number, cwd=None):
+        value = "Done" if settled else issue_status
+        return {"number": 7, "state": "OPEN", "labels": [{"name": f"status:{value.lower()}"}]}
+
+    monkeypatch.setattr(common, "issue", issue_record)
+    monkeypatch.setattr(
+        common,
+        "project_item_status",
+        lambda number, cwd=None: "Done" if settled else project_status,
+    )
     monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
     monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
-    monkeypatch.setattr(common, "run", lambda argv, **kw: commands.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+    def command(argv, **kw):
+        nonlocal settled
+        commands.append(argv)
+        if argv[:3] == ["gh", "project", "item-edit"]:
+            settled = True
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(common, "run", command)
 
     if should_fail:
         with pytest.raises(common.StatusPreconditionError, match=f"must both equal expected {expected!r}"):
@@ -158,12 +174,31 @@ def test_set_status_pre_mutation_check_runs_after_preflight_before_first_mutatio
     """The optional pre_mutation_check fires once the transition is authorised but
     before any issue/card mutation; raising from it leaves zero commands."""
     commands = []
-    issue_rec = {"number": 7, "state": "OPEN", "labels": [{"name": "status:backlog"}]}
-    monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_rec)
-    monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: "Backlog")
+    settled = False
+    monkeypatch.setattr(
+        common,
+        "issue",
+        lambda number, cwd=None: {
+            "number": 7,
+            "state": "OPEN",
+            "labels": [{"name": "status:done" if settled else "status:backlog"}],
+        },
+    )
+    monkeypatch.setattr(
+        common,
+        "project_item_status",
+        lambda number, cwd=None: "Done" if settled else "Backlog",
+    )
     monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
     monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
-    monkeypatch.setattr(common, "run", lambda argv, **kw: commands.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
+    def command(argv, **kw):
+        nonlocal settled
+        commands.append(argv)
+        if argv[:3] == ["gh", "project", "item-edit"]:
+            settled = True
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(common, "run", command)
 
     def _raise() -> None:
         raise common.StatusPreconditionError("child evidence drifted before apply")
@@ -214,16 +249,31 @@ def test_set_status_ensure_label_runs_after_pre_mutation_check_and_before_issue_
     """When the drift guard passes, ensure_label executes only after it and
     immediately before the issue edit."""
     order: list[str] = []
-    issue_rec = {"number": 7, "state": "OPEN", "labels": [{"name": "status:backlog"}]}
-    monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_rec)
-    monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: "Backlog")
+    settled = False
+    monkeypatch.setattr(
+        common,
+        "issue",
+        lambda number, cwd=None: {
+            "number": 7,
+            "state": "OPEN",
+            "labels": [{"name": "status:done" if settled else "status:backlog"}],
+        },
+    )
+    monkeypatch.setattr(
+        common,
+        "project_item_status",
+        lambda number, cwd=None: "Done" if settled else "Backlog",
+    )
     monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
     monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: order.append("ensure_label"))
-    monkeypatch.setattr(
-        common, "run",
-        lambda argv, **kw: order.append(argv[1] if argv[:1] == ["gh"] else "run")
-        or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""),
-    )
+    def command(argv, **kw):
+        nonlocal settled
+        order.append(argv[1] if argv[:1] == ["gh"] else "run")
+        if argv[:3] == ["gh", "project", "item-edit"]:
+            settled = True
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(common, "run", command)
 
     common.set_status(
         7, "Done", expected_current="Backlog",
@@ -231,3 +281,33 @@ def test_set_status_ensure_label_runs_after_pre_mutation_check_and_before_issue_
     )
 
     assert order[:3] == ["pre_mutation_check", "ensure_label", "issue"]
+
+
+def test_set_status_rejects_silent_non_settlement(monkeypatch):
+    issue_rec = {
+        "number": 7,
+        "state": "OPEN",
+        "labels": [{"name": "status:backlog"}],
+    }
+    monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_rec)
+    monkeypatch.setattr(
+        common, "project_item_status", lambda number, cwd=None: "Backlog"
+    )
+    monkeypatch.setattr(
+        common,
+        "board_edit",
+        lambda number, status, *args, **kwargs: [
+            "project", "item-edit", "--id", "1"
+        ],
+    )
+    monkeypatch.setattr(common, "ensure_label", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        common,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, stdout="", stderr=""
+        ),
+    )
+
+    with pytest.raises(common.KernelError, match="did not settle"):
+        common.set_status(7, "Done", expected_current="Backlog")

@@ -16,6 +16,10 @@ targets=(
   "${HOME}/.codex/skills"
   "${HOME}/.cursor/skills"
 )
+global_agents="${HOME}/.codex/AGENTS.md"
+governance_template="${aru_home}/templates/AGENTS.md"
+managed_begin="<!-- BEGIN ARU_SDLC_GOVERNANCE -->"
+managed_end="<!-- END ARU_SDLC_GOVERNANCE -->"
 
 retained() {
   local candidate="$1"
@@ -25,6 +29,60 @@ retained() {
   done
   return 1
 }
+
+install_global_guidance() {
+  local target="$1"
+  local template="$2"
+  local target_dir
+  local temporary
+
+  target_dir="$(dirname "${target}")"
+  mkdir -p "${target_dir}"
+
+  if [[ ! -e "${target}" ]]; then
+    cp "${template}" "${target}"
+    echo "installed managed Aru guidance in ${target}"
+    return
+  fi
+
+  if grep -Fq "${managed_begin}" "${target}"; then
+    if ! grep -Fq "${managed_end}" "${target}"; then
+      echo "error: refusing to edit malformed Aru block in ${target}" >&2
+      exit 1
+    fi
+    temporary="$(mktemp)"
+    awk -v begin="${managed_begin}" -v end="${managed_end}" -v template="${template}" '
+      index($0, begin) {
+        while ((getline line < template) > 0) print line
+        close(template)
+        inside = 1
+        next
+      }
+      index($0, end) { inside = 0; next }
+      !inside { print }
+    ' "${target}" > "${temporary}"
+    cat "${temporary}" > "${target}"
+    rm -f "${temporary}"
+    echo "updated managed Aru guidance in ${target}"
+    return
+  fi
+
+  if grep -Fq "# Global Software Development Governance: Aru_Agentic_SDLC" "${target}"; then
+    local backup="${target}.pre-aru-v0.2.8.$(date +%Y%m%d%H%M%S)"
+    cp -p "${target}" "${backup}"
+    cp "${template}" "${target}"
+    echo "migrated legacy Aru guidance in ${target}; preserved ${backup}"
+    return
+  fi
+
+  temporary="$(mktemp)"
+  awk 'FNR == 1 && NR != 1 { print "" } { print }' "${target}" "${template}" > "${temporary}"
+  cat "${temporary}" > "${target}"
+  rm -f "${temporary}"
+  echo "appended managed Aru guidance to ${target}"
+}
+
+install_global_guidance "${global_agents}" "${governance_template}"
 
 for target in "${targets[@]}"; do
   mkdir -p "${target}"

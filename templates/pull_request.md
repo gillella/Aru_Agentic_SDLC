@@ -2,16 +2,15 @@
 
 Closes #<!-- issue -->
 
-## Verification
+## Governed verification
 
-List only focused commands for this head: acceptance predicates, changed-path
-lint/type/compile checks, directly affected tests, and invariant or secret
-gates. Do not include full-suite commands. After editing this section or
-pushing a new commit, rebind it with
-`python3 "$ARU_SDLC_HOME/scripts/create_pr.py" --refresh-verification <PR> --body-file <file>`.
+The required `aru-governed-pr` server check runs this repository's
+`.aru/verify.sh` on the exact PR head and validates the linked issue's
+`touches:` declaration against the actual diff.
 
-- [ ] Replace with each focused command actually run on this exact head.
-- [ ] Leave only executable commands here before refresh; unchecked placeholders do not bind.
+Optional local preflight or audit evidence:
+
+- <!-- command and result, if useful -->
 
 ## Net surface change
 
