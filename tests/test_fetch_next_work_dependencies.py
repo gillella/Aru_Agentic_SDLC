@@ -64,6 +64,7 @@ def test_dependency_states_use_one_bounded_bulk_query(monkeypatch):
             fetch_next_work.dependency_states(records)
     body = "\n".join(f"depends-on: #{number}" for number in range(1, 102))
     assert fetch_next_work.dependency_states([ready_issue(1, "needs-human", body=body)]) == {}
+    assert fetch_next_work.dependency_states([ready_issue(1, body="depends-on: none")]) == {}
     with pytest.raises(common.KernelError, match="exceeds 100"):
         fetch_next_work.dependency_states([ready_issue(1, body=body)])
 

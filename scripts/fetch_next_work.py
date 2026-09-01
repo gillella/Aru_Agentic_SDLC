@@ -92,15 +92,20 @@ def backlog_dependency_states(records: list[dict]) -> dict[int, str]:
     return _dependency_states(records, inventory_name="Backlog")
 
 
+def _referenced_dependencies(records: list[dict]) -> list[int]:
+    referenced: set[int] = set()
+    for record in records:
+        if _pre_dependency_category(label_names(record)) is not None:
+            continue
+        try:
+            referenced.update(dependencies(str(record.get("body") or "")))
+        except KernelError:
+            continue
+    return sorted(referenced)
+
+
 def _dependency_states(records: list[dict], *, inventory_name: str) -> dict[int, str]:
-    numbers = sorted(
-        {
-            number
-            for record in records
-            if _pre_dependency_category(label_names(record)) is None
-            for number in dependencies(str(record.get("body") or ""))
-        }
-    )
+    numbers = _referenced_dependencies(records)
     if len(numbers) > MAX_DEPENDENCY_REFERENCES:
         raise KernelError(
             f"{inventory_name} dependency inventory exceeds {MAX_DEPENDENCY_REFERENCES} references"
@@ -532,7 +537,17 @@ def _ready_candidates(
         if category:
             classification[category] += 1
             continue
-        dependency_numbers = dependencies(str(record.get("body") or ""))
+        try:
+            dependency_numbers = dependencies(str(record.get("body") or ""))
+        except KernelError as exc:
+            classification["malformed"] += 1
+            diagnostics.append(
+                (
+                    number,
+                    f"Ready issue #{number} has invalid dependencies: {exc}; skipped",
+                )
+            )
+            continue
         if any(issue_states.get(value) != "closed" for value in dependency_numbers):
             classification["dependency_blocked"] += 1
             continue

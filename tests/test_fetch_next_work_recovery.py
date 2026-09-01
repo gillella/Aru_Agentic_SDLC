@@ -359,6 +359,103 @@ def test_batch_skips_malformed_touches_with_diagnostics(monkeypatch):
     ]
 
 
+def test_select_ready_skips_malformed_dependencies_and_selects_valid_candidate(
+    monkeypatch,
+):
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [
+            ready_issue(
+                10,
+                "priority:p0",
+                body="depends-on: none\ntouches: src/malformed.py",
+            ),
+            ready_issue(11, "priority:p0", body="touches: src/valid.py"),
+        ],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: (_ for _ in ()).throw(AssertionError("Backlog inventory should not load")),
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "project_item_status",
+        lambda _n: (_ for _ in ()).throw(AssertionError("Project recovery evidence should not load")),
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Backlog mutation should not run")),
+    )
+
+    result = fetch_next_work.select("codex-sol56-issue537")
+
+    assert result == {
+        "type": "issue",
+        "issue": 11,
+        "title": "issue 11",
+        "diagnostics": [
+            "Ready issue #10 has invalid dependencies: "
+            "depends-on declarations must each match 'depends-on: #N'; skipped"
+        ],
+    }
+
+
+def test_batch_skips_malformed_dependencies_and_selects_valid_candidate(monkeypatch):
+    monkeypatch.setattr(fetch_next_work, "open_prs", lambda: [])
+    monkeypatch.setattr(
+        fetch_next_work,
+        "ready_issues",
+        lambda: [
+            ready_issue(
+                10,
+                "priority:p0",
+                body="depends-on: none\ntouches: src/malformed.py",
+            ),
+            ready_issue(11, "priority:p0", body="touches: src/valid.py"),
+        ],
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "backlog_issues",
+        lambda: (_ for _ in ()).throw(AssertionError("Backlog inventory should not load")),
+    )
+    monkeypatch.setattr(
+        fetch_next_work,
+        "project_item_status",
+        lambda _n: (_ for _ in ()).throw(AssertionError("Project recovery evidence should not load")),
+    )
+    monkeypatch.setattr(
+        fetch_next_work.triage_backlog,
+        "promote_issue",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("Backlog mutation should not run")),
+    )
+
+    result = fetch_next_work.select_batch(["agent-a", "agent-b"])
+
+    assert result == {
+        "schema": "aru.fetch-next-work.batch/v1",
+        "lanes": [
+            {
+                "agent": "agent-a",
+                "work": {"type": "issue", "issue": 11, "title": "issue 11"},
+            },
+            {"agent": "agent-b", "work": {"type": "idle"}},
+        ],
+        "diagnostics": [
+            "Ready classification: total=2, executable=1, human-gated=0, "
+            "epics=0, dependency-blocked=0, malformed=1",
+            "Ready issue #10 has invalid dependencies: "
+            "depends-on declarations must each match 'depends-on: #N'; skipped",
+        ],
+        "claim_status": "not-requested",
+        "ready_classification": ready_counts(2, 1, malformed=1),
+    }
+
+
 def test_batch_reports_one_aggregate_for_seven_ready_with_zero_executable(
     monkeypatch,
 ):
