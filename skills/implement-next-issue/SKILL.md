@@ -15,13 +15,16 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
    optional audit evidence, not merge authority.
 7. Commit and push the branch.
 8. Open the PR with `create_pr.py`; its body must contain `Closes #N`.
-9. Wait for the exact-head `aru-governed-pr` server check. Tier 0 documentation
-   and Tier 1 ordinary code do not wait for authoritative review; Tier 2
+9. Wait for the exact-head `aru-governed-pr` check on the dedicated `aru-ci`
+   self-hosted macOS arm64 pool. Never change the workflow to a GitHub-hosted
+   runner when that pool is offline. Tier 0 documentation and Tier 1 ordinary
+   code do not wait for authoritative review; Tier 2
    sensitive/contract and Tier 3 production/destructive changes also wait for
    one assigned reviewer distinct from the author. Unrecognized or invalid
    paths fail upward.
-   The server check runs `.aru/verify.sh` and validates the linked issue's
-   `touches:` boundary against the actual diff.
+   GitHub Actions supplies the check identity while `.aru/verify.sh` runs on an
+   operator-owned Mac and validates the linked issue's `touches:` boundary
+   against the actual diff. Ad hoc local runs remain preflight evidence.
    For Tier 2-3, do not hand-pick or hand-edit authority. The external Driver
    owns the one continuation event in `docs/KERNEL-CONTRACT.md`;
    `create_pr.py --refresh-reviewer <PR>` alone decides whether authority

@@ -13,8 +13,8 @@ software project:
 1. **What work is approved?** — the GitHub issue and Project Board.
 2. **What may this worker change?** — the exclusive claim and `touches:` paths.
 3. **Is this exact revision safe enough to merge?** — the exact-head
-   `aru-governed-pr` server check plus, for Tier 2-3 changes, one authoritative
-   reviewer distinct from the author.
+   `aru-governed-pr` check, executed on an operator-owned self-hosted Mac, plus
+   for Tier 2-3 changes one authoritative reviewer distinct from the author.
 4. **What is the governed merge path?** — `scripts/merge_pr.py` with the
    expected head; stronger GitHub-side exclusivity is a consumer deployment
    choice described below.
@@ -38,8 +38,8 @@ flowchart LR
     RD -->|exclusive claim| IP[In Progress]
     IP -->|isolated worktree| CODE[Small change + focused tests]
     CODE --> PR[Pull request]
-    PR --> VERIFY{Exact-head server verification green?}
-    VERIFY -->|No or failed| FIX[Fix current head or consumer verify script]
+    PR --> VERIFY{Exact-head self-hosted verification green?}
+    VERIFY -->|No or failed| FIX[Fix current head, runner, or consumer verify script]
     FIX --> VERIFY
     VERIFY -->|Yes| RISK{Risk tier 2 or 3?}
     RISK -->|No| MERGE[merge_pr.py --expected-head]
@@ -57,7 +57,7 @@ The source of truth stays deliberately small:
 | Write boundary | `touches:` declaration |
 | Writer ownership | One `agent:<id>` claim |
 | Isolation | One Git worktree per issue |
-| Verification | `aru-governed-pr` on the exact PR head |
+| Verification | `aru-governed-pr` on the exact PR head, using only the `aru-ci` self-hosted runner pool |
 | Review | None for Tier 0-1; one distinct current-head authority for Tier 2-3 |
 | Governed merge or merge-queue submission | `scripts/merge_pr.py` |
 | Deployment and production | The consumer repository and its operators |
@@ -71,8 +71,10 @@ be migrated into an existing project when all of these are true:
 - The repository has exactly one linked, open GitHub Project with the five
   statuses `Backlog`, `Ready`, `In Progress`, `In Review`, and `Done`.
 - New governed issues are added to that Project Board.
-- The repository can run the installed `aru-governed-pr` workflow and its
-  consumer-owned `.aru/verify.sh`. Before admitting Tier 2-3 work, it also has
+- The repository has at least one online repository-level self-hosted macOS
+  arm64 runner carrying the `aru-ci` label and can run the installed
+  `aru-governed-pr` workflow and its consumer-owned `.aru/verify.sh`. Before
+  admitting Tier 2-3 work, it also has
   at least one registered external reviewer or one smoke-testable, distinct
   coding-agent reviewer.
 - Developers and agents can read the canonical Aru directory through
@@ -141,7 +143,9 @@ python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
 Add `--github --private` when you also want the helper to create a private
 GitHub repository, labels, linked Project Board, and a minimal ruleset with no
 configured bypass actors that requires `aru-governed-pr` from GitHub Actions.
-The helper writes the governance scaffold but does not commit or push it.
+The generated workflow runs only on repository-level Apple-silicon macOS
+runners labeled `aru-ci`; register one before admitting work. The helper writes
+the governance scaffold but does not commit or push it.
 
 That portable ruleset authenticates the required check producer, but it cannot
 make the helper the only possible GitHub merge path or condition server-side
@@ -166,9 +170,12 @@ python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
 
 Review the staged `AGENTS.md`, `.github/`, `.aru/`, and `.gitignore` before
 applying them. Bootstrap installs the consumer-owned `aru-governed-pr` workflow,
-which checks out the exact PR head, runs `.aru/verify.sh`, and validates the
-linked issue's `touches:` boundary against the actual diff. Customize the
-verification commands and branch rules for the consumer's risk policy.
+which checks out the exact PR head on `[self-hosted, macOS, ARM64, aru-ci]`,
+runs `.aru/verify.sh`, and validates the linked issue's `touches:` boundary
+against the actual diff. Register the runner before requiring the check.
+Customize the verification commands and branch rules for the consumer's risk
+policy. The workflow deliberately has no GitHub-hosted fallback and does not
+upload artifacts or use Actions caches by default.
 
 ### 4. Run one governed unit of work
 
@@ -201,8 +208,10 @@ tick.
 
 Work only in the worktree reported by `create_branch.py`. Local checks are
 optional preflight or audit evidence. Publish the branch and open the PR through
-`create_pr.py`; merge only after the exact-head `aru-governed-pr` server check
-and any risk-required authoritative review are complete.
+`create_pr.py`; merge only after the exact-head `aru-governed-pr` check has run
+on an `aru-ci` self-hosted Mac and any risk-required authoritative review is
+complete. If all registered Macs are offline, the check stays queued and merge
+remains blocked.
 
 ## Review continuity
 
