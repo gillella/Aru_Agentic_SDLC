@@ -437,6 +437,113 @@ def test_range_allows_when_both_rename_sides_are_within_touches(tmp_path, monkey
     assert capsys.readouterr().out == ""
 
 
+def test_range_changed_paths_include_both_copy_sides(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "original.py").write_text("def run():\n    return 100\n", encoding="utf-8")
+    subprocess.run(["git", "add", "original.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add original"], cwd=tmp_path, check=True, capture_output=True
+    )
+    (tmp_path / "copied.py").write_text("def run():\n    return 100\n", encoding="utf-8")
+    subprocess.run(["git", "add", "copied.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "copy to copied"], cwd=tmp_path, check=True, capture_output=True
+    )
+
+    monkeypatch.chdir(tmp_path)
+    paths = HOOK.changed_paths("HEAD~1..HEAD")
+    assert paths == ["copied.py", "original.py"]
+
+
+def test_range_refuses_when_copy_source_is_outside_touches(tmp_path, monkeypatch, capsys):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "legacy_source.py").write_text("def compute():\n    return 42\n", encoding="utf-8")
+    subprocess.run(["git", "add", "legacy_source.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "copied_dest.py").write_text("def compute():\n    return 42\n", encoding="utf-8")
+    subprocess.run(["git", "add", "copied_dest.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "copy"], cwd=tmp_path, check=True, capture_output=True)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(HOOK, "issue_body", lambda _number: "touches: copied_dest.py")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "enforce_touches.py",
+            "--range",
+            "HEAD~1..HEAD",
+            "--issue",
+            "548",
+            "--branch",
+            "fix/issue-548-copy",
+            "--default-branch",
+            "main",
+        ],
+    )
+
+    assert HOOK.main() == 2
+    assert capsys.readouterr().out == "refused: legacy_source.py is outside touches:\n"
+
+
+def test_range_allows_when_both_copy_sides_are_within_touches(tmp_path, monkeypatch, capsys):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "legacy_source.py").write_text("def compute():\n    return 42\n", encoding="utf-8")
+    subprocess.run(["git", "add", "legacy_source.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "copied_dest.py").write_text("def compute():\n    return 42\n", encoding="utf-8")
+    subprocess.run(["git", "add", "copied_dest.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "copy"], cwd=tmp_path, check=True, capture_output=True)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        HOOK, "issue_body", lambda _number: "touches: legacy_source.py, copied_dest.py"
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "enforce_touches.py",
+            "--range",
+            "HEAD~1..HEAD",
+            "--issue",
+            "548",
+            "--branch",
+            "fix/issue-548-copy",
+            "--default-branch",
+            "main",
+        ],
+    )
+
+    assert HOOK.main() == 0
+    assert capsys.readouterr().out == ""
+
+
 def test_changed_paths_decodes_nul_diff_with_special_characters_and_renames(tmp_path, monkeypatch):
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(

@@ -204,6 +204,7 @@ def changed_paths(diff_range: str) -> list[str]:
             "--name-status",
             "-z",
             "--find-renames",
+            "--find-copies-harder",
             "--diff-filter=ACDMRT",
             diff_range,
             "--",
@@ -220,12 +221,18 @@ def changed_paths(diff_range: str) -> list[str]:
     n = len(tokens)
     while idx < n:
         status = tokens[idx]
-        if not status or status[0] not in {"A", "C", "D", "M", "R", "T"}:
-            raise Refusal("changed-path evidence is malformed")
-        if len(status) > 1 and not status[1:].isdigit():
+        code = status[:1]
+        if code in {"R", "C"}:
+            if len(status) == 1 or not status[1:].isdigit():
+                raise Refusal("changed-path evidence is malformed")
+            arity = 2
+        elif code in {"A", "D", "M", "T"}:
+            if len(status) != 1:
+                raise Refusal("changed-path evidence is malformed")
+            arity = 1
+        else:
             raise Refusal("changed-path evidence is malformed")
 
-        arity = 2 if status[0] in {"R", "C"} else 1
         if idx + 1 + arity > n:
             raise Refusal("changed-path evidence is malformed")
 

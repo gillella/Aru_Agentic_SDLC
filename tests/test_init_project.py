@@ -495,14 +495,33 @@ def test_verify_template_secret_scan_catches_runtime_generated_diff_inputs():
     # Positive test: Runtime-constructed secret added in diff is caught by fail-closed scanner pipeline
     token = "gh" + "p_" + "1234567890" * 4
     diff_with_token = f"+ {token}\n"
-    cmd = "grep -E '^\\+' || true"
+    cmd = "grep -a -E '^\\+' || true"
     res = subprocess.run(
         ["bash", "-c", cmd], input=diff_with_token, text=True, capture_output=True, check=True
     )
     scan_res = subprocess.run(
-        ["grep", "-Eq", secret_re], input=res.stdout, text=True, capture_output=True, check=False
+        ["grep", "-a", "-Eq", secret_re],
+        input=res.stdout,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert scan_res.returncode == 0, "Expected generated secret in added diff line to be caught"
+
+    # Positive test: Runtime-constructed binary secret with NUL bytes is caught by pipeline
+    binary_diff = b"+ \x00\x01\x02" + token.encode("ascii") + b"\x00\x03\n"
+    res_bin = subprocess.run(
+        ["bash", "-c", cmd], input=binary_diff, capture_output=True, check=True
+    )
+    scan_bin = subprocess.run(
+        ["grep", "-a", "-Eq", secret_re],
+        input=res_bin.stdout,
+        capture_output=True,
+        check=False,
+    )
+    assert (
+        scan_bin.returncode == 0
+    ), "Expected generated binary secret in added diff line to be caught"
 
     # Positive test: Runtime-constructed project secret in code diff is caught
     proj_token = "sk-" + "proj-" + "abc123def456ghi789jkl012mno345pqr678stu901vwx_yz-" + "123456"
@@ -511,7 +530,11 @@ def test_verify_template_secret_scan_catches_runtime_generated_diff_inputs():
         ["bash", "-c", cmd], input=test_file_diff, text=True, capture_output=True, check=True
     )
     scan_res = subprocess.run(
-        ["grep", "-Eq", secret_re], input=res.stdout, text=True, capture_output=True, check=False
+        ["grep", "-a", "-Eq", secret_re],
+        input=res.stdout,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert scan_res.returncode == 0, "Expected generated test file secret to be caught"
 
@@ -521,9 +544,149 @@ def test_verify_template_secret_scan_catches_runtime_generated_diff_inputs():
         ["bash", "-c", cmd], input=clean_diff, text=True, capture_output=True, check=True
     )
     scan_res = subprocess.run(
-        ["grep", "-Eq", secret_re], input=res.stdout, text=True, capture_output=True, check=False
+        ["grep", "-a", "-Eq", secret_re],
+        input=res.stdout,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert scan_res.returncode != 0, "Expected clean placeholder diff to pass without detection"
+
+
+def test_verify_template_secret_scan_catches_binary_credentials_end_to_end(tmp_path):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    init_project.scaffold("consumer", tmp_path)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+
+    secret = "gh" + "p_" + "1234567890" * 4
+    binary_payload = b"\x00\x01\x02\xff" + secret.encode("ascii") + b"\x00\xfe\n"
+    (tmp_path / "payload.bin").write_bytes(binary_payload)
+    subprocess.run(["git", "add", "payload.bin"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add binary credential"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        ["bash", ".aru/verify.sh"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "credential-shaped literal found in the verified content" in result.stderr
+
+
+def test_verify_template_secret_scan_allows_safe_binary_control_end_to_end(tmp_path):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    init_project.scaffold("consumer", tmp_path)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+
+    safe_binary = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256))
+    (tmp_path / "image.png").write_bytes(safe_binary)
+    subprocess.run(["git", "add", "image.png"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add safe binary"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        ["bash", ".aru/verify.sh"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "no credential-shaped literal found" in result.stdout
+    assert "proportional verification passed" in result.stdout
+
+
+def test_verify_template_secret_scan_fallback_tree_mode_with_binary_content_end_to_end(tmp_path):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    init_project.scaffold("consumer", tmp_path)
+    safe_binary = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256))
+    (tmp_path / "image.png").write_bytes(safe_binary)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init safe tree"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    # Safe binary in fallback mode (no origin/main comparison base)
+    result = subprocess.run(
+        ["bash", ".aru/verify.sh"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "no credential-shaped literal found" in result.stdout
+    assert "full tracked tree (no comparison base resolved)" in result.stdout
+
+    # Add binary credential in fallback mode
+    secret = "gh" + "p_" + "1234567890" * 4
+    (tmp_path / "secret.bin").write_bytes(b"\x00\x01" + secret.encode("ascii") + b"\x00")
+    subprocess.run(["git", "add", "secret.bin"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add secret binary"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    result_secret = subprocess.run(
+        ["bash", ".aru/verify.sh"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result_secret.returncode == 1
+    assert "credential-shaped literal found in the verified content" in result_secret.stderr
 
 
 def test_verify_template_executable_rejects_indented_write_permission_on_macos(tmp_path):
