@@ -33,9 +33,43 @@ if [ -n "${base_ref}" ]; then
   base="$(git merge-base "${base_ref}" HEAD 2>/dev/null || true)"
 fi
 
+parse_diff_z() {
+  local status path1 path2 score
+  while true; do
+    if ! IFS= read -r -d '' status; then
+      if [ -n "${status}" ]; then
+        return 1
+      fi
+      break
+    fi
+    score="${status#?}"
+    case "${score}" in
+      *[!0-9]*) return 1 ;;
+    esac
+    case "${status}" in
+      [RC]*)
+        IFS= read -r -d '' path1 || return 1
+        IFS= read -r -d '' path2 || return 1
+        [ -n "${path1}" ] && [ -n "${path2}" ] || return 1
+        printf '%s\n%s\n' "${path1}" "${path2}"
+        ;;
+      [ACDMRT]*)
+        IFS= read -r -d '' path1 || return 1
+        [ -n "${path1}" ] || return 1
+        printf '%s\n' "${path1}"
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    status=""
+  done
+  [ -z "${status}" ] || return 1
+}
+
 if [ -n "${base}" ]; then
   scope="diff ${base_ref} (${base}) ...HEAD"
-  changed="$(git diff --name-status --find-renames --diff-filter=ACDMRT "${base}...HEAD" -- | awk -F'\t' '{for (i=2; i<=NF; i++) print $i}' | sort -u || true)"
+  changed="$(git -c core.fsmonitor=false diff --name-status -z --find-renames --diff-filter=ACDMRT "${base}...HEAD" -- | parse_diff_z | sort -u)" || fail "changed-path evidence is malformed"
 else
   # No trustworthy comparison base: fail upward to the whole tracked tree
   # rather than silently verifying nothing.

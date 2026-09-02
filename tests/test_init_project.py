@@ -321,9 +321,13 @@ def test_verify_template_secret_scan_positives_and_negatives():
         "xox" + "b-123456789012-1234567890123-abcdefghijklmnopqrstuvwx",
         "sk-" + "123456789012345678901234567890123456",
         "sk-proj-" + "abc123def456ghi789jkl012mno345pqr678stu901vwx_yz-123456",
-        'API_SECRET_KEY="' + "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08" + '"',
+        'API_SECRET_KEY="'
+        + "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        + '"',
         "API_SECRET_KEY=" + "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-        'JMC_API_SECRET="' + "c4d9e32e4518ff6adffb23ba8cc224450e9ec6ffefd862451d449d85331480e2" + '"',
+        'JMC_API_SECRET="'
+        + "c4d9e32e4518ff6adffb23ba8cc224450e9ec6ffefd862451d449d85331480e2"
+        + '"',
         "JMC_API_SECRET=" + "c4d9e32e4518ff6adffb23ba8cc224450e9ec6ffefd862451d449d85331480e2",
         "-----BEGIN RSA " + "PRIVATE KEY-----",
     ]
@@ -362,7 +366,7 @@ def test_verify_template_secret_scan_positives_and_negatives():
         assert res.returncode != 0, f"Expected negative match (no match) for {item}"
 
 
-def test_verify_template_changed_paths_deterministic_renames(tmp_path):
+def test_verify_template_changed_paths_nul_parsing_and_renames(tmp_path):
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
@@ -373,23 +377,177 @@ def test_verify_template_changed_paths_deterministic_renames(tmp_path):
         check=True,
         capture_output=True,
     )
-    (tmp_path / "old.txt").write_text("content\n", encoding="utf-8")
-    subprocess.run(["git", "add", "old.txt"], cwd=tmp_path, check=True)
+    (tmp_path / "old\tname.txt").write_text("old content\n", encoding="utf-8")
+    (tmp_path / "plain.txt").write_text("plain content\n", encoding="utf-8")
+    (tmp_path / "café_🚀.txt").write_text("unicode content\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "old\tname.txt", "plain.txt", "café_🚀.txt"],
+        cwd=tmp_path,
+        check=True,
+    )
     subprocess.run(
         ["git", "commit", "-m", "initial"], cwd=tmp_path, check=True, capture_output=True
     )
-    subprocess.run(["git", "mv", "old.txt", "new.txt"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "rename"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "mv", "old\tname.txt", "new\tname.txt"], cwd=tmp_path, check=True)
+    (tmp_path / "café_🚀.txt").write_text("modified unicode\n", encoding="utf-8")
+    (tmp_path / "plain.txt").unlink()
+    subprocess.run(
+        ["git", "commit", "-a", "-m", "rename, modify, delete"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
 
-    cmd = "git diff --name-status --find-renames --diff-filter=ACDMRT HEAD~1...HEAD -- | awk -F'\t' '{for (i=2; i<=NF; i++) print $i}' | sort -u"
-    res = subprocess.run(
-        ["bash", "-c", cmd],
+    path = init_project.Path(__file__).resolve().parents[1] / "templates/verify.sh"
+    content = path.read_text(encoding="utf-8")
+    assert "git diff --name-status" not in content or "-z" in content
+    assert "awk" not in content
+
+    # Test that verify.sh bash diff parsing extracts all paths deterministically
+    bash_script = """
+set -euo pipefail
+
+parse_diff_z() {
+  local status="" path1="" path2="" score=""
+  while IFS= read -r -d '' status; do
+    [ -n "${status}" ] || return 1
+    score="${status#?}"
+    case "${score}" in
+      *[!0-9]*) return 1 ;;
+    esac
+    case "${status}" in
+      [RC]*)
+        IFS= read -r -d '' path1 || return 1
+        IFS= read -r -d '' path2 || return 1
+        [ -n "${path1}" ] && [ -n "${path2}" ] || return 1
+        printf '%s\n%s\n' "${path1}" "${path2}"
+        ;;
+      [ACDMRT]*)
+        IFS= read -r -d '' path1 || return 1
+        [ -n "${path1}" ] || return 1
+        printf '%s\n' "${path1}"
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    status=""
+  done
+  [ -z "${status}" ] || return 1
+}
+
+git diff --name-status -z --find-renames --diff-filter=ACDMRT HEAD~1...HEAD -- | parse_diff_z | sort -u
+"""
+    diff_proc = subprocess.run(
+        ["bash", "-c", bash_script],
         cwd=tmp_path,
         capture_output=True,
         text=True,
         check=True,
     )
-    assert res.stdout.strip().splitlines() == ["new.txt", "old.txt"]
+    assert diff_proc.stdout.splitlines() == [
+        "café_🚀.txt",
+        "new\tname.txt",
+        "old\tname.txt",
+        "plain.txt",
+    ]
+
+
+def test_verify_template_governance_invariants_triggered_by_tabbed_governance_path(
+    tmp_path,
+):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    init_project.scaffold("consumer", tmp_path)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+
+    # Add a tabbed file under .aru/ and break an invariant in the same commit
+    (tmp_path / ".aru" / "tab\tscript.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / ".aru" / "verify.sh").chmod(0o644)  # remove executable permission
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add tabbed file and break invariant"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    res = subprocess.run(
+        ["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert res.returncode == 1
+    assert ".aru/verify.sh must be executable" in res.stderr
+
+
+@pytest.mark.parametrize(
+    "bad_raw",
+    [
+        b"M\x00foo.py",
+        b"X\x00foo.py\x00",
+        b"R100\x00old.py\x00",
+        b"C100\x00old.py\x00",
+        b"M\x00",
+        b"Rbad\x00old.py\x00new.py\x00",
+        b"Mfoo\x00file.py\x00",
+        b"\x00",
+        b"M\x00\x00",
+        b"R100\x00\x00new.py\x00",
+        b"R100\x00old.py\x00\x00",
+        b"M\x00file.py\x00extra\x00",
+        b"M\tfoo.py\n",
+    ],
+)
+def test_verify_template_changed_paths_fails_closed_on_malformed_evidence(bad_raw):
+    bash_script = """
+set -euo pipefail
+
+parse_diff_z() {
+  local status="" path1="" path2="" score=""
+  while IFS= read -r -d '' status; do
+    [ -n "${status}" ] || return 1
+    score="${status#?}"
+    case "${score}" in
+      *[!0-9]*) return 1 ;;
+    esac
+    case "${status}" in
+      [RC]*)
+        IFS= read -r -d '' path1 || return 1
+        IFS= read -r -d '' path2 || return 1
+        [ -n "${path1}" ] && [ -n "${path2}" ] || return 1
+        printf '%s\n%s\n' "${path1}" "${path2}"
+        ;;
+      [ACDMRT]*)
+        IFS= read -r -d '' path1 || return 1
+        [ -n "${path1}" ] || return 1
+        printf '%s\n' "${path1}"
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+    status=""
+  done
+  [ -z "${status}" ] || return 1
+}
+
+parse_diff_z
+"""
+    proc = subprocess.run(
+        ["bash", "-c", bash_script],
+        input=bad_raw,
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode != 0
 
 
 def test_verify_template_secret_scan_catches_runtime_generated_diff_inputs():
@@ -447,9 +605,7 @@ def test_verify_template_executable_rejects_indented_write_permission_on_macos(t
     )
     init_project.scaffold("consumer", tmp_path)
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
 
     wf = tmp_path / ".github/workflows/governed-pr.yml"
     content = wf.read_text(encoding="utf-8")

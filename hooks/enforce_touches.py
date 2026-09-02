@@ -163,11 +163,12 @@ def check_pull_request(number: int, expected_head: str | None = None) -> tuple[l
             raise Refusal("expected head does not match the current PR head")
     issue = linked_issue(str(pr["body"]))
     paths = pull_changed_paths(number)
+    declared = parse_touches(issue_body(issue))
+    violations = [path for path in paths if not allowed(path, declared)]
     refreshed = pull_request(number)
     if str(refreshed["headRefOid"]).lower() != head.lower():
         raise Refusal("pull request head changed during file collection")
-    declared = parse_touches(issue_body(issue))
-    return [path for path in paths if not allowed(path, declared)], issue, head
+    return violations, issue, head
 
 
 def issue_number(branch: str) -> int:

@@ -168,6 +168,33 @@ def test_pr_mode_refuses_changed_head_without_explicit_expected_head(monkeypatch
         HOOK.check_pull_request(9)
 
 
+def test_pr_mode_revalidates_head_immediately_before_return_after_eval(monkeypatch):
+    events = []
+
+    def fake_pull_request(number):
+        events.append("pull_request")
+        if len([e for e in events if e == "pull_request"]) == 1:
+            return {"headRefOid": "a" * 40, "body": "Closes #12\n"}
+        return {"headRefOid": "c" * 40, "body": "Closes #12\n"}
+
+    def fake_pull_changed_paths(number):
+        events.append("pull_changed_paths")
+        return ["scripts/a.py"]
+
+    def fake_issue_body(number):
+        events.append("issue_body")
+        return "touches: scripts/a.py"
+
+    monkeypatch.setattr(HOOK, "pull_request", fake_pull_request)
+    monkeypatch.setattr(HOOK, "pull_changed_paths", fake_pull_changed_paths)
+    monkeypatch.setattr(HOOK, "issue_body", fake_issue_body)
+
+    with pytest.raises(HOOK.Refusal, match="pull request head changed during file collection"):
+        HOOK.check_pull_request(9, "a" * 40)
+
+    assert events == ["pull_request", "pull_changed_paths", "issue_body", "pull_request"]
+
+
 def test_canonical_touches_requires_safe_declared_path_and_refuses_incomplete_candidate(
     tmp_path, monkeypatch
 ):
@@ -393,9 +420,7 @@ def test_range_allows_when_both_rename_sides_are_within_touches(tmp_path, monkey
     assert capsys.readouterr().out == ""
 
 
-def test_changed_paths_decodes_nul_diff_with_special_characters_and_renames(
-    tmp_path, monkeypatch
-):
+def test_changed_paths_decodes_nul_diff_with_special_characters_and_renames(tmp_path, monkeypatch):
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
