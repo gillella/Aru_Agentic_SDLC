@@ -13,8 +13,9 @@
   `templates/verify.sh` and `hooks/enforce_touches.py`.
 - Made `templates/verify.sh` workflow permission and runner checks portable
   across BSD/macOS grep using POSIX character classes.
-- Added C-style Git quoted path decoding to `hooks/enforce_touches.py` to handle
-  tabs, newlines, quotes, and octal-escaped unicode filenames safely.
+- Used machine-safe NUL-delimited diff parsing (`--name-status -z`) in
+  `hooks/enforce_touches.py` to handle paths with spaces, tabs, newlines,
+  quotes, and unicode filenames deterministically without escaping errors.
 - Standardized `python3` invocation across workflow preflight and touches
   enforcement.
 - Extended consumer drift and scaffold fixture tests to bind hashes for
