@@ -393,36 +393,9 @@ def test_range_allows_when_both_rename_sides_are_within_touches(tmp_path, monkey
     assert capsys.readouterr().out == ""
 
 
-def test_decode_path_quoted_unusual_valid_paths():
-    assert HOOK._decode_path('"file\\twith\\ttabs.txt"') == "file\twith\ttabs.txt"
-    assert HOOK._decode_path('"file\\"with\\"quotes.txt"') == 'file"with"quotes.txt'
-    assert HOOK._decode_path('"path/with\\\\backslash.txt"') == "path/with\\backslash.txt"
-    assert HOOK._decode_path('"caf\\303\\251.txt"') == "café.txt"
-    assert HOOK._decode_path('"bell\\a_backspace\\b_nl\\n_cr\\r_vt\\v_ff\\f.txt"') == (
-        "bell\a_backspace\b_nl\n_cr\r_vt\v_ff\f.txt"
-    )
-    assert HOOK._decode_path("plain_path.py") == "plain_path.py"
-    assert HOOK._decode_path("path with spaces.txt") == "path with spaces.txt"
-
-
-@pytest.mark.parametrize(
-    "malformed",
-    [
-        '"unterminated_start',
-        'unterminated_end"',
-        '"escaped_end_quote\\"',
-        '"unknown_escape\\z"',
-        '"unescaped"quote"',
-        '"invalid_octal\\377"',
-        '"trailing_backslash\\',
-    ],
-)
-def test_decode_path_malformed_inputs_fail_closed(malformed):
-    with pytest.raises(HOOK.Refusal, match="changed-path evidence is malformed"):
-        HOOK._decode_path(malformed)
-
-
-def test_changed_paths_decodes_quoted_diff_and_renames(tmp_path, monkeypatch):
+def test_changed_paths_decodes_nul_diff_with_special_characters_and_renames(
+    tmp_path, monkeypatch
+):
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
@@ -434,14 +407,29 @@ def test_changed_paths_decodes_quoted_diff_and_renames(tmp_path, monkeypatch):
         capture_output=True,
     )
     (tmp_path / "old\tname.txt").write_text("old content\n", encoding="utf-8")
-    (tmp_path / "café.txt").write_text("unicode content\n", encoding="utf-8")
-    subprocess.run(["git", "add", "old\tname.txt", "café.txt"], cwd=tmp_path, check=True)
+    (tmp_path / "file\nwith\nnewlines.txt").write_text("newline content\n", encoding="utf-8")
+    (tmp_path / "café_🚀.txt").write_text("unicode content\n", encoding="utf-8")
+    (tmp_path / "plain.txt").write_text("plain content\n", encoding="utf-8")
+    subprocess.run(
+        [
+            "git",
+            "add",
+            "old\tname.txt",
+            "file\nwith\nnewlines.txt",
+            "café_🚀.txt",
+            "plain.txt",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
     subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
 
     subprocess.run(["git", "mv", "old\tname.txt", "new\tname.txt"], cwd=tmp_path, check=True)
-    (tmp_path / "café.txt").write_text("modified unicode\n", encoding="utf-8")
+    (tmp_path / "file\nwith\nnewlines.txt").write_text("modified newline\n", encoding="utf-8")
+    (tmp_path / "café_🚀.txt").write_text("modified unicode\n", encoding="utf-8")
+    (tmp_path / "plain.txt").unlink()
     subprocess.run(
-        ["git", "commit", "-a", "-m", "rename and edit"],
+        ["git", "commit", "-a", "-m", "rename, modify, and delete"],
         cwd=tmp_path,
         check=True,
         capture_output=True,
@@ -449,20 +437,39 @@ def test_changed_paths_decodes_quoted_diff_and_renames(tmp_path, monkeypatch):
 
     monkeypatch.chdir(tmp_path)
     paths = HOOK.changed_paths("HEAD~1..HEAD")
-    assert paths == ["café.txt", "new\tname.txt", "old\tname.txt"]
+    assert paths == [
+        "café_🚀.txt",
+        "file\nwith\nnewlines.txt",
+        "new\tname.txt",
+        "old\tname.txt",
+        "plain.txt",
+    ]
+
+
+def test_changed_paths_empty_output(monkeypatch):
+    monkeypatch.setattr(HOOK, "run", lambda _argv: "")
+    assert HOOK.changed_paths("HEAD~1..HEAD") == []
 
 
 @pytest.mark.parametrize(
     "bad_output",
     [
-        "X\tfoo.py",
-        "R100\tfoo.py",
-        "A\tfoo.py\tbar.py",
-        'M\t"unterminated',
-        "M",
+        "M\x00foo.py",
+        "X\x00foo.py\x00",
+        "R100\x00old.py\x00",
+        "C100\x00old.py\x00",
+        "M\x00",
+        "Rbad\x00old.py\x00new.py\x00",
+        "Mfoo\x00file.py\x00",
+        "\x00",
+        "M\x00\x00",
+        "R100\x00\x00new.py\x00",
+        "R100\x00old.py\x00\x00",
+        "M\x00file.py\x00extra\x00",
+        "M\tfoo.py\n",
     ],
 )
-def test_changed_paths_malformed_git_output_fails_closed(monkeypatch, bad_output):
+def test_changed_paths_malformed_nul_evidence_fails_closed(monkeypatch, bad_output):
     monkeypatch.setattr(HOOK, "run", lambda _argv: bad_output)
     with pytest.raises(HOOK.Refusal, match="changed-path evidence is malformed"):
         HOOK.changed_paths("HEAD~1..HEAD")

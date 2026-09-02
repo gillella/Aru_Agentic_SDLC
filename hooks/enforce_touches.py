@@ -193,64 +193,6 @@ def issue_body(number: int) -> str:
     return str(record.get("body") or "")
 
 
-_ESCAPES = {
-    "a": 7,
-    "b": 8,
-    "t": 9,
-    "n": 10,
-    "v": 11,
-    "f": 12,
-    "r": 13,
-    '"': ord('"'),
-    "\\": ord("\\"),
-}
-
-
-def _decode_escape(content: str, i: int) -> tuple[int, int]:
-    if i >= len(content):
-        raise Refusal("changed-path evidence is malformed")
-    nxt = content[i]
-    if nxt in _ESCAPES:
-        return _ESCAPES[nxt], i + 1
-    if "0" <= nxt <= "7":
-        octal_str = nxt
-        i += 1
-        for _ in range(2):
-            if i < len(content) and "0" <= content[i] <= "7":
-                octal_str += content[i]
-                i += 1
-            else:
-                break
-        return int(octal_str, 8), i
-    raise Refusal("changed-path evidence is malformed")
-
-
-def _decode_path(raw: str) -> str:
-    if not (raw.startswith('"') and raw.endswith('"') and len(raw) >= 2):
-        if raw.startswith('"') or raw.endswith('"'):
-            raise Refusal("changed-path evidence is malformed")
-        return raw
-
-    content = raw[1:-1]
-    byte_array = bytearray()
-    i = 0
-    n = len(content)
-    while i < n:
-        char = content[i]
-        if char == "\\":
-            byte_val, i = _decode_escape(content, i + 1)
-            byte_array.append(byte_val)
-        elif char == '"':
-            raise Refusal("changed-path evidence is malformed")
-        else:
-            byte_array.extend(char.encode("utf-8"))
-            i += 1
-    try:
-        return byte_array.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise Refusal("changed-path evidence is malformed") from exc
-
-
 def changed_paths(diff_range: str) -> list[str]:
     output = run(
         [
@@ -259,20 +201,41 @@ def changed_paths(diff_range: str) -> list[str]:
             "core.fsmonitor=false",
             "diff",
             "--name-status",
+            "-z",
             "--find-renames",
             "--diff-filter=ACDMRT",
             diff_range,
             "--",
         ]
     )
+    if not output:
+        return []
+    if not output.endswith("\0"):
+        raise Refusal("changed-path evidence is malformed")
+
+    tokens = output[:-1].split("\0")
     paths: list[str] = []
-    for line in output.splitlines():
-        fields = line.split("\t")
-        status = fields[0][:1] if fields and fields[0] else ""
-        expected = 3 if status in {"R", "C"} else 2
-        if status not in {"A", "C", "D", "M", "R", "T"} or len(fields) != expected:
+    idx = 0
+    n = len(tokens)
+    while idx < n:
+        status = tokens[idx]
+        if not status or status[0] not in {"A", "C", "D", "M", "R", "T"}:
             raise Refusal("changed-path evidence is malformed")
-        paths.extend(_decode_path(f) for f in fields[1:])
+        if len(status) > 1 and not status[1:].isdigit():
+            raise Refusal("changed-path evidence is malformed")
+
+        arity = 2 if status[0] in {"R", "C"} else 1
+        if idx + 1 + arity > n:
+            raise Refusal("changed-path evidence is malformed")
+
+        for offset in range(1, 1 + arity):
+            path = tokens[idx + offset]
+            if not path:
+                raise Refusal("changed-path evidence is malformed")
+            paths.append(path)
+
+        idx += 1 + arity
+
     return sorted(set(paths))
 
 
