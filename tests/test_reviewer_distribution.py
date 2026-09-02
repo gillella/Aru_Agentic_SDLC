@@ -32,7 +32,7 @@ def external_states(**overrides):
     return states
 
 
-def test_initial_assignment_uses_stable_policy_primary(monkeypatch):
+def test_initial_assignment_rotates_equal_registered_external_pool(monkeypatch):
     monkeypatch.setenv(
         "ARU_CODING_REVIEWERS",
         "claude-code:m1@1,openai-codex:mo",
@@ -57,7 +57,12 @@ def test_initial_assignment_uses_stable_policy_primary(monkeypatch):
         for number in range(4)
     ]
 
-    assert assignments == [("coderabbit", None, None)] * 4
+    assert assignments == [
+        ("coderabbit", None, None),
+        ("sourcery", None, None),
+        ("coderabbit", None, None),
+        ("sourcery", None, None),
+    ]
 
 
 def test_initial_coding_assignment_uses_aggregate_capacity_probe():

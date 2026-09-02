@@ -222,25 +222,21 @@ reviewer-registered:sourcery
 reviewer-registered:codeant
 ```
 
-The bootstrap `review:*` authority labels do not register providers. For Tier
-2-3, `create_pr.py` follows optional repository label definitions:
+The bootstrap `review:*` authority labels do not register providers. Registration
+places every installed external provider in the equal specialized-review pool.
+The only optional repository policy setting is:
 
 ```text
-review-policy:primary=coderabbit
-review-policy:fallback-1=claude-code
-review-policy:fallback-2=openai-codex
-review-policy:fallback-3=xai-cursor
-review-policy:fallback-4=google-antigravity
 review-policy:timeout=120
 ```
 
-Fallback ranks must be contiguous from 1, authorities unique and supported,
-and referenced external authorities registered. Missing declarations keep the
-compatible default: first registered external service, the four coding
-families, and a 120-second timeout. Malformed or contradictory declarations
-fail closed. Remove `reviewer-registered:<service>` when a trial expires or a
-provider is uninstalled. The author identity and GitHub actor are never
-eligible, and coding probes establish liveness only.
+The issue number rotates initial assignments across registered external
+services. Unavailable services are not retried on the same head; coding families
+are borrowed only after that pool is exhausted. Ranked primary/fallback labels
+are unsupported and fail closed. Remove a registration explicitly when access
+ends, for example `gh label delete "reviewer-registered:sourcery" --yes`. The
+author identity and GitHub actor are never eligible, and coding probes establish
+liveness only.
 
 Only locally configured identities are probed. If local coding-reviewer
 configuration is absent, registered external providers remain eligible; an
@@ -859,15 +855,16 @@ python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --help
 ### One authority and one continuation
 
 Tier 0-1 changes do not wait for review. For Tier 2-3, `create_pr.py` assigns
-the current-head authority from the validated primary/fallback policy and
-`merge_pr.py` validates its evidence. Do not duplicate that policy in consumer
-rules.
+the current-head authority from the equal registered-external pool and borrows
+a coding identity only after that pool is exhausted. `merge_pr.py` validates
+the resulting evidence. Do not duplicate that policy in consumer rules.
 
 No-op, paused, quota-limited, rate-limited, unsupported, unavailable, or errored
 review results cannot satisfy the gate. The external Driver responds through
 the single continuation rule in `docs/KERNEL-CONTRACT.md`; it does not poll or
-maintain a reviewer queue. The helper replaces authority mechanically, verifies
-that exactly one supported `review:*` label remains, and records its decision.
+maintain a reviewer queue. The helper excludes exact-head attempts, replaces
+authority mechanically, verifies that exactly one supported `review:*` label
+remains, and records its decision.
 
 For an assigned coding reviewer that explicitly aborts or returns unavailable:
 
@@ -1064,9 +1061,9 @@ true.
       can create issue-specific agent and author labels.
 - [ ] Each installed external provider has exactly one corresponding
       `reviewer-registered:<service>` label; uninstalled providers do not.
-- [ ] Optional `review-policy:*` labels declare one supported primary,
-      contiguous unique fallbacks, and a 60-86400 second timeout; reviewer
-      status reports the expected sources and no configuration errors.
+- [ ] Registration labels expose the expected equal external pool; the optional
+      `review-policy:timeout` is 60-86400 seconds; reviewer status reports the
+      expected sources and no configuration errors.
 - [ ] Each coding reviewer identity has one
       `reviewer-binding:<identity>=<github-login>` and the actor is not an
       implementation author account.

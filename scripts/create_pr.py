@@ -46,13 +46,15 @@ from reviewer_probe import ProbeRunner, _default_probe
 from merge_state import pull_changed_paths
 from review_policy import (
     ReviewPolicy,
+    attempted_reviewer_keys,
     effective_review_policy,
     external_decision as _external_decision,
     load_repository_review_policy,
     probe_coding_reviewer,
     registered_external_states,
+    reviewer_continuation,  # noqa: F401 -- compatibility export
     reviewer_status,
-    select_reviewer_from_order,
+    select_reviewer_from_pool,
 )
 
 def current_branch() -> str:
@@ -108,8 +110,8 @@ def choose_initial_reviewer(
     else:
         states = external_states if external_states is not None else registered_external_states()
         effective = effective_review_policy(policy, external_states)
-    selected = select_reviewer_from_order(
-        effective.authorities,
+    selected = select_reviewer_from_pool(
+        effective,
         number=number,
         author_identity=author_identity,
         author_family=author_family,
@@ -122,6 +124,17 @@ def choose_initial_reviewer(
     if selected is None:
         raise KernelError("no external or distinct coding-agent reviewer is available")
     return selected
+
+
+def _attempted_reviewer_keys(number: int, pr: dict[str, Any]) -> set[str]:
+    authority = _one_authority(pr)
+    identity = _one_label_value(pr, REVIEWER_PREFIX) if authority in CODING_REVIEWERS else None
+    return attempted_reviewer_keys(
+        number,
+        head=str(pr.get("headRefOid") or ""),
+        authority=authority,
+        identity=identity,
+    )
 
 def _optional_authority(pr: dict[str, Any]) -> str | None:
     authorities = [
@@ -234,6 +247,7 @@ def recover_coding_authority(
     authority: str,
     reason: str,
     observed_at: datetime,
+    probe_runner: ProbeRunner,
     policy: ReviewPolicy | None = None,
     external_states: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -242,40 +256,58 @@ def recover_coding_authority(
         raise KernelError("coding reviewer unavailability reason is too short")
     effective = policy or load_repository_review_policy()[0]
     states = external_states if external_states is not None else registered_external_states()
-    externals = [
-        candidate
-        for candidate in effective.authorities
-        if candidate in EXTERNAL_REVIEWERS and states.get(candidate) == AVAILABLE
-    ]
-    if not externals:
-        raise KernelError("no registered external reviewer is available")
-    external = externals[0]
+    previous_reviewer = _one_label_value(pr, REVIEWER_PREFIX)
+    selected = select_reviewer_from_pool(
+        effective,
+        number=number,
+        author_identity=_one_label_value(pr, AUTHOR_PREFIX),
+        author_family=_one_label_value(pr, AUTHOR_FAMILY_PREFIX),
+        author_actor=str((pr.get("author") or {}).get("login") or ""),
+        external_states=states,
+        reviewer_actors=None,
+        probe_runner=probe_runner,
+        excluded=_attempted_reviewer_keys(number, pr),
+        coding_probe=probe_coding_reviewer,
+    )
+    if selected is None:
+        raise KernelError("no untried reviewer has available capacity")
+    new_authority, reviewer_identity, reviewer_actor = selected
     status = {
         "head": pr.get("headRefOid"),
         "observed_at": observed_at.isoformat(),
         "previous_authority": authority,
+        "previous_reviewer": previous_reviewer,
         "reason": "coding-reviewer-unavailable",
         "detail": reason,
-        "new_authority": external,
+        "new_authority": new_authority,
+        "reviewer": reviewer_identity,
+        "reviewer_actor": reviewer_actor,
     }
     body = (
         "## Aru authoritative reviewer recovery\n\n"
         f"Fallback attempt: replace unavailable coding authority `{authority}` "
-        f"with registered external authority `{external}`. Detail: {reason}. "
+        f"with untried authority `{new_authority}`. Detail: {reason}. "
         "The labels remain authoritative if this transition command fails.\n\n"
         f"<!-- aru-review-assignment:v1 {json.dumps(status, sort_keys=True)} -->"
     )
     run(["gh", "pr", "comment", str(number), "--body", body])
-    replace_authority(number, pr, external, None, None)
+    replace_authority(number, pr, new_authority, reviewer_identity, reviewer_actor)
     updated = gh_json(["pr", "view", str(number), "--json", "number,labels"])
-    if _one_authority(updated) != external:
-        raise KernelError("external reviewer recovery was not confirmed")
-    return {
+    if _one_authority(updated) != new_authority:
+        raise KernelError("reviewer recovery was not confirmed")
+    if reviewer_identity and _one_label_value(updated, REVIEWER_PREFIX) != reviewer_identity:
+        raise KernelError("coding reviewer recovery identity was not confirmed")
+    if reviewer_actor and _one_label_value(updated, REVIEWER_ACTOR_PREFIX) != reviewer_actor:
+        raise KernelError("coding reviewer recovery actor was not confirmed")
+    result = {
         "pr": number,
-        "authority": external,
+        "authority": new_authority,
         "action": "fallback",
         "reason": "coding-reviewer-unavailable",
     }
+    if reviewer_identity:
+        result["reviewer"] = reviewer_identity
+    return result
 
 
 def assign_missing_authority(
@@ -355,8 +387,8 @@ def _refresh_external_authority(
     states = external_states if external_states is not None else registered_external_states()
     author_identity = _one_label_value(pr, AUTHOR_PREFIX)
     author_family = _one_label_value(pr, AUTHOR_FAMILY_PREFIX)
-    selected = select_reviewer_from_order(
-        effective.after(authority),
+    selected = select_reviewer_from_pool(
+        effective,
         number=number,
         author_identity=author_identity,
         author_family=author_family,
@@ -364,15 +396,17 @@ def _refresh_external_authority(
         external_states=states,
         reviewer_actors=None,
         probe_runner=probe_runner,
+        excluded=_attempted_reviewer_keys(number, pr),
         coding_probe=probe_coding_reviewer,
     )
     if selected is None:
-        raise KernelError("no configured fallback reviewer has available capacity")
+        raise KernelError("no untried reviewer has available capacity")
     new_authority, reviewer_identity, reviewer_actor = selected
     status = {
         "head": pr.get("headRefOid"),
         "observed_at": observed_at.isoformat(),
         "previous_authority": authority,
+        "previous_reviewer": None,
         "reason": reason,
         "new_authority": new_authority,
         "reviewer": reviewer_identity,
@@ -424,54 +458,6 @@ def _refresh_external_authority(
         result["reviewer"] = reviewer_identity
     return result
 
-
-def reviewer_continuation(
-    number: int, *, now: datetime | None = None
-) -> dict[str, Any]:
-    pr = gh_json(
-        [
-            "pr", "view", str(number), "--json",
-            "number,url,createdAt,headRefOid,labels,author,statusCheckRollup",
-        ]
-    )
-    if not isinstance(pr, dict) or pr.get("number") != number:
-        raise KernelError(f"pull request #{number} is unavailable")
-    authority = _optional_authority(pr)
-    if authority is None:
-        observed_at = now or datetime.now(timezone.utc)
-        return {
-            "authority": None,
-            "next_action": "refresh-reviewer",
-            "retry_at": observed_at.isoformat(),
-        }
-    if authority in CODING_REVIEWERS:
-        return {
-            "authority": authority,
-            "next_action": "await-authoritative-review",
-            "retry_at": None,
-        }
-    observed_at = now or datetime.now(timezone.utc)
-    policy = load_repository_review_policy()[0]
-    reason, remaining = _external_decision(
-        number, pr, authority, observed_at, policy.timeout_seconds
-    )
-    if reason == "external-pending" and remaining is not None:
-        return {
-            "authority": authority,
-            "next_action": "refresh-reviewer",
-            "retry_at": (observed_at + timedelta(seconds=remaining)).isoformat(),
-        }
-    if reason == "external-available":
-        return {
-            "authority": authority,
-            "next_action": "await-authoritative-review",
-            "retry_at": None,
-        }
-    return {
-        "authority": authority,
-        "next_action": "refresh-reviewer",
-        "retry_at": observed_at.isoformat(),
-    }
 
 def refresh_assignment(
     number: int,
@@ -526,6 +512,7 @@ def refresh_assignment(
             authority,
             coding_unavailable_reason,
             observed_at,
+            probe_runner,
             policy,
             external_states,
         )
@@ -745,8 +732,10 @@ def main() -> int:
             )
             policy = result["policy"]
             plain_output = (
-                f"review policy: {policy['primary']} -> "
-                f"{', '.join(policy['fallbacks']) or 'none'} "
+                "review policy: equal external pool "
+                f"{', '.join(policy['external_reviewers']) or 'none'}; "
+                "coding fallback "
+                f"{', '.join(policy['coding_fallbacks']) or 'none'} "
                 f"({policy['timeout_seconds']}s timeout; valid={result['valid']})"
             )
         elif args.refresh_reviewer:

@@ -26,14 +26,14 @@ distinct authoritative review. Unrecognized safe paths fail upward to Tier 2;
 empty, malformed, or unsafe paths fail to Tier 3. Consumer policy may add
 controls but must not downgrade the Kernel tier.
 
-For Tier 2-3, follow the validated repository
-`review-policy:primary=<authority>`, contiguous
-`review-policy:fallback-N=<authority>`, and
-`review-policy:timeout=<seconds>` label definitions. Without them, use the first
-registered external provider, then Claude Code, OpenAI Codex, xAI Cursor, and
-Google Antigravity with a 120-second timeout. Inspect the effective policy with
-`create_pr.py --reviewer-status --json`; invalid declarations fail closed.
-Remove `reviewer-registered:<service>` when external access ends.
+For Tier 2-3, every `reviewer-registered:<service>` external provider belongs to
+one equal pool. The issue number rotates the initial assignment; unavailable
+services are not retried on the same head, and Claude Code, OpenAI Codex, xAI
+Cursor, and Google Antigravity are borrowed only after that pool is exhausted.
+The optional `review-policy:timeout=<seconds>` label defaults to 120 seconds.
+Inspect the effective policy with `create_pr.py --reviewer-status --json`;
+ranked or invalid declarations fail closed. Remove a registration label only
+when external access ends.
 
 The installed skills are exactly `init-agent-project`, `create-github-issue`,
 `triage-backlog`, `implement-next-issue`, `remediate-ci-failure`, and
