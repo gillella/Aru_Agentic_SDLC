@@ -185,14 +185,31 @@ def test_pr_mode_revalidates_head_immediately_before_return_after_eval(monkeypat
         events.append("issue_body")
         return "touches: scripts/a.py"
 
+    def fake_parse_touches(body):
+        events.append("parse_touches")
+        return ["scripts/a.py"]
+
+    def fake_allowed(path, declared):
+        events.append("allowed")
+        return path in declared
+
     monkeypatch.setattr(HOOK, "pull_request", fake_pull_request)
     monkeypatch.setattr(HOOK, "pull_changed_paths", fake_pull_changed_paths)
     monkeypatch.setattr(HOOK, "issue_body", fake_issue_body)
+    monkeypatch.setattr(HOOK, "parse_touches", fake_parse_touches)
+    monkeypatch.setattr(HOOK, "allowed", fake_allowed)
 
     with pytest.raises(HOOK.Refusal, match="pull request head changed during file collection"):
         HOOK.check_pull_request(9, "a" * 40)
 
-    assert events == ["pull_request", "pull_changed_paths", "issue_body", "pull_request"]
+    assert events == [
+        "pull_request",
+        "pull_changed_paths",
+        "issue_body",
+        "parse_touches",
+        "allowed",
+        "pull_request",
+    ]
 
 
 def test_canonical_touches_requires_safe_declared_path_and_refuses_incomplete_candidate(
