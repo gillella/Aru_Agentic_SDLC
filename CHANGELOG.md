@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.0.1 - Self-Hosted Trust and Verification Hardening - 2026-09-01
+
+### Included changes
+
+- Hardened `templates/governed-pr.yml` to preserve raw provenance and fail closed
+  when head-repository identity is empty or a fork.
+- Expanded `templates/verify.sh` secret scanner to detect high-entropy
+  `API_SECRET_KEY` / `JMC_API_SECRET` assignments and modern hyphenated
+  `sk-proj-...` keys without self-match or placeholder false positives.
+- Ensured deterministic rename collection (both source and destination) in
+  `templates/verify.sh` and `hooks/enforce_touches.py`.
+- Made `templates/verify.sh` workflow permission and runner checks portable
+  across BSD/macOS grep using POSIX character classes.
+- Used machine-safe NUL-delimited diff parsing (`--name-status -z`) in
+  `templates/verify.sh` and `hooks/enforce_touches.py` to handle paths with
+  spaces, tabs, newlines, quotes, and Unicode filenames without ambiguous shell
+  conversion, including both rename and copy sides.
+- Added bounded PR head revalidation immediately before return in
+  `hooks/enforce_touches.py` to close race windows against late pushes during
+  touches enforcement.
+- Standardized `python3` invocation across workflow preflight and touches
+  enforcement.
+- Extended consumer drift and scaffold fixture tests to bind hashes for
+  `governed-pr.yml` and `.aru/lib/touches.py`, and executable permissions for
+  `.aru/verify.sh`.
+
 ## v1.0.0 - Governed, Risk-Proportional Delivery - 2026-09-01
 
 ### Release summary

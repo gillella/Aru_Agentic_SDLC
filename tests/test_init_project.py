@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import os
+import re
+import shutil
+import subprocess
 
 import pytest
 import yaml
@@ -68,9 +73,7 @@ def test_kernel_workflow_is_read_only_exact_head_and_immutable():
     assert "command -v python3" in preflight["run"]
     assert "command -v gh" in preflight["run"]
     checkout = job["steps"][1]
-    assert checkout["with"]["ref"] == (
-        "${{ github.event.pull_request.head.sha || github.sha }}"
-    )
+    assert checkout["with"]["ref"] == ("${{ github.event.pull_request.head.sha || github.sha }}")
     assert checkout["uses"].startswith("actions/checkout@")
     assert len(checkout["uses"].split("@", 1)[1]) == 40
     assert checkout["with"]["persist-credentials"] is False
@@ -101,16 +104,12 @@ def test_scaffold_creates_only_minimal_governance(tmp_path):
     assert (target / ".git").is_dir()
     assert not (target / "skills").exists()
     assert not (target / "scripts").exists()
-    workflow = (target / ".github/workflows/governed-pr.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = (target / ".github/workflows/governed-pr.yml").read_text(encoding="utf-8")
     assert "name: aru-governed-pr" in workflow
     assert "runs-on: [self-hosted, macOS, ARM64, aru-ci]" in workflow
     assert "hooks/enforce_touches.py --pr" in workflow
     assert (target / ".aru/verify.sh").stat().st_mode & 0o111
-    assert "class TouchesError" in (target / ".aru/lib/touches.py").read_text(
-        encoding="utf-8"
-    )
+    assert "class TouchesError" in (target / ".aru/lib/touches.py").read_text(encoding="utf-8")
     assert (target / ".git/hooks/touches.py").is_file()
 
 
@@ -218,7 +217,574 @@ def test_github_setup_marks_project_graphql_authority(monkeypatch, tmp_path):
     assert len(graphql_calls) == 1
     assert graphql_calls[0][1] == init_project.PROJECT_AUTH
     assert rulesets == [init_project.ruleset_payload()]
-    ruleset_calls = [call for call in calls if call[0][:3] == ["gh", "api", "repos/owner/consumer/rulesets"]]
+    ruleset_calls = [
+        call for call in calls if call[0][:3] == ["gh", "api", "repos/owner/consumer/rulesets"]
+    ]
     assert len(ruleset_calls) == 1
     assert ruleset_calls[0][1] == init_project.REPOSITORY_AUTH
     assert result["ruleset"] == "https://example.test/rules/1"
+
+
+def test_governed_pr_template_provenance_and_python3():
+    path = init_project.Path(__file__).resolve().parents[1] / "templates/governed-pr.yml"
+    raw = path.read_text(encoding="utf-8")
+    assert "ARU_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}" in raw
+    assert "|| github.repository" not in raw
+    assert (
+        'if [[ "$ARU_EVENT_NAME" == "pull_request" && ( -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ) ]]; then'
+        in raw
+    )
+    assert 'python3 .aru/hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"' in raw
+
+
+@pytest.mark.parametrize(
+    ("event_name", "head_repo", "repo", "expected_code"),
+    [
+        ("pull_request", "", "owner/repo", 1),
+        ("pull_request", "fork/repo", "owner/repo", 1),
+        ("pull_request", "owner/repo", "owner/repo", 0),
+        ("merge_group", "", "owner/repo", 0),
+        ("merge_group", "fork/repo", "owner/repo", 0),
+    ],
+)
+def test_trust_boundary_script_execution(event_name, head_repo, repo, expected_code):
+    script = """
+if [[ "$ARU_EVENT_NAME" == "pull_request" && ( -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ) ]]; then
+  echo "::error::Fork pull requests cannot execute on persistent self-hosted runners."
+  exit 1
+fi
+"""
+    env = {
+        "ARU_EVENT_NAME": event_name,
+        "ARU_HEAD_REPOSITORY": head_repo,
+        "ARU_REPOSITORY": repo,
+    }
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == expected_code
+
+
+def test_scaffold_consumer_drift_fixtures_and_permissions(tmp_path):
+    target = tmp_path / "consumer"
+    written = init_project.scaffold("consumer", target)
+    framework = init_project.Path(__file__).resolve().parents[1]
+
+    expected_sources = {
+        "AGENTS.md": framework / "templates" / "AGENTS.md",
+        ".github/ISSUE_TEMPLATE/governed-task.yml": framework / "templates" / "issue.yml",
+        ".github/PULL_REQUEST_TEMPLATE.md": framework / "templates" / "pull_request.md",
+        ".github/workflows/governed-pr.yml": framework / "templates" / "governed-pr.yml",
+        ".aru/verify.sh": framework / "templates" / "verify.sh",
+        ".aru/lib/touches.py": framework / "scripts" / "touches.py",
+        ".aru/hooks/pre-push": framework / "hooks" / "pre-push",
+        ".aru/hooks/enforce_touches.py": framework / "hooks" / "enforce_touches.py",
+    }
+
+    for relative, source_path in expected_sources.items():
+        assert relative in written
+        dest_file = target / relative
+        assert dest_file.is_file()
+        expected_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        actual_hash = hashlib.sha256(dest_file.read_bytes()).hexdigest()
+        assert actual_hash == expected_hash, f"Hash mismatch for {relative}"
+
+    # Executable permissions binding
+    executable_files = {
+        ".aru/verify.sh",
+        ".aru/hooks/pre-push",
+        ".aru/hooks/enforce_touches.py",
+    }
+    for relative in written:
+        dest_file = target / relative
+        mode = dest_file.stat().st_mode
+        if relative in executable_files:
+            assert mode & 0o111 != 0, f"Expected {relative} to be executable"
+        else:
+            assert mode & 0o111 == 0, f"Expected {relative} to not be executable"
+
+
+def test_verify_template_secret_scan_positives_and_negatives():
+    path = init_project.Path(__file__).resolve().parents[1] / "templates/verify.sh"
+    content = path.read_text(encoding="utf-8")
+
+    match = re.search(r'secret_re="(.*?)"\s*$', content, re.MULTILINE)
+    assert match is not None
+    secret_re = match.group(1).replace(r"\"", '"')
+
+    positives = [
+        "gh" + "p_123456789012345678901234567890123456",
+        "github_pat_" + "123456789012345678901234567890123456789012345678901234567890",
+        "AKIA" + "IOSFODNN7EXAMPLE",
+        "xox" + "b-123456789012-1234567890123-abcdefghijklmnopqrstuvwx",
+        "sk-" + "123456789012345678901234567890123456",
+        "sk-proj-" + "abc123def456ghi789jkl012mno345pqr678stu901vwx_yz-123456",
+        'API_SECRET_KEY="'
+        + "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        + '"',
+        "API_SECRET_KEY=" + "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        'JMC_API_SECRET="'
+        + "c4d9e32e4518ff6adffb23ba8cc224450e9ec6ffefd862451d449d85331480e2"
+        + '"',
+        "JMC_API_SECRET=" + "c4d9e32e4518ff6adffb23ba8cc224450e9ec6ffefd862451d449d85331480e2",
+        "-----BEGIN RSA " + "PRIVATE KEY-----",
+    ]
+
+    negatives = [
+        content,
+        "API_SECRET_KEY=your-long-random-secret-key-min-32-chars",
+        "JMC_API_SECRET=your-long-random-secret-key-min-32-chars",
+        "DEEPSEEK_API_KEY=sk-your-deepseek-api-key",
+        "DATABASE_URL=postgresql://username:password@localhost:5432/jaji_mc",
+        'DATABASE_URL="postgresql://verify:verify@127.0.0.1:5432/verify"',
+        'NEXT_PUBLIC_APP_URL="http://localhost:3000"',
+        "LINKEDIN_CLIENT_SECRET=your-linkedin-client-secret",
+        'API_SECRET_KEY=""',
+        'API_SECRET_KEY="placeholder"',
+    ]
+
+    for item in positives:
+        res = subprocess.run(
+            ["grep", "-Eq", secret_re],
+            input=item,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert res.returncode == 0, f"Expected positive match for {item}"
+
+    for item in negatives:
+        res = subprocess.run(
+            ["grep", "-Eq", secret_re],
+            input=item,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert res.returncode != 0, f"Expected negative match (no match) for {item}"
+
+
+@pytest.mark.parametrize("operation", ["rename", "copy"])
+def test_verify_template_classifies_nul_paths_end_to_end(tmp_path, operation):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    init_project.scaffold("consumer", tmp_path)
+    source = ".aru/old\tline\ncafé_🚀.txt"
+    destination = "moved/new\tline\ncafé_🚀.txt"
+    (tmp_path / source).write_text("governance-adjacent content\n", encoding="utf-8")
+    (tmp_path / ".aru" / "verify.sh").chmod(0o644)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "initial"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    (tmp_path / "moved").mkdir()
+    if operation == "rename":
+        subprocess.run(["git", "mv", source, destination], cwd=tmp_path, check=True)
+    else:
+        (tmp_path / destination).write_bytes((tmp_path / source).read_bytes())
+        subprocess.run(["git", "add", destination], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-am", operation],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        ["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 1
+    assert ".aru/verify.sh must be executable" in result.stderr
+    assert '".aru/old\\tline\\ncaf\\u00e9_\\ud83d\\ude80.txt"' in result.stdout
+    assert '"moved/new\\tline\\ncaf\\u00e9_\\ud83d\\ude80.txt"' in result.stdout
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        b"M\x00unterminated.py",
+        b"R100\x00only-one-side.py\x00",
+        b"M\x00valid.py\x00extra\x00",
+    ],
+)
+def test_verify_template_fails_closed_on_malformed_nul_evidence(tmp_path, evidence):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    init_project.scaffold("consumer", tmp_path)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+    (tmp_path / "ordinary.txt").write_text("changed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "ordinary.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "change"], cwd=tmp_path, check=True, capture_output=True
+    )
+
+    evidence_file = tmp_path / "malformed.diff-z"
+    evidence_file.write_bytes(evidence)
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    git_shim = shim_dir / "git"
+    git_shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "-c" ] && [ "$3" = "diff" ]; then\n'
+        '  cat "$ARU_TEST_EVIDENCE"\n'
+        "  exit 0\n"
+        "fi\n"
+        'exec "$ARU_REAL_GIT" "$@"\n',
+        encoding="utf-8",
+    )
+    git_shim.chmod(0o755)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    env = {
+        **os.environ,
+        "ARU_REAL_GIT": real_git,
+        "ARU_TEST_EVIDENCE": str(evidence_file),
+        "PATH": f"{shim_dir}:{os.environ['PATH']}",
+    }
+
+    result = subprocess.run(
+        ["bash", ".aru/verify.sh"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 1
+    assert "changed-path evidence is malformed" in result.stderr
+
+
+def test_verify_template_secret_scan_catches_runtime_generated_diff_inputs():
+    path = init_project.Path(__file__).resolve().parents[1] / "templates/verify.sh"
+    content = path.read_text(encoding="utf-8")
+
+    match = re.search(r'secret_re="(.*?)"\s*$', content, re.MULTILINE)
+    assert match is not None
+    secret_re = match.group(1).replace(r"\"", '"')
+
+    # Positive test: Runtime-constructed secret added in diff is caught by fail-closed scanner pipeline
+    token = "gh" + "p_" + "1234567890" * 4
+    diff_with_token = f"+ {token}\n"
+    cmd = "grep -a -E '^\\+' || true"
+    res = subprocess.run(
+        ["bash", "-c", cmd], input=diff_with_token, text=True, capture_output=True, check=True
+    )
+    scan_res = subprocess.run(
+        ["grep", "-a", "-Eq", secret_re],
+        input=res.stdout,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert scan_res.returncode == 0, "Expected generated secret in added diff line to be caught"
+
+    # Positive test: Runtime-constructed binary secret with NUL bytes is caught by pipeline
+    binary_diff = b"+ \x00\x01\x02" + token.encode("ascii") + b"\x00\x03\n"
+    res_bin = subprocess.run(
+        ["bash", "-c", cmd], input=binary_diff, capture_output=True, check=True
+    )
+    scan_bin = subprocess.run(
+        ["grep", "-a", "-Eq", secret_re],
+        input=res_bin.stdout,
+        capture_output=True,
+        check=False,
+    )
+    assert (
+        scan_bin.returncode == 0
+    ), "Expected generated binary secret in added diff line to be caught"
+
+    # Positive test: Runtime-constructed project secret in code diff is caught
+    proj_token = "sk-" + "proj-" + "abc123def456ghi789jkl012mno345pqr678stu901vwx_yz-" + "123456"
+    test_file_diff = f"+ # in tests/test_auth.py\n+ TOKEN = '{proj_token}'\n"
+    res = subprocess.run(
+        ["bash", "-c", cmd], input=test_file_diff, text=True, capture_output=True, check=True
+    )
+    scan_res = subprocess.run(
+        ["grep", "-a", "-Eq", secret_re],
+        input=res.stdout,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert scan_res.returncode == 0, "Expected generated test file secret to be caught"
+
+    # Negative test: Non-secret added line with placeholder passes
+    clean_diff = '+ API_SECRET_KEY="your-long-random-secret-key-min-32-chars"\n+ python3 main.py\n'
+    res = subprocess.run(
+        ["bash", "-c", cmd], input=clean_diff, text=True, capture_output=True, check=True
+    )
+    scan_res = subprocess.run(
+        ["grep", "-a", "-Eq", secret_re],
+        input=res.stdout,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert scan_res.returncode != 0, "Expected clean placeholder diff to pass without detection"
+
+
+def test_verify_template_secret_scan_catches_binary_credentials_end_to_end(tmp_path):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    init_project.scaffold("consumer", tmp_path)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+
+    secret = "gh" + "p_" + "1234567890" * 4
+    binary_payload = b"\x00\x01\x02\xff" + secret.encode("ascii") + b"\x00\xfe\n"
+    (tmp_path / "payload.bin").write_bytes(binary_payload)
+    subprocess.run(["git", "add", "payload.bin"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add binary credential"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        ["bash", ".aru/verify.sh"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "credential-shaped literal found in the verified content" in result.stderr
+
+
+def test_verify_template_secret_scan_allows_safe_binary_control_end_to_end(tmp_path):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    init_project.scaffold("consumer", tmp_path)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+
+    safe_binary = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256))
+    (tmp_path / "image.png").write_bytes(safe_binary)
+    subprocess.run(["git", "add", "image.png"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add safe binary"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    result = subprocess.run(
+        ["bash", ".aru/verify.sh"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "no credential-shaped literal found" in result.stdout
+    assert "proportional verification passed" in result.stdout
+
+
+def test_verify_template_secret_scan_fallback_tree_mode_with_binary_content_end_to_end(tmp_path):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    init_project.scaffold("consumer", tmp_path)
+    safe_binary = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256))
+    (tmp_path / "image.png").write_bytes(safe_binary)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "init safe tree"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    # Safe binary in fallback mode (no origin/main comparison base)
+    result = subprocess.run(
+        ["bash", ".aru/verify.sh"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "no credential-shaped literal found" in result.stdout
+    assert "full tracked tree (no comparison base resolved)" in result.stdout
+
+    # Add binary credential in fallback mode
+    secret = "gh" + "p_" + "1234567890" * 4
+    (tmp_path / "secret.bin").write_bytes(b"\x00\x01" + secret.encode("ascii") + b"\x00")
+    subprocess.run(["git", "add", "secret.bin"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add secret binary"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    result_secret = subprocess.run(
+        ["bash", ".aru/verify.sh"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result_secret.returncode == 1
+    assert "credential-shaped literal found in the verified content" in result_secret.stderr
+
+
+def test_verify_template_executable_rejects_indented_write_permission_on_macos(tmp_path):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    init_project.scaffold("consumer", tmp_path)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
+
+    wf = tmp_path / ".github/workflows/governed-pr.yml"
+    content = wf.read_text(encoding="utf-8")
+    wf.write_text(
+        content.replace("permissions:\n  contents: read", "permissions:\n  contents: write"),
+        encoding="utf-8",
+    )
+    subprocess.run(
+        ["git", "commit", "-a", "-m", "add write perm"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    res = subprocess.run(
+        ["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert res.returncode == 1
+    assert "governed workflow permissions must stay read-only" in res.stderr
+
+    wf.write_text(content, encoding="utf-8")
+    subprocess.run(
+        ["git", "commit", "-a", "-m", "restore read perm"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    res_ok = subprocess.run(
+        ["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False
+    )
+    assert res_ok.returncode == 0
+    assert "proportional verification passed" in res_ok.stdout
+
+
+def test_verify_template_workflow_permissions_portable_gate():
+    path = init_project.Path(__file__).resolve().parents[1] / "templates/verify.sh"
+    content = path.read_text(encoding="utf-8")
+
+    match = re.search(r"if grep -Eq '([^']+)' \"\$\{workflow\}\"; then", content)
+    assert match is not None
+    perm_re = match.group(1)
+
+    # Indented write / admin permissions must be rejected
+    rejected = [
+        "permissions:\n  contents: write\n",
+        "permissions:\n\tcontents: write\n",
+        "permissions:\n    contents: write\n",
+        "contents: write\n",
+        "permissions:\n  issues: write\n",
+        "permissions:\n  pull-requests: write\n",
+        "permissions:\n  actions: write\n",
+        "permissions:\n  checks: write\n",
+        "permissions:\n  deployments: write\n",
+        "permissions:\n  packages: write\n",
+        "permissions:\n  id-token: write\n",
+        "permissions:\n  contents: admin\n",
+        "permissions:\n  actions: admin\n",
+    ]
+    for item in rejected:
+        res = subprocess.run(
+            ["grep", "-Eq", perm_re],
+            input=item,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert res.returncode == 0, f"Expected rejection for:\n{item}"
+
+    # Read-only permissions must pass
+    accepted = [
+        "permissions:\n  contents: read\n  issues: read\n  pull-requests: read\n",
+        "permissions:\n  actions: read\n  checks: read\n",
+        "permissions:\n  deployments: read\n  packages: read\n  id-token: read\n",
+        "permissions: read-all\n",
+        "permissions: {}\n",
+    ]
+    for item in accepted:
+        res = subprocess.run(
+            ["grep", "-Eq", perm_re],
+            input=item,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert res.returncode != 0, f"Expected acceptance for:\n{item}"

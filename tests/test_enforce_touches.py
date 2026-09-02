@@ -38,10 +38,7 @@ def test_hook_requires_one_claim_and_active_status(monkeypatch):
     monkeypatch.setattr(
         HOOK,
         "run",
-        lambda _argv: (
-            '{"state":"OPEN","body":"touches: a.py",'
-            '"labels":[{"name":"status:ready"}]}'
-        ),
+        lambda _argv: '{"state":"OPEN","body":"touches: a.py","labels":[{"name":"status:ready"}]}',
     )
     with pytest.raises(HOOK.Refusal, match="In Progress"):
         HOOK.issue_body(1)
@@ -49,9 +46,7 @@ def test_hook_requires_one_claim_and_active_status(monkeypatch):
 
 def test_explicit_pushed_branch_drives_issue_identity(monkeypatch):
     monkeypatch.setattr(HOOK, "issue_body", lambda number: f"touches: issue-{number}.txt")
-    assert HOOK.check(
-        ["issue-12.txt"], branch="feat/issue-12-change", default_branch="trunk"
-    ) == []
+    assert HOOK.check(["issue-12.txt"], branch="feat/issue-12-change", default_branch="trunk") == []
 
 
 def test_hook_refuses_the_actual_default_branch():
@@ -112,6 +107,157 @@ def test_pr_mode_fails_closed_on_wrong_or_malformed_expected_head(monkeypatch, e
     )
     with pytest.raises(HOOK.Refusal, match="expected head"):
         HOOK.check_pull_request(9, expected)
+
+
+def test_pr_mode_accepts_stable_head_across_file_collection(monkeypatch):
+    calls = []
+
+    def fake_pull_request(number):
+        calls.append(number)
+        return {
+            "headRefOid": "a" * 40,
+            "body": "## Summary\n\nCloses #12\n",
+        }
+
+    monkeypatch.setattr(HOOK, "pull_request", fake_pull_request)
+    monkeypatch.setattr(HOOK, "pull_changed_paths", lambda _number: ["scripts/a.py"])
+    monkeypatch.setattr(
+        HOOK,
+        "issue_body",
+        lambda _number: "touches: scripts/a.py",
+    )
+
+    violations, issue, head = HOOK.check_pull_request(9, "a" * 40)
+    assert violations == []
+    assert issue == 12
+    assert head == "a" * 40
+    assert len(calls) == 2
+
+
+def test_pr_mode_refuses_when_head_changes_during_file_collection(monkeypatch):
+    calls = []
+
+    def fake_pull_request(number):
+        calls.append(number)
+        if len(calls) == 1:
+            return {"headRefOid": "a" * 40, "body": "Closes #12\n"}
+        return {"headRefOid": "b" * 40, "body": "Closes #12\n"}
+
+    monkeypatch.setattr(HOOK, "pull_request", fake_pull_request)
+    monkeypatch.setattr(HOOK, "pull_changed_paths", lambda _number: ["scripts/a.py"])
+    monkeypatch.setattr(HOOK, "issue_body", lambda _number: "touches: scripts/a.py")
+
+    with pytest.raises(HOOK.Refusal, match="pull request head changed"):
+        HOOK.check_pull_request(9, "a" * 40)
+
+
+def test_pr_mode_refuses_changed_head_without_explicit_expected_head(monkeypatch):
+    calls = []
+
+    def fake_pull_request(number):
+        calls.append(number)
+        if len(calls) == 1:
+            return {"headRefOid": "a" * 40, "body": "Closes #12\n"}
+        return {"headRefOid": "b" * 40, "body": "Closes #12\n"}
+
+    monkeypatch.setattr(HOOK, "pull_request", fake_pull_request)
+    monkeypatch.setattr(HOOK, "pull_changed_paths", lambda _number: ["scripts/a.py"])
+    monkeypatch.setattr(HOOK, "issue_body", lambda _number: "touches: scripts/a.py")
+
+    with pytest.raises(HOOK.Refusal, match="pull request head changed"):
+        HOOK.check_pull_request(9)
+
+
+def test_pr_mode_revalidates_head_immediately_before_return_after_eval(monkeypatch):
+    events = []
+
+    def fake_pull_request(number):
+        events.append("pull_request")
+        if len([e for e in events if e == "pull_request"]) == 1:
+            return {"headRefOid": "a" * 40, "body": "Closes #12\n"}
+        return {"headRefOid": "c" * 40, "body": "Closes #12\n"}
+
+    def fake_pull_changed_paths(number):
+        events.append("pull_changed_paths")
+        return ["scripts/a.py"]
+
+    def fake_issue_body(number):
+        events.append("issue_body")
+        return "touches: scripts/a.py"
+
+    def fake_parse_touches(body):
+        events.append("parse_touches")
+        return ["scripts/a.py"]
+
+    def fake_allowed(path, declared):
+        events.append("allowed")
+        return path in declared
+
+    monkeypatch.setattr(HOOK, "pull_request", fake_pull_request)
+    monkeypatch.setattr(HOOK, "pull_changed_paths", fake_pull_changed_paths)
+    monkeypatch.setattr(HOOK, "issue_body", fake_issue_body)
+    monkeypatch.setattr(HOOK, "parse_touches", fake_parse_touches)
+    monkeypatch.setattr(HOOK, "allowed", fake_allowed)
+
+    with pytest.raises(HOOK.Refusal, match="pull request head changed during file collection"):
+        HOOK.check_pull_request(9, "a" * 40)
+
+    assert events == [
+        "pull_request",
+        "pull_changed_paths",
+        "issue_body",
+        "parse_touches",
+        "allowed",
+        "pull_request",
+    ]
+
+
+def test_canonical_touches_requires_safe_declared_path_and_refuses_incomplete_candidate(
+    tmp_path, monkeypatch
+):
+    hook_file = tmp_path / "enforce_touches.py"
+    hook_file.write_text(
+        Path(HOOK.__file__).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (tmp_path / "touches.py").write_text(
+        "class TouchesError(Exception):\n"
+        "    pass\n\n"
+        "def parse_touches(body):\n"
+        "    return []\n\n"
+        "def path_allowed(path, declared):\n"
+        "    return True\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ARU_SDLC_HOME", raising=False)
+    spec = importlib.util.spec_from_file_location("test_enforce_touches_incomplete", hook_file)
+    assert spec and spec.loader
+    test_hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(test_hook)
+
+    with pytest.raises(test_hook.Refusal, match="canonical Aru touches parser is unavailable"):
+        test_hook._canonical_touches()
+
+    with pytest.raises(test_hook.Refusal, match="canonical Aru touches parser is unavailable"):
+        test_hook.safe_path("src/foo.py")
+
+    valid_dir = tmp_path / "valid_home"
+    (valid_dir / "scripts").mkdir(parents=True)
+    (valid_dir / "scripts" / "touches.py").write_text(
+        "class TouchesError(Exception):\n"
+        "    pass\n\n"
+        "def safe_declared_path(value):\n"
+        "    return value == 'valid.py'\n\n"
+        "def parse_touches(body):\n"
+        "    return ['valid.py']\n\n"
+        "def path_allowed(path, declared):\n"
+        "    return path in declared\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ARU_SDLC_HOME", str(valid_dir))
+    test_hook._TOUCHES = None
+    assert test_hook.safe_path("valid.py") is True
+    assert test_hook.safe_path("other.py") is False
 
 
 def test_pr_changed_paths_include_old_and_new_rename_names(monkeypatch):
@@ -187,3 +333,292 @@ def test_hook_refuses_out_of_scope_deleted_path(tmp_path, monkeypatch, capsys):
 
     assert HOOK.main() == 2
     assert capsys.readouterr().out == "refused: outside.txt is outside touches:\n"
+
+
+def test_range_changed_paths_include_both_rename_sides(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "old.py").write_text("print(1)\n", encoding="utf-8")
+    subprocess.run(["git", "add", "old.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add old"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(["git", "mv", "old.py", "new.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "rename to new"], cwd=tmp_path, check=True, capture_output=True
+    )
+
+    monkeypatch.chdir(tmp_path)
+    paths = HOOK.changed_paths("HEAD~1..HEAD")
+    assert paths == ["new.py", "old.py"]
+
+
+def test_range_refuses_when_rename_source_is_outside_touches(tmp_path, monkeypatch, capsys):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "legacy.py").write_text("print(1)\n", encoding="utf-8")
+    subprocess.run(["git", "add", "legacy.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "mv", "legacy.py", "renamed.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "rename"], cwd=tmp_path, check=True, capture_output=True)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(HOOK, "issue_body", lambda _number: "touches: renamed.py")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "enforce_touches.py",
+            "--range",
+            "HEAD~1..HEAD",
+            "--issue",
+            "548",
+            "--branch",
+            "fix/issue-548-rename",
+            "--default-branch",
+            "main",
+        ],
+    )
+
+    assert HOOK.main() == 2
+    assert capsys.readouterr().out == "refused: legacy.py is outside touches:\n"
+
+
+def test_range_allows_when_both_rename_sides_are_within_touches(tmp_path, monkeypatch, capsys):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "legacy.py").write_text("print(1)\n", encoding="utf-8")
+    subprocess.run(["git", "add", "legacy.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "mv", "legacy.py", "renamed.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "rename"], cwd=tmp_path, check=True, capture_output=True)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(HOOK, "issue_body", lambda _number: "touches: legacy.py, renamed.py")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "enforce_touches.py",
+            "--range",
+            "HEAD~1..HEAD",
+            "--issue",
+            "548",
+            "--branch",
+            "fix/issue-548-rename",
+            "--default-branch",
+            "main",
+        ],
+    )
+
+    assert HOOK.main() == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_range_changed_paths_include_both_copy_sides(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "original.py").write_text("def run():\n    return 100\n", encoding="utf-8")
+    subprocess.run(["git", "add", "original.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add original"], cwd=tmp_path, check=True, capture_output=True
+    )
+    (tmp_path / "copied.py").write_text("def run():\n    return 100\n", encoding="utf-8")
+    subprocess.run(["git", "add", "copied.py"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "copy to copied"], cwd=tmp_path, check=True, capture_output=True
+    )
+
+    monkeypatch.chdir(tmp_path)
+    paths = HOOK.changed_paths("HEAD~1..HEAD")
+    assert paths == ["copied.py", "original.py"]
+
+
+def test_range_refuses_when_copy_source_is_outside_touches(tmp_path, monkeypatch, capsys):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "legacy_source.py").write_text("def compute():\n    return 42\n", encoding="utf-8")
+    subprocess.run(["git", "add", "legacy_source.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "copied_dest.py").write_text("def compute():\n    return 42\n", encoding="utf-8")
+    subprocess.run(["git", "add", "copied_dest.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "copy"], cwd=tmp_path, check=True, capture_output=True)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(HOOK, "issue_body", lambda _number: "touches: copied_dest.py")
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "enforce_touches.py",
+            "--range",
+            "HEAD~1..HEAD",
+            "--issue",
+            "548",
+            "--branch",
+            "fix/issue-548-copy",
+            "--default-branch",
+            "main",
+        ],
+    )
+
+    assert HOOK.main() == 2
+    assert capsys.readouterr().out == "refused: legacy_source.py is outside touches:\n"
+
+
+def test_range_allows_when_both_copy_sides_are_within_touches(tmp_path, monkeypatch, capsys):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "legacy_source.py").write_text("def compute():\n    return 42\n", encoding="utf-8")
+    subprocess.run(["git", "add", "legacy_source.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "copied_dest.py").write_text("def compute():\n    return 42\n", encoding="utf-8")
+    subprocess.run(["git", "add", "copied_dest.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "copy"], cwd=tmp_path, check=True, capture_output=True)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        HOOK, "issue_body", lambda _number: "touches: legacy_source.py, copied_dest.py"
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "enforce_touches.py",
+            "--range",
+            "HEAD~1..HEAD",
+            "--issue",
+            "548",
+            "--branch",
+            "fix/issue-548-copy",
+            "--default-branch",
+            "main",
+        ],
+    )
+
+    assert HOOK.main() == 0
+    assert capsys.readouterr().out == ""
+
+
+def test_changed_paths_decodes_nul_diff_with_special_characters_and_renames(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "old\tname.txt").write_text("old content\n", encoding="utf-8")
+    (tmp_path / "file\nwith\nnewlines.txt").write_text("newline content\n", encoding="utf-8")
+    (tmp_path / "café_🚀.txt").write_text("unicode content\n", encoding="utf-8")
+    (tmp_path / "plain.txt").write_text("plain content\n", encoding="utf-8")
+    subprocess.run(
+        [
+            "git",
+            "add",
+            "old\tname.txt",
+            "file\nwith\nnewlines.txt",
+            "café_🚀.txt",
+            "plain.txt",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+
+    subprocess.run(["git", "mv", "old\tname.txt", "new\tname.txt"], cwd=tmp_path, check=True)
+    (tmp_path / "file\nwith\nnewlines.txt").write_text("modified newline\n", encoding="utf-8")
+    (tmp_path / "café_🚀.txt").write_text("modified unicode\n", encoding="utf-8")
+    (tmp_path / "plain.txt").unlink()
+    subprocess.run(
+        ["git", "commit", "-a", "-m", "rename, modify, and delete"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    paths = HOOK.changed_paths("HEAD~1..HEAD")
+    assert paths == [
+        "café_🚀.txt",
+        "file\nwith\nnewlines.txt",
+        "new\tname.txt",
+        "old\tname.txt",
+        "plain.txt",
+    ]
+
+
+def test_changed_paths_empty_output(monkeypatch):
+    monkeypatch.setattr(HOOK, "run", lambda _argv: "")
+    assert HOOK.changed_paths("HEAD~1..HEAD") == []
+
+
+@pytest.mark.parametrize(
+    "bad_output",
+    [
+        "M\x00foo.py",
+        "X\x00foo.py\x00",
+        "R100\x00old.py\x00",
+        "C100\x00old.py\x00",
+        "M\x00",
+        "Rbad\x00old.py\x00new.py\x00",
+        "Mfoo\x00file.py\x00",
+        "\x00",
+        "M\x00\x00",
+        "R100\x00\x00new.py\x00",
+        "R100\x00old.py\x00\x00",
+        "M\x00file.py\x00extra\x00",
+        "M\tfoo.py\n",
+    ],
+)
+def test_changed_paths_malformed_nul_evidence_fails_closed(monkeypatch, bad_output):
+    monkeypatch.setattr(HOOK, "run", lambda _argv: bad_output)
+    with pytest.raises(HOOK.Refusal, match="changed-path evidence is malformed"):
+        HOOK.changed_paths("HEAD~1..HEAD")

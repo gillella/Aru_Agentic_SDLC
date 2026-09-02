@@ -40,7 +40,12 @@ def _canonical_touches() -> ModuleType:
         spec.loader.exec_module(module)
         if all(
             hasattr(module, name)
-            for name in ("TouchesError", "parse_touches", "path_allowed")
+            for name in (
+                "TouchesError",
+                "parse_touches",
+                "path_allowed",
+                "safe_declared_path",
+            )
         ):
             _TOUCHES = module
             return module
@@ -159,7 +164,11 @@ def check_pull_request(number: int, expected_head: str | None = None) -> tuple[l
     issue = linked_issue(str(pr["body"]))
     paths = pull_changed_paths(number)
     declared = parse_touches(issue_body(issue))
-    return [path for path in paths if not allowed(path, declared)], issue, head
+    violations = [path for path in paths if not allowed(path, declared)]
+    refreshed = pull_request(number)
+    if str(refreshed["headRefOid"]).lower() != head.lower():
+        raise Refusal("pull request head changed during file collection")
+    return violations, issue, head
 
 
 def issue_number(branch: str) -> int:
@@ -177,11 +186,7 @@ def issue_body(number: int) -> str:
         raise Refusal("GitHub returned malformed issue data") from exc
     if record.get("state") != "OPEN":
         raise Refusal("issue is not open")
-    labels = [
-        label.get("name")
-        for label in record.get("labels", [])
-        if isinstance(label, dict)
-    ]
+    labels = [label.get("name") for label in record.get("labels", []) if isinstance(label, dict)]
     if not any(name in {"status:in-progress", "status:in-review"} for name in labels):
         raise Refusal("issue is not In Progress or In Review")
     if len([name for name in labels if isinstance(name, str) and name.startswith("agent:")]) != 1:
@@ -196,13 +201,50 @@ def changed_paths(diff_range: str) -> list[str]:
             "-c",
             "core.fsmonitor=false",
             "diff",
-            "--name-only",
-            "--diff-filter=ACDMR",
+            "--name-status",
+            "-z",
+            "--find-renames",
+            "--find-copies-harder",
+            "--diff-filter=ACDMRT",
             diff_range,
             "--",
         ]
     )
-    return [line for line in output.splitlines() if line]
+    if not output:
+        return []
+    if not output.endswith("\0"):
+        raise Refusal("changed-path evidence is malformed")
+
+    tokens = output[:-1].split("\0")
+    paths: list[str] = []
+    idx = 0
+    n = len(tokens)
+    while idx < n:
+        status = tokens[idx]
+        code = status[:1]
+        if code in {"R", "C"}:
+            if len(status) == 1 or not status[1:].isdigit():
+                raise Refusal("changed-path evidence is malformed")
+            arity = 2
+        elif code in {"A", "D", "M", "T"}:
+            if len(status) != 1:
+                raise Refusal("changed-path evidence is malformed")
+            arity = 1
+        else:
+            raise Refusal("changed-path evidence is malformed")
+
+        if idx + 1 + arity > n:
+            raise Refusal("changed-path evidence is malformed")
+
+        for offset in range(1, 1 + arity):
+            path = tokens[idx + offset]
+            if not path:
+                raise Refusal("changed-path evidence is malformed")
+            paths.append(path)
+
+        idx += 1 + arity
+
+    return sorted(set(paths))
 
 
 def check(
@@ -255,9 +297,7 @@ def main() -> int:
             paths = list(args.path)
             if args.diff_range:
                 paths.extend(changed_paths(args.diff_range))
-            violations = check(
-                sorted(set(paths)), args.issue, args.branch, args.default_branch
-            )
+            violations = check(sorted(set(paths)), args.issue, args.branch, args.default_branch)
     except Refusal as exc:
         parser.error(str(exc))
     if violations:

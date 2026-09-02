@@ -205,7 +205,7 @@ def test_project_commands_never_receive_repository_identity(monkeypatch, tmp_pat
 
 
 def test_remote_credentials_never_reach_the_runner_arguments_or_errors(monkeypatch, tmp_path):
-    secret = "ghp_remoteembeddedsecretvalue0000000000"
+    secret = "gh" + "p_remoteembeddedsecretvalue0000000000"
     checkout = _checkout(
         tmp_path, {"origin": f"https://x-access-token:{secret}@github.com/owner/consumer.git"}
     )
@@ -221,7 +221,7 @@ def test_remote_credentials_never_reach_the_runner_arguments_or_errors(monkeypat
 
 
 def test_broken_remote_identity_error_excludes_credential_material(monkeypatch, tmp_path):
-    secret = "ghp_brokenremotesecretvalue00000000000"
+    secret = "gh" + "p_brokenremotesecretvalue00000000000"
     checkout = _checkout(
         tmp_path, {"origin": f"https://x-access-token:{secret}@gitlab.example/owner/consumer.git"}
     )

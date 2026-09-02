@@ -25,10 +25,10 @@ jobs:
       - name: Validate self-hosted runner trust boundary
         env:
           ARU_EVENT_NAME: ${{ github.event_name }}
-          ARU_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ARU_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           ARU_REPOSITORY: ${{ github.repository }}
         run: |
-          if [[ "$ARU_EVENT_NAME" == "pull_request" && "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ]]; then
+          if [[ "$ARU_EVENT_NAME" == "pull_request" && ( -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ) ]]; then
             echo "::error::Fork pull requests cannot execute on persistent self-hosted runners."
             exit 1
           fi
@@ -54,5 +54,5 @@ jobs:
           ARU_PR_NUMBER: ${{ github.event.pull_request.number }}
           ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: >-
-          python .aru/hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
+          python3 .aru/hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
           --expected-head "$ARU_EXPECTED_HEAD"
