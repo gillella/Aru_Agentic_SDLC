@@ -40,7 +40,12 @@ def _canonical_touches() -> ModuleType:
         spec.loader.exec_module(module)
         if all(
             hasattr(module, name)
-            for name in ("TouchesError", "parse_touches", "path_allowed")
+            for name in (
+                "TouchesError",
+                "parse_touches",
+                "path_allowed",
+                "safe_declared_path",
+            )
         ):
             _TOUCHES = module
             return module
@@ -158,6 +163,9 @@ def check_pull_request(number: int, expected_head: str | None = None) -> tuple[l
             raise Refusal("expected head does not match the current PR head")
     issue = linked_issue(str(pr["body"]))
     paths = pull_changed_paths(number)
+    refreshed = pull_request(number)
+    if str(refreshed["headRefOid"]).lower() != head.lower():
+        raise Refusal("pull request head changed during file collection")
     declared = parse_touches(issue_body(issue))
     return [path for path in paths if not allowed(path, declared)], issue, head
 

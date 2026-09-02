@@ -114,6 +114,113 @@ def test_pr_mode_fails_closed_on_wrong_or_malformed_expected_head(monkeypatch, e
         HOOK.check_pull_request(9, expected)
 
 
+def test_pr_mode_accepts_stable_head_across_file_collection(monkeypatch):
+    calls = []
+
+    def fake_pull_request(number):
+        calls.append(number)
+        return {
+            "headRefOid": "a" * 40,
+            "body": "## Summary\n\nCloses #12\n",
+        }
+
+    monkeypatch.setattr(HOOK, "pull_request", fake_pull_request)
+    monkeypatch.setattr(HOOK, "pull_changed_paths", lambda _number: ["scripts/a.py"])
+    monkeypatch.setattr(
+        HOOK,
+        "issue_body",
+        lambda _number: "touches: scripts/a.py",
+    )
+
+    violations, issue, head = HOOK.check_pull_request(9, "a" * 40)
+    assert violations == []
+    assert issue == 12
+    assert head == "a" * 40
+    assert len(calls) == 2
+
+
+def test_pr_mode_refuses_when_head_changes_during_file_collection(monkeypatch):
+    calls = []
+
+    def fake_pull_request(number):
+        calls.append(number)
+        if len(calls) == 1:
+            return {"headRefOid": "a" * 40, "body": "Closes #12\n"}
+        return {"headRefOid": "b" * 40, "body": "Closes #12\n"}
+
+    monkeypatch.setattr(HOOK, "pull_request", fake_pull_request)
+    monkeypatch.setattr(HOOK, "pull_changed_paths", lambda _number: ["scripts/a.py"])
+    monkeypatch.setattr(HOOK, "issue_body", lambda _number: "touches: scripts/a.py")
+
+    with pytest.raises(HOOK.Refusal, match="pull request head changed"):
+        HOOK.check_pull_request(9, "a" * 40)
+
+
+def test_pr_mode_refuses_changed_head_without_explicit_expected_head(monkeypatch):
+    calls = []
+
+    def fake_pull_request(number):
+        calls.append(number)
+        if len(calls) == 1:
+            return {"headRefOid": "a" * 40, "body": "Closes #12\n"}
+        return {"headRefOid": "b" * 40, "body": "Closes #12\n"}
+
+    monkeypatch.setattr(HOOK, "pull_request", fake_pull_request)
+    monkeypatch.setattr(HOOK, "pull_changed_paths", lambda _number: ["scripts/a.py"])
+    monkeypatch.setattr(HOOK, "issue_body", lambda _number: "touches: scripts/a.py")
+
+    with pytest.raises(HOOK.Refusal, match="pull request head changed"):
+        HOOK.check_pull_request(9)
+
+
+def test_canonical_touches_requires_safe_declared_path_and_refuses_incomplete_candidate(
+    tmp_path, monkeypatch
+):
+    hook_file = tmp_path / "enforce_touches.py"
+    hook_file.write_text(
+        Path(HOOK.__file__).read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    (tmp_path / "touches.py").write_text(
+        "class TouchesError(Exception):\n"
+        "    pass\n\n"
+        "def parse_touches(body):\n"
+        "    return []\n\n"
+        "def path_allowed(path, declared):\n"
+        "    return True\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("ARU_SDLC_HOME", raising=False)
+    spec = importlib.util.spec_from_file_location("test_enforce_touches_incomplete", hook_file)
+    assert spec and spec.loader
+    test_hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(test_hook)
+
+    with pytest.raises(test_hook.Refusal, match="canonical Aru touches parser is unavailable"):
+        test_hook._canonical_touches()
+
+    with pytest.raises(test_hook.Refusal, match="canonical Aru touches parser is unavailable"):
+        test_hook.safe_path("src/foo.py")
+
+    valid_dir = tmp_path / "valid_home"
+    (valid_dir / "scripts").mkdir(parents=True)
+    (valid_dir / "scripts" / "touches.py").write_text(
+        "class TouchesError(Exception):\n"
+        "    pass\n\n"
+        "def safe_declared_path(value):\n"
+        "    return value == 'valid.py'\n\n"
+        "def parse_touches(body):\n"
+        "    return ['valid.py']\n\n"
+        "def path_allowed(path, declared):\n"
+        "    return path in declared\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ARU_SDLC_HOME", str(valid_dir))
+    test_hook._TOUCHES = None
+    assert test_hook.safe_path("valid.py") is True
+    assert test_hook.safe_path("other.py") is False
+
+
 def test_pr_changed_paths_include_old_and_new_rename_names(monkeypatch):
     calls = []
     monkeypatch.setattr(HOOK, "repository_slug", lambda: "owner/repo")
