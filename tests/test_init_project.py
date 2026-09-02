@@ -231,7 +231,7 @@ def test_governed_pr_template_provenance_and_python3():
     assert "ARU_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}" in raw
     assert "|| github.repository" not in raw
     assert (
-        'if [[ "$ARU_EVENT_NAME" == "pull_request" && ( -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ) ]]; then'
+        'if [[ "$ARU_EVENT_NAME" != "pull_request" || -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ]]; then'
         in raw
     )
     assert 'python3 .aru/hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"' in raw
@@ -243,18 +243,19 @@ def test_governed_pr_template_provenance_and_python3():
         ("pull_request", "", "owner/repo", 1),
         ("pull_request", "fork/repo", "owner/repo", 1),
         ("pull_request", "owner/repo", "owner/repo", 0),
-        ("merge_group", "", "owner/repo", 0),
-        ("merge_group", "fork/repo", "owner/repo", 0),
+        ("merge_group", "", "owner/repo", 1),
+        ("merge_group", "fork/repo", "owner/repo", 1),
+        ("merge_group", "owner/repo", "owner/repo", 1),
+        ("push", "owner/repo", "owner/repo", 1),
+        ("workflow_dispatch", "owner/repo", "owner/repo", 1),
     ],
 )
 def test_trust_boundary_script_execution(event_name, head_repo, repo, expected_code):
-    script = """
-if [[ "$ARU_EVENT_NAME" == "pull_request" && ( -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ) ]]; then
-  echo "::error::Fork pull requests cannot execute on persistent self-hosted runners."
-  exit 1
-fi
-"""
+    path = init_project.Path(__file__).resolve().parents[1] / "templates/governed-pr.yml"
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    script = workflow["jobs"]["governed-pr"]["steps"][0]["run"]
     env = {
+        **os.environ,
         "ARU_EVENT_NAME": event_name,
         "ARU_HEAD_REPOSITORY": head_repo,
         "ARU_REPOSITORY": repo,
@@ -267,6 +268,8 @@ fi
         check=False,
     )
     assert result.returncode == expected_code
+    if expected_code == 1:
+        assert "Fork pull requests cannot execute on persistent self-hosted runners." in result.stdout
 
 
 def test_scaffold_consumer_drift_fixtures_and_permissions(tmp_path):

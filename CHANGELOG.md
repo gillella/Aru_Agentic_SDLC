@@ -5,7 +5,8 @@
 ### Included changes
 
 - Hardened `templates/governed-pr.yml` to preserve raw provenance and fail closed
-  when head-repository identity is empty or a fork.
+  before checkout when head-repository identity is empty, a fork, or an
+  unproven merge group.
 - Expanded `templates/verify.sh` secret scanner to detect high-entropy
   `API_SECRET_KEY` / `JMC_API_SECRET` assignments and modern hyphenated
   `sk-proj-...` keys without self-match or placeholder false positives.

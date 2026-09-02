@@ -28,7 +28,7 @@ jobs:
           ARU_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           ARU_REPOSITORY: ${{ github.repository }}
         run: |
-          if [[ "$ARU_EVENT_NAME" == "pull_request" && ( -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ) ]]; then
+          if [[ "$ARU_EVENT_NAME" != "pull_request" || -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ]]; then
             echo "::error::Fork pull requests cannot execute on persistent self-hosted runners."
             exit 1
           fi
