@@ -29,7 +29,7 @@ jobs:
           ARU_REPOSITORY: ${{ github.repository }}
         run: |
           if [[ "$ARU_EVENT_NAME" != "pull_request" || -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ]]; then
-            echo "::error::Fork pull requests cannot execute on persistent self-hosted runners."
+            echo "::error::Only verified pull_request events from this repository may execute on persistent self-hosted runners."
             exit 1
           fi
           command -v python3

@@ -93,6 +93,6 @@ def test_governed_workflows_use_only_budget_free_self_hosted_macs():
         assert workflow.index("Validate self-hosted runner trust boundary") < workflow.index(
             "Check out the exact pull-request head"
         )
-        assert "Fork pull requests cannot execute" in workflow
+        assert "Only verified pull_request events from this repository may execute" in workflow
         assert "sys.version_info >= (3, 11)" in workflow
         assert "command -v gh" in workflow
