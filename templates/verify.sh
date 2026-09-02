@@ -33,61 +33,100 @@ if [ -n "${base_ref}" ]; then
   base="$(git merge-base "${base_ref}" HEAD 2>/dev/null || true)"
 fi
 
-parse_diff_z() {
-  local status path1 path2 score
-  while true; do
-    if ! IFS= read -r -d '' status; then
-      if [ -n "${status}" ]; then
-        return 1
-      fi
-      break
-    fi
-    score="${status#?}"
-    case "${score}" in
-      *[!0-9]*) return 1 ;;
-    esac
-    case "${status}" in
-      [RC]*)
-        IFS= read -r -d '' path1 || return 1
-        IFS= read -r -d '' path2 || return 1
-        [ -n "${path1}" ] && [ -n "${path2}" ] || return 1
-        printf '%s\n%s\n' "${path1}" "${path2}"
-        ;;
-      [ACDMRT]*)
-        IFS= read -r -d '' path1 || return 1
-        [ -n "${path1}" ] || return 1
-        printf '%s\n' "${path1}"
-        ;;
-      *)
-        return 1
-        ;;
-    esac
-    status=""
-  done
-  [ -z "${status}" ] || return 1
-}
+scope_dir="$(mktemp -d "${TMPDIR:-/tmp}/aru-verify.XXXXXX")" \
+  || fail "could not create changed-path workspace"
+cleanup_scope() { rm -rf -- "${scope_dir}"; }
+trap cleanup_scope EXIT
+evidence_file="${scope_dir}/changed-paths.z"
+display_file="${scope_dir}/changed-paths.display"
+governance_flag="${scope_dir}/governance-touched"
 
 if [ -n "${base}" ]; then
   scope="diff ${base_ref} (${base}) ...HEAD"
-  changed="$(git -c core.fsmonitor=false diff --name-status -z --find-renames --diff-filter=ACDMRT "${base}...HEAD" -- | parse_diff_z | sort -u)" || fail "changed-path evidence is malformed"
+  evidence_kind="diff"
+  if ! git -c core.fsmonitor=false diff --name-status -z --find-renames \
+    --find-copies-harder --diff-filter=ACDMRT "${base}...HEAD" -- > "${evidence_file}"
+  then
+    fail "changed-path evidence is unavailable"
+  fi
 else
   # No trustworthy comparison base: fail upward to the whole tracked tree
   # rather than silently verifying nothing.
   scope="full tracked tree (no comparison base resolved)"
-  changed="$(git ls-files | sort -u)"
+  evidence_kind="tracked"
+  if ! git -c core.fsmonitor=false ls-files -z > "${evidence_file}"; then
+    fail "tracked-tree evidence is unavailable"
+  fi
+fi
+
+if ! python3 - "${evidence_kind}" "${evidence_file}" "${display_file}" "${governance_flag}" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+
+def malformed():
+    raise SystemExit("changed-path evidence is malformed")
+
+
+kind, evidence_name, display_name, governance_name = sys.argv[1:]
+data = Path(evidence_name).read_bytes()
+if not data or not data.endswith(b"\0"):
+    malformed()
+tokens = data[:-1].split(b"\0")
+
+paths = []
+if kind == "tracked":
+    if any(not path for path in tokens):
+        malformed()
+    paths = tokens
+elif kind == "diff":
+    index = 0
+    while index < len(tokens):
+        status = tokens[index]
+        code = status[:1]
+        if code in {b"R", b"C"}:
+            if len(status) == 1 or not status[1:].isdigit():
+                malformed()
+            arity = 2
+        elif code in {b"A", b"D", b"M", b"T"}:
+            if len(status) != 1:
+                malformed()
+            arity = 1
+        else:
+            malformed()
+        record_paths = tokens[index + 1 : index + 1 + arity]
+        if len(record_paths) != arity or any(not path for path in record_paths):
+            malformed()
+        paths.extend(record_paths)
+        index += 1 + arity
+else:
+    malformed()
+
+paths = sorted(set(paths))
+if not paths:
+    raise SystemExit("no changed paths resolved; refusing to report a vacuous pass")
+
+governance = any(
+    path.startswith((b".aru/", b".github/"))
+    or path in {b"AGENTS.md", b".gitignore"}
+    for path in paths
+)
+with Path(display_name).open("w", encoding="ascii", newline="\n") as display:
+    for path in paths:
+        display.write(json.dumps(os.fsdecode(path), ensure_ascii=True) + "\n")
+if governance:
+    Path(governance_name).touch()
+PY
+then
+  fail "changed-path evidence is malformed"
 fi
 
 section "Verification scope"
 echo "head:  $(git rev-parse HEAD)"
 echo "scope: ${scope}"
-if [ -z "${changed}" ]; then
-  fail "no changed paths resolved; refusing to report a vacuous pass"
-fi
-printf '%s\n' "${changed}" | sed 's/^/  /'
-
-touched() { printf '%s\n' "${changed}" | grep -Eq "$1"; }
-
-governance_re='^(\.aru/|\.github/|AGENTS\.md$|\.gitignore$)'
+sed 's/^/  /' "${display_file}"
 
 # ---------------------------------------------------------------------------
 # Always: no credential-shaped literal enters the repository
@@ -107,7 +146,7 @@ echo "no credential-shaped literal found"
 # ---------------------------------------------------------------------------
 # Governance / workflow / hook invariants
 # ---------------------------------------------------------------------------
-if touched "${governance_re}"; then
+if [ -f "${governance_flag}" ]; then
   section "Governance invariants"
 
   [ -x .aru/verify.sh ] || fail ".aru/verify.sh must be executable"

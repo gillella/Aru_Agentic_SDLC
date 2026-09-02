@@ -14,10 +14,12 @@
 - Made `templates/verify.sh` workflow permission and runner checks portable
   across BSD/macOS grep using POSIX character classes.
 - Used machine-safe NUL-delimited diff parsing (`--name-status -z`) in
-  `templates/verify.sh` and `hooks/enforce_touches.py` to handle paths with spaces,
-  tabs, newlines, quotes, and unicode filenames deterministically without escaping errors.
+  `templates/verify.sh` and `hooks/enforce_touches.py` to handle paths with
+  spaces, tabs, newlines, quotes, and Unicode filenames without ambiguous shell
+  conversion, including both rename and copy sides.
 - Added bounded PR head revalidation immediately before return in
-  `hooks/enforce_touches.py` to close race windows against late pushes during touches enforcement.
+  `hooks/enforce_touches.py` to close race windows against late pushes during
+  touches enforcement.
 - Standardized `python3` invocation across workflow preflight and touches
   enforcement.
 - Extended consumer drift and scaffold fixture tests to bind hashes for

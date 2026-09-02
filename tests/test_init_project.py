@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import re
+import shutil
 import subprocess
 
 import pytest
@@ -366,7 +368,8 @@ def test_verify_template_secret_scan_positives_and_negatives():
         assert res.returncode != 0, f"Expected negative match (no match) for {item}"
 
 
-def test_verify_template_changed_paths_nul_parsing_and_renames(tmp_path):
+@pytest.mark.parametrize("operation", ["rename", "copy"])
+def test_verify_template_classifies_nul_paths_end_to_end(tmp_path, operation):
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
@@ -377,85 +380,52 @@ def test_verify_template_changed_paths_nul_parsing_and_renames(tmp_path):
         check=True,
         capture_output=True,
     )
-    (tmp_path / "old\tname.txt").write_text("old content\n", encoding="utf-8")
-    (tmp_path / "plain.txt").write_text("plain content\n", encoding="utf-8")
-    (tmp_path / "café_🚀.txt").write_text("unicode content\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "add", "old\tname.txt", "plain.txt", "café_🚀.txt"],
-        cwd=tmp_path,
-        check=True,
-    )
+    init_project.scaffold("consumer", tmp_path)
+    source = ".aru/old\tline\ncafé_🚀.txt"
+    destination = "moved/new\tline\ncafé_🚀.txt"
+    (tmp_path / source).write_text("governance-adjacent content\n", encoding="utf-8")
+    (tmp_path / ".aru" / "verify.sh").chmod(0o644)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(
         ["git", "commit", "-m", "initial"], cwd=tmp_path, check=True, capture_output=True
     )
-    subprocess.run(["git", "mv", "old\tname.txt", "new\tname.txt"], cwd=tmp_path, check=True)
-    (tmp_path / "café_🚀.txt").write_text("modified unicode\n", encoding="utf-8")
-    (tmp_path / "plain.txt").unlink()
     subprocess.run(
-        ["git", "commit", "-a", "-m", "rename, modify, delete"],
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    (tmp_path / "moved").mkdir()
+    if operation == "rename":
+        subprocess.run(["git", "mv", source, destination], cwd=tmp_path, check=True)
+    else:
+        (tmp_path / destination).write_bytes((tmp_path / source).read_bytes())
+        subprocess.run(["git", "add", destination], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-am", operation],
         cwd=tmp_path,
         check=True,
         capture_output=True,
     )
 
-    path = init_project.Path(__file__).resolve().parents[1] / "templates/verify.sh"
-    content = path.read_text(encoding="utf-8")
-    assert "git diff --name-status" not in content or "-z" in content
-    assert "awk" not in content
-
-    # Test that verify.sh bash diff parsing extracts all paths deterministically
-    bash_script = """
-set -euo pipefail
-
-parse_diff_z() {
-  local status="" path1="" path2="" score=""
-  while IFS= read -r -d '' status; do
-    [ -n "${status}" ] || return 1
-    score="${status#?}"
-    case "${score}" in
-      *[!0-9]*) return 1 ;;
-    esac
-    case "${status}" in
-      [RC]*)
-        IFS= read -r -d '' path1 || return 1
-        IFS= read -r -d '' path2 || return 1
-        [ -n "${path1}" ] && [ -n "${path2}" ] || return 1
-        printf '%s\n%s\n' "${path1}" "${path2}"
-        ;;
-      [ACDMRT]*)
-        IFS= read -r -d '' path1 || return 1
-        [ -n "${path1}" ] || return 1
-        printf '%s\n' "${path1}"
-        ;;
-      *)
-        return 1
-        ;;
-    esac
-    status=""
-  done
-  [ -z "${status}" ] || return 1
-}
-
-git diff --name-status -z --find-renames --diff-filter=ACDMRT HEAD~1...HEAD -- | parse_diff_z | sort -u
-"""
-    diff_proc = subprocess.run(
-        ["bash", "-c", bash_script],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        check=True,
+    result = subprocess.run(
+        ["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False
     )
-    assert diff_proc.stdout.splitlines() == [
-        "café_🚀.txt",
-        "new\tname.txt",
-        "old\tname.txt",
-        "plain.txt",
-    ]
+    assert result.returncode == 1
+    assert ".aru/verify.sh must be executable" in result.stderr
+    assert '".aru/old\\tline\\ncaf\\u00e9_\\ud83d\\ude80.txt"' in result.stdout
+    assert '"moved/new\\tline\\ncaf\\u00e9_\\ud83d\\ude80.txt"' in result.stdout
 
 
-def test_verify_template_governance_invariants_triggered_by_tabbed_governance_path(
-    tmp_path,
-):
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        b"M\x00unterminated.py",
+        b"R100\x00only-one-side.py\x00",
+        b"M\x00valid.py\x00extra\x00",
+    ],
+)
+def test_verify_template_fails_closed_on_malformed_nul_evidence(tmp_path, evidence):
     subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
@@ -469,85 +439,49 @@ def test_verify_template_governance_invariants_triggered_by_tabbed_governance_pa
     init_project.scaffold("consumer", tmp_path)
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
-
-    # Add a tabbed file under .aru/ and break an invariant in the same commit
-    (tmp_path / ".aru" / "tab\tscript.sh").write_text("#!/bin/sh\n", encoding="utf-8")
-    (tmp_path / ".aru" / "verify.sh").chmod(0o644)  # remove executable permission
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(
-        ["git", "commit", "-m", "add tabbed file and break invariant"],
+        ["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True
+    )
+    (tmp_path / "ordinary.txt").write_text("changed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "ordinary.txt"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "change"], cwd=tmp_path, check=True, capture_output=True
+    )
+
+    evidence_file = tmp_path / "malformed.diff-z"
+    evidence_file.write_bytes(evidence)
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    git_shim = shim_dir / "git"
+    git_shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "-c" ] && [ "$3" = "diff" ]; then\n'
+        '  cat "$ARU_TEST_EVIDENCE"\n'
+        "  exit 0\n"
+        "fi\n"
+        'exec "$ARU_REAL_GIT" "$@"\n',
+        encoding="utf-8",
+    )
+    git_shim.chmod(0o755)
+    real_git = shutil.which("git")
+    assert real_git is not None
+    env = {
+        **os.environ,
+        "ARU_REAL_GIT": real_git,
+        "ARU_TEST_EVIDENCE": str(evidence_file),
+        "PATH": f"{shim_dir}:{os.environ['PATH']}",
+    }
+
+    result = subprocess.run(
+        ["bash", ".aru/verify.sh"],
         cwd=tmp_path,
-        check=True,
         capture_output=True,
-    )
-
-    res = subprocess.run(
-        ["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False
-    )
-    assert res.returncode == 1
-    assert ".aru/verify.sh must be executable" in res.stderr
-
-
-@pytest.mark.parametrize(
-    "bad_raw",
-    [
-        b"M\x00foo.py",
-        b"X\x00foo.py\x00",
-        b"R100\x00old.py\x00",
-        b"C100\x00old.py\x00",
-        b"M\x00",
-        b"Rbad\x00old.py\x00new.py\x00",
-        b"Mfoo\x00file.py\x00",
-        b"\x00",
-        b"M\x00\x00",
-        b"R100\x00\x00new.py\x00",
-        b"R100\x00old.py\x00\x00",
-        b"M\x00file.py\x00extra\x00",
-        b"M\tfoo.py\n",
-    ],
-)
-def test_verify_template_changed_paths_fails_closed_on_malformed_evidence(bad_raw):
-    bash_script = """
-set -euo pipefail
-
-parse_diff_z() {
-  local status="" path1="" path2="" score=""
-  while IFS= read -r -d '' status; do
-    [ -n "${status}" ] || return 1
-    score="${status#?}"
-    case "${score}" in
-      *[!0-9]*) return 1 ;;
-    esac
-    case "${status}" in
-      [RC]*)
-        IFS= read -r -d '' path1 || return 1
-        IFS= read -r -d '' path2 || return 1
-        [ -n "${path1}" ] && [ -n "${path2}" ] || return 1
-        printf '%s\n%s\n' "${path1}" "${path2}"
-        ;;
-      [ACDMRT]*)
-        IFS= read -r -d '' path1 || return 1
-        [ -n "${path1}" ] || return 1
-        printf '%s\n' "${path1}"
-        ;;
-      *)
-        return 1
-        ;;
-    esac
-    status=""
-  done
-  [ -z "${status}" ] || return 1
-}
-
-parse_diff_z
-"""
-    proc = subprocess.run(
-        ["bash", "-c", bash_script],
-        input=bad_raw,
-        capture_output=True,
+        text=True,
         check=False,
+        env=env,
     )
-    assert proc.returncode != 0
+    assert result.returncode == 1
+    assert "changed-path evidence is malformed" in result.stderr
 
 
 def test_verify_template_secret_scan_catches_runtime_generated_diff_inputs():
