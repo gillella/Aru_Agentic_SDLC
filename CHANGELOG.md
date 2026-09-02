@@ -11,6 +11,10 @@
   `sk-proj-...` keys without self-match or placeholder false positives.
 - Ensured deterministic rename collection (both source and destination) in
   `templates/verify.sh` and `hooks/enforce_touches.py`.
+- Made `templates/verify.sh` workflow permission and runner checks portable
+  across BSD/macOS grep using POSIX character classes.
+- Added C-style Git quoted path decoding to `hooks/enforce_touches.py` to handle
+  tabs, newlines, quotes, and octal-escaped unicode filenames safely.
 - Standardized `python3` invocation across workflow preflight and touches
   enforcement.
 - Extended consumer drift and scaffold fixture tests to bind hashes for
