@@ -225,48 +225,79 @@ def test_github_setup_marks_project_graphql_authority(monkeypatch, tmp_path):
     assert result["ruleset"] == "https://example.test/rules/1"
 
 
-def test_governed_pr_template_provenance_and_python3():
-    path = init_project.Path(__file__).resolve().parents[1] / "templates/governed-pr.yml"
+@pytest.mark.parametrize(
+    "workflow_rel_path",
+    ["templates/governed-pr.yml", ".github/workflows/governed-pr.yml"],
+)
+def test_governed_pr_workflow_provenance_and_python3(workflow_rel_path):
+    path = init_project.Path(__file__).resolve().parents[1] / workflow_rel_path
     raw = path.read_text(encoding="utf-8")
     assert "ARU_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}" in raw
     assert "|| github.repository" not in raw
     assert (
-        'if [[ "$ARU_EVENT_NAME" == "pull_request" && ( -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ) ]]; then'
+        'if [[ "$ARU_EVENT_NAME" != "pull_request" || -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ]]; then'
         in raw
     )
-    assert 'python3 .aru/hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"' in raw
+    assert "Only verified pull_request events from this repository" in raw
+    assert 'enforce_touches.py --pr "$ARU_PR_NUMBER"' in raw
 
 
+@pytest.mark.parametrize(
+    "workflow_rel_path",
+    ["templates/governed-pr.yml", ".github/workflows/governed-pr.yml"],
+)
 @pytest.mark.parametrize(
     ("event_name", "head_repo", "repo", "expected_code"),
     [
         ("pull_request", "", "owner/repo", 1),
         ("pull_request", "fork/repo", "owner/repo", 1),
         ("pull_request", "owner/repo", "owner/repo", 0),
-        ("merge_group", "", "owner/repo", 0),
-        ("merge_group", "fork/repo", "owner/repo", 0),
+        ("merge_group", "", "owner/repo", 1),
+        ("merge_group", "fork/repo", "owner/repo", 1),
+        ("merge_group", "owner/repo", "owner/repo", 1),
+        ("push", "owner/repo", "owner/repo", 1),
+        ("workflow_dispatch", "owner/repo", "owner/repo", 1),
     ],
 )
-def test_trust_boundary_script_execution(event_name, head_repo, repo, expected_code):
-    script = """
-if [[ "$ARU_EVENT_NAME" == "pull_request" && ( -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ) ]]; then
-  echo "::error::Fork pull requests cannot execute on persistent self-hosted runners."
-  exit 1
-fi
-"""
+def test_trust_boundary_script_execution(
+    workflow_rel_path, event_name, head_repo, repo, expected_code
+):
+    path = init_project.Path(__file__).resolve().parents[1] / workflow_rel_path
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    step = workflow["jobs"]["governed-pr"]["steps"][0]
+    assert step["name"] == "Validate self-hosted runner trust boundary"
+    assert step["env"]["ARU_HEAD_REPOSITORY"] == "${{ github.event.pull_request.head.repo.full_name }}"
+    assert step["env"]["ARU_REPOSITORY"] == "${{ github.repository }}"
+    assert step["env"]["ARU_EVENT_NAME"] == "${{ github.event_name }}"
     env = {
+        **os.environ,
         "ARU_EVENT_NAME": event_name,
         "ARU_HEAD_REPOSITORY": head_repo,
         "ARU_REPOSITORY": repo,
     }
     result = subprocess.run(
-        ["bash", "-c", script],
+        ["bash", "-c", step["run"]],
         env=env,
         capture_output=True,
         text=True,
         check=False,
     )
     assert result.returncode == expected_code
+    if expected_code == 1:
+        assert (
+            "Only verified pull_request events from this repository may execute on persistent self-hosted runners."
+            in result.stdout
+        )
+
+
+def test_governed_pr_trust_boundary_no_drift():
+    root = init_project.Path(__file__).resolve().parents[1]
+    template_wf = yaml.safe_load((root / "templates/governed-pr.yml").read_text(encoding="utf-8"))
+    live_wf = yaml.safe_load((root / ".github/workflows/governed-pr.yml").read_text(encoding="utf-8"))
+    assert (
+        template_wf["jobs"]["governed-pr"]["steps"][0]
+        == live_wf["jobs"]["governed-pr"]["steps"][0]
+    )
 
 
 def test_scaffold_consumer_drift_fixtures_and_permissions(tmp_path):
@@ -368,18 +399,15 @@ def test_verify_template_secret_scan_positives_and_negatives():
         assert res.returncode != 0, f"Expected negative match (no match) for {item}"
 
 
+def _init_git_repo(path: init_project.Path) -> None:
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=path, check=True, capture_output=True)
+
+
 @pytest.mark.parametrize("operation", ["rename", "copy"])
 def test_verify_template_classifies_nul_paths_end_to_end(tmp_path, operation):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
+    _init_git_repo(tmp_path)
     init_project.scaffold("consumer", tmp_path)
     source = ".aru/old\tline\ncafé_🚀.txt"
     destination = "moved/new\tline\ncafé_🚀.txt"
@@ -426,16 +454,7 @@ def test_verify_template_classifies_nul_paths_end_to_end(tmp_path, operation):
     ],
 )
 def test_verify_template_fails_closed_on_malformed_nul_evidence(tmp_path, evidence):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
+    _init_git_repo(tmp_path)
     init_project.scaffold("consumer", tmp_path)
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
@@ -554,16 +573,7 @@ def test_verify_template_secret_scan_catches_runtime_generated_diff_inputs():
 
 
 def test_verify_template_secret_scan_catches_binary_credentials_end_to_end(tmp_path):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
+    _init_git_repo(tmp_path)
     init_project.scaffold("consumer", tmp_path)
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
@@ -594,16 +604,7 @@ def test_verify_template_secret_scan_catches_binary_credentials_end_to_end(tmp_p
 
 
 def test_verify_template_secret_scan_allows_safe_binary_control_end_to_end(tmp_path):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
+    _init_git_repo(tmp_path)
     init_project.scaffold("consumer", tmp_path)
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
@@ -634,16 +635,7 @@ def test_verify_template_secret_scan_allows_safe_binary_control_end_to_end(tmp_p
 
 
 def test_verify_template_secret_scan_fallback_tree_mode_with_binary_content_end_to_end(tmp_path):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
+    _init_git_repo(tmp_path)
     init_project.scaffold("consumer", tmp_path)
     safe_binary = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256))
     (tmp_path / "image.png").write_bytes(safe_binary)
@@ -690,16 +682,7 @@ def test_verify_template_secret_scan_fallback_tree_mode_with_binary_content_end_
 
 
 def test_verify_template_executable_rejects_indented_write_permission_on_macos(tmp_path):
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
+    _init_git_repo(tmp_path)
     init_project.scaffold("consumer", tmp_path)
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
