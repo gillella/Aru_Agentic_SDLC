@@ -185,16 +185,70 @@ def issue_body(number: int) -> str:
         raise Refusal("GitHub returned malformed issue data") from exc
     if record.get("state") != "OPEN":
         raise Refusal("issue is not open")
-    labels = [
-        label.get("name")
-        for label in record.get("labels", [])
-        if isinstance(label, dict)
-    ]
+    labels = [label.get("name") for label in record.get("labels", []) if isinstance(label, dict)]
     if not any(name in {"status:in-progress", "status:in-review"} for name in labels):
         raise Refusal("issue is not In Progress or In Review")
     if len([name for name in labels if isinstance(name, str) and name.startswith("agent:")]) != 1:
         raise Refusal("issue does not have one exclusive claimant")
     return str(record.get("body") or "")
+
+
+_ESCAPES = {
+    "a": 7,
+    "b": 8,
+    "t": 9,
+    "n": 10,
+    "v": 11,
+    "f": 12,
+    "r": 13,
+    '"': ord('"'),
+    "\\": ord("\\"),
+}
+
+
+def _decode_escape(content: str, i: int) -> tuple[int, int]:
+    if i >= len(content):
+        raise Refusal("changed-path evidence is malformed")
+    nxt = content[i]
+    if nxt in _ESCAPES:
+        return _ESCAPES[nxt], i + 1
+    if "0" <= nxt <= "7":
+        octal_str = nxt
+        i += 1
+        for _ in range(2):
+            if i < len(content) and "0" <= content[i] <= "7":
+                octal_str += content[i]
+                i += 1
+            else:
+                break
+        return int(octal_str, 8), i
+    raise Refusal("changed-path evidence is malformed")
+
+
+def _decode_path(raw: str) -> str:
+    if not (raw.startswith('"') and raw.endswith('"') and len(raw) >= 2):
+        if raw.startswith('"') or raw.endswith('"'):
+            raise Refusal("changed-path evidence is malformed")
+        return raw
+
+    content = raw[1:-1]
+    byte_array = bytearray()
+    i = 0
+    n = len(content)
+    while i < n:
+        char = content[i]
+        if char == "\\":
+            byte_val, i = _decode_escape(content, i + 1)
+            byte_array.append(byte_val)
+        elif char == '"':
+            raise Refusal("changed-path evidence is malformed")
+        else:
+            byte_array.extend(char.encode("utf-8"))
+            i += 1
+    try:
+        return byte_array.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise Refusal("changed-path evidence is malformed") from exc
 
 
 def changed_paths(diff_range: str) -> list[str]:
@@ -218,7 +272,7 @@ def changed_paths(diff_range: str) -> list[str]:
         expected = 3 if status in {"R", "C"} else 2
         if status not in {"A", "C", "D", "M", "R", "T"} or len(fields) != expected:
             raise Refusal("changed-path evidence is malformed")
-        paths.extend(fields[1:])
+        paths.extend(_decode_path(f) for f in fields[1:])
     return sorted(set(paths))
 
 
@@ -272,9 +326,7 @@ def main() -> int:
             paths = list(args.path)
             if args.diff_range:
                 paths.extend(changed_paths(args.diff_range))
-            violations = check(
-                sorted(set(paths)), args.issue, args.branch, args.default_branch
-            )
+            violations = check(sorted(set(paths)), args.issue, args.branch, args.default_branch)
     except Refusal as exc:
         parser.error(str(exc))
     if violations:

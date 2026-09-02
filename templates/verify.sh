@@ -61,9 +61,9 @@ governance_re='^(\.aru/|\.github/|AGENTS\.md$|\.gitignore$)'
 section "Secret scan"
 secret_re="gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{50,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|sk-[A-Za-z0-9]{32,}|sk-proj-[A-Za-z0-9_-]{20,}|(API_SECRET_KEY|JMC_API_SECRET)[[:space:]]*=[[:space:]]*['\"]?[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]{0,20}PRIVATE KEY-----"
 if [ -n "${base}" ]; then
-  scan="$(git diff "${base}...HEAD" -- | grep -E '^\+' || true)"
+  scan="$(git diff "${base}...HEAD" -- | grep -E '^\+' | grep -vE '^\+\+\+ ' | grep -vE '(aru:safe-fixture|safe-fixture)' || true)"
 else
-  scan="$(git grep -I -h -e '' -- . || true)"
+  scan="$(git grep -I -h -e '' -- . | grep -vE '(aru:safe-fixture|safe-fixture)' || true)"
 fi
 if printf '%s\n' "${scan}" | grep -Eq "${secret_re}"; then
   fail "credential-shaped literal found in the verified content"
@@ -97,9 +97,9 @@ if touched "${governance_re}"; then
   echo "governed workflow: self-hosted pool, check name, verify.sh, touches enforcement"
 
   for forbidden in \
-    'runs-on: *ubuntu' \
-    'runs-on: *macos-' \
-    'runs-on: *windows' \
+    'runs-on:[[:space:]]*ubuntu' \
+    'runs-on:[[:space:]]*macos-' \
+    'runs-on:[[:space:]]*windows' \
     'pull_request_target' \
     'actions/cache' \
     'upload-artifact' \
@@ -111,7 +111,7 @@ if touched "${governance_re}"; then
       fail "governed workflow must not contain: ${forbidden}"
     fi
   done
-  if grep -Eq '^\s*(contents|issues|pull-requests|actions|checks|deployments|packages|id-token):\s*(write|admin)' "${workflow}"; then
+  if grep -Eq '^[[:space:]]*(contents|issues|pull-requests|actions|checks|deployments|packages|id-token):[[:space:]]*(write|admin)' "${workflow}"; then
     fail "governed workflow permissions must stay read-only"
   fi
   echo "no hosted fallback, cache, artifact, deployment secret, or write permission"

@@ -38,10 +38,7 @@ def test_hook_requires_one_claim_and_active_status(monkeypatch):
     monkeypatch.setattr(
         HOOK,
         "run",
-        lambda _argv: (
-            '{"state":"OPEN","body":"touches: a.py",'
-            '"labels":[{"name":"status:ready"}]}'
-        ),
+        lambda _argv: '{"state":"OPEN","body":"touches: a.py","labels":[{"name":"status:ready"}]}',
     )
     with pytest.raises(HOOK.Refusal, match="In Progress"):
         HOOK.issue_body(1)
@@ -49,9 +46,7 @@ def test_hook_requires_one_claim_and_active_status(monkeypatch):
 
 def test_explicit_pushed_branch_drives_issue_identity(monkeypatch):
     monkeypatch.setattr(HOOK, "issue_body", lambda number: f"touches: issue-{number}.txt")
-    assert HOOK.check(
-        ["issue-12.txt"], branch="feat/issue-12-change", default_branch="trunk"
-    ) == []
+    assert HOOK.check(["issue-12.txt"], branch="feat/issue-12-change", default_branch="trunk") == []
 
 
 def test_hook_refuses_the_actual_default_branch():
@@ -309,9 +304,13 @@ def test_range_changed_paths_include_both_rename_sides(tmp_path, monkeypatch):
     )
     (tmp_path / "old.py").write_text("print(1)\n", encoding="utf-8")
     subprocess.run(["git", "add", "old.py"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "add old"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add old"], cwd=tmp_path, check=True, capture_output=True
+    )
     subprocess.run(["git", "mv", "old.py", "new.py"], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "rename to new"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "rename to new"], cwd=tmp_path, check=True, capture_output=True
+    )
 
     monkeypatch.chdir(tmp_path)
     paths = HOOK.changed_paths("HEAD~1..HEAD")
@@ -392,3 +391,78 @@ def test_range_allows_when_both_rename_sides_are_within_touches(tmp_path, monkey
 
     assert HOOK.main() == 0
     assert capsys.readouterr().out == ""
+
+
+def test_decode_path_quoted_unusual_valid_paths():
+    assert HOOK._decode_path('"file\\twith\\ttabs.txt"') == "file\twith\ttabs.txt"
+    assert HOOK._decode_path('"file\\"with\\"quotes.txt"') == 'file"with"quotes.txt'
+    assert HOOK._decode_path('"path/with\\\\backslash.txt"') == "path/with\\backslash.txt"
+    assert HOOK._decode_path('"caf\\303\\251.txt"') == "café.txt"
+    assert HOOK._decode_path('"bell\\a_backspace\\b_nl\\n_cr\\r_vt\\v_ff\\f.txt"') == (
+        "bell\a_backspace\b_nl\n_cr\r_vt\v_ff\f.txt"
+    )
+    assert HOOK._decode_path("plain_path.py") == "plain_path.py"
+    assert HOOK._decode_path("path with spaces.txt") == "path with spaces.txt"
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        '"unterminated_start',
+        'unterminated_end"',
+        '"escaped_end_quote\\"',
+        '"unknown_escape\\z"',
+        '"unescaped"quote"',
+        '"invalid_octal\\377"',
+        '"trailing_backslash\\',
+    ],
+)
+def test_decode_path_malformed_inputs_fail_closed(malformed):
+    with pytest.raises(HOOK.Refusal, match="changed-path evidence is malformed"):
+        HOOK._decode_path(malformed)
+
+
+def test_changed_paths_decodes_quoted_diff_and_renames(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+    (tmp_path / "old\tname.txt").write_text("old content\n", encoding="utf-8")
+    (tmp_path / "café.txt").write_text("unicode content\n", encoding="utf-8")
+    subprocess.run(["git", "add", "old\tname.txt", "café.txt"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=tmp_path, check=True, capture_output=True)
+
+    subprocess.run(["git", "mv", "old\tname.txt", "new\tname.txt"], cwd=tmp_path, check=True)
+    (tmp_path / "café.txt").write_text("modified unicode\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "commit", "-a", "-m", "rename and edit"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    paths = HOOK.changed_paths("HEAD~1..HEAD")
+    assert paths == ["café.txt", "new\tname.txt", "old\tname.txt"]
+
+
+@pytest.mark.parametrize(
+    "bad_output",
+    [
+        "X\tfoo.py",
+        "R100\tfoo.py",
+        "A\tfoo.py\tbar.py",
+        'M\t"unterminated',
+        "M",
+    ],
+)
+def test_changed_paths_malformed_git_output_fails_closed(monkeypatch, bad_output):
+    monkeypatch.setattr(HOOK, "run", lambda _argv: bad_output)
+    with pytest.raises(HOOK.Refusal, match="changed-path evidence is malformed"):
+        HOOK.changed_paths("HEAD~1..HEAD")

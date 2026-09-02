@@ -71,9 +71,7 @@ def test_kernel_workflow_is_read_only_exact_head_and_immutable():
     assert "command -v python3" in preflight["run"]
     assert "command -v gh" in preflight["run"]
     checkout = job["steps"][1]
-    assert checkout["with"]["ref"] == (
-        "${{ github.event.pull_request.head.sha || github.sha }}"
-    )
+    assert checkout["with"]["ref"] == ("${{ github.event.pull_request.head.sha || github.sha }}")
     assert checkout["uses"].startswith("actions/checkout@")
     assert len(checkout["uses"].split("@", 1)[1]) == 40
     assert checkout["with"]["persist-credentials"] is False
@@ -104,16 +102,12 @@ def test_scaffold_creates_only_minimal_governance(tmp_path):
     assert (target / ".git").is_dir()
     assert not (target / "skills").exists()
     assert not (target / "scripts").exists()
-    workflow = (target / ".github/workflows/governed-pr.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = (target / ".github/workflows/governed-pr.yml").read_text(encoding="utf-8")
     assert "name: aru-governed-pr" in workflow
     assert "runs-on: [self-hosted, macOS, ARM64, aru-ci]" in workflow
     assert "hooks/enforce_touches.py --pr" in workflow
     assert (target / ".aru/verify.sh").stat().st_mode & 0o111
-    assert "class TouchesError" in (target / ".aru/lib/touches.py").read_text(
-        encoding="utf-8"
-    )
+    assert "class TouchesError" in (target / ".aru/lib/touches.py").read_text(encoding="utf-8")
     assert (target / ".git/hooks/touches.py").is_file()
 
 
@@ -221,7 +215,9 @@ def test_github_setup_marks_project_graphql_authority(monkeypatch, tmp_path):
     assert len(graphql_calls) == 1
     assert graphql_calls[0][1] == init_project.PROJECT_AUTH
     assert rulesets == [init_project.ruleset_payload()]
-    ruleset_calls = [call for call in calls if call[0][:3] == ["gh", "api", "repos/owner/consumer/rulesets"]]
+    ruleset_calls = [
+        call for call in calls if call[0][:3] == ["gh", "api", "repos/owner/consumer/rulesets"]
+    ]
     assert len(ruleset_calls) == 1
     assert ruleset_calls[0][1] == init_project.REPOSITORY_AUTH
     assert result["ruleset"] == "https://example.test/rules/1"
@@ -232,7 +228,10 @@ def test_governed_pr_template_provenance_and_python3():
     raw = path.read_text(encoding="utf-8")
     assert "ARU_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}" in raw
     assert "|| github.repository" not in raw
-    assert 'if [[ "$ARU_EVENT_NAME" == "pull_request" && ( -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ) ]]; then' in raw
+    assert (
+        'if [[ "$ARU_EVENT_NAME" == "pull_request" && ( -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ) ]]; then'
+        in raw
+    )
     assert 'python3 .aru/hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"' in raw
 
 
@@ -313,20 +312,20 @@ def test_verify_template_secret_scan_positives_and_negatives():
 
     match = re.search(r'secret_re="(.*?)"\s*$', content, re.MULTILINE)
     assert match is not None
-    secret_re = match.group(1).replace(r'\"', '"')
+    secret_re = match.group(1).replace(r"\"", '"')
 
     positives = [
-        "ghp_123456789012345678901234567890123456",
-        "github_pat_123456789012345678901234567890123456789012345678901234567890",
-        "AKIAIOSFODNN7EXAMPLE",
-        "xoxb-123456789012-1234567890123-abcdefghijklmnopqrstuvwx",
-        "sk-123456789012345678901234567890123456",
-        "sk-proj-abc123def456ghi789jkl012mno345pqr678stu901vwx_yz-123456",
-        'API_SECRET_KEY="9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"',
-        "API_SECRET_KEY=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-        'JMC_API_SECRET="c4d9e32e4518ff6adffb23ba8cc224450e9ec6ffefd862451d449d85331480e2"',
-        "JMC_API_SECRET=c4d9e32e4518ff6adffb23ba8cc224450e9ec6ffefd862451d449d85331480e2",
-        "-----BEGIN RSA PRIVATE KEY-----",
+        "ghp_123456789012345678901234567890123456",  # aru:safe-fixture
+        "github_pat_123456789012345678901234567890123456789012345678901234567890",  # aru:safe-fixture
+        "AKIAIOSFODNN7EXAMPLE",  # aru:safe-fixture
+        "xoxb-123456789012-1234567890123-abcdefghijklmnopqrstuvwx",  # aru:safe-fixture
+        "sk-123456789012345678901234567890123456",  # aru:safe-fixture
+        "sk-proj-abc123def456ghi789jkl012mno345pqr678stu901vwx_yz-123456",  # aru:safe-fixture
+        'API_SECRET_KEY="9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"',  # aru:safe-fixture
+        "API_SECRET_KEY=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",  # aru:safe-fixture
+        'JMC_API_SECRET="c4d9e32e4518ff6adffb23ba8cc224450e9ec6ffefd862451d449d85331480e2"',  # aru:safe-fixture
+        "JMC_API_SECRET=c4d9e32e4518ff6adffb23ba8cc224450e9ec6ffefd862451d449d85331480e2",  # aru:safe-fixture
+        "-----BEGIN RSA PRIVATE KEY-----",  # aru:safe-fixture
     ]
 
     negatives = [
@@ -364,9 +363,7 @@ def test_verify_template_secret_scan_positives_and_negatives():
 
 
 def test_verify_template_changed_paths_deterministic_renames(tmp_path):
-    subprocess.run(
-        ["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True
-    )
+    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
         ["git", "config", "user.name", "Test"], cwd=tmp_path, check=True, capture_output=True
     )
@@ -382,11 +379,9 @@ def test_verify_template_changed_paths_deterministic_renames(tmp_path):
         ["git", "commit", "-m", "initial"], cwd=tmp_path, check=True, capture_output=True
     )
     subprocess.run(["git", "mv", "old.txt", "new.txt"], cwd=tmp_path, check=True)
-    subprocess.run(
-        ["git", "commit", "-m", "rename"], cwd=tmp_path, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "rename"], cwd=tmp_path, check=True, capture_output=True)
 
-    cmd = 'git diff --name-status --find-renames --diff-filter=ACDMRT HEAD~1...HEAD -- | awk -F\'\t\' \'{for (i=2; i<=NF; i++) print $i}\' | sort -u'
+    cmd = "git diff --name-status --find-renames --diff-filter=ACDMRT HEAD~1...HEAD -- | awk -F'\t' '{for (i=2; i<=NF; i++) print $i}' | sort -u"
     res = subprocess.run(
         ["bash", "-c", cmd],
         cwd=tmp_path,
@@ -395,3 +390,120 @@ def test_verify_template_changed_paths_deterministic_renames(tmp_path):
         check=True,
     )
     assert res.stdout.strip().splitlines() == ["new.txt", "old.txt"]
+
+
+def test_verify_template_secret_scan_safe_fixtures_filtering():
+    path = init_project.Path(__file__).resolve().parents[1] / "templates/verify.sh"
+    content = path.read_text(encoding="utf-8")
+
+    match = re.search(r'secret_re="(.*?)"\s*$', content, re.MULTILINE)
+    assert match is not None
+    secret_re = match.group(1).replace(r"\"", '"')
+
+    # Positive test: Real secret without annotation is detected and fails
+    unmarked_diff = "+ ghp_123456789012345678901234567890123456\n"  # aru:safe-fixture
+    cmd = "grep -E '^\\+' | grep -vE '^\\+\\+\\+ ' | grep -vE '(aru:safe-fixture|safe-fixture)' || true"
+    res = subprocess.run(
+        ["bash", "-c", cmd], input=unmarked_diff, text=True, capture_output=True, check=True
+    )
+    scan_res = subprocess.run(
+        ["grep", "-Eq", secret_re], input=res.stdout, text=True, capture_output=True, check=False
+    )
+    assert scan_res.returncode == 0, "Expected unmarked secret to be caught"
+
+    # Positive test: Secret inside a test file without safe-fixture annotation is caught (tests not broadly excluded)
+    test_file_diff = "+ # in tests/test_auth.py\n+ TOKEN = 'sk-proj-abc123def456ghi789jkl012mno345pqr678stu901vwx_yz-123456'\n"  # aru:safe-fixture
+    res = subprocess.run(
+        ["bash", "-c", cmd], input=test_file_diff, text=True, capture_output=True, check=True
+    )
+    scan_res = subprocess.run(
+        ["grep", "-Eq", secret_re], input=res.stdout, text=True, capture_output=True, check=False
+    )
+    assert scan_res.returncode == 0, "Expected test file secret without fixture marker to be caught"
+
+    # Negative tests: Explicitly marked safe fixtures pass
+    safe_fixtures = [
+        "+ ghp_123456789012345678901234567890123456 # aru:safe-fixture\n",
+        "+ const token = 'ghp_123456789012345678901234567890123456'; // safe-fixture\n",
+        "+ TOKEN = 'sk-123456789012345678901234567890123456'  # aru:safe-fixture\n",
+        "+ JMC_API_SECRET = 'c4d9e32e4518ff6adffb23ba8cc224450e9ec6ffefd862451d449d85331480e2' # safe-fixture\n",
+        "+ /* aru:safe-fixture */ 'AKIAIOSFODNN7EXAMPLE'\n",
+        "+ <!-- aru:safe-fixture --> xoxb-123456789012-1234567890123-abcdefghijklmnopqrstuvwx\n",
+    ]
+    for fixture in safe_fixtures:
+        res = subprocess.run(
+            ["bash", "-c", cmd], input=fixture, text=True, capture_output=True, check=True
+        )
+        scan_res = subprocess.run(
+            ["grep", "-Eq", secret_re],
+            input=res.stdout,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert scan_res.returncode != 0, (
+            f"Expected safe fixture to be ignored, but was caught: {fixture}"
+        )
+
+    # Negative test: git diff header containing a token pattern is ignored
+    diff_header = "+++ b/tests/ghp_123456789012345678901234567890123456.py\n"  # aru:safe-fixture
+    res = subprocess.run(
+        ["bash", "-c", cmd], input=diff_header, text=True, capture_output=True, check=True
+    )
+    scan_res = subprocess.run(
+        ["grep", "-Eq", secret_re], input=res.stdout, text=True, capture_output=True, check=False
+    )
+    assert scan_res.returncode != 0, "Expected git diff header to be ignored"
+
+
+def test_verify_template_workflow_permissions_portable_gate():
+    path = init_project.Path(__file__).resolve().parents[1] / "templates/verify.sh"
+    content = path.read_text(encoding="utf-8")
+
+    match = re.search(r"if grep -Eq '([^']+)' \"\$\{workflow\}\"; then", content)
+    assert match is not None
+    perm_re = match.group(1)
+
+    # Indented write / admin permissions must be rejected
+    rejected = [
+        "permissions:\n  contents: write\n",
+        "permissions:\n\tcontents: write\n",
+        "permissions:\n    contents: write\n",
+        "contents: write\n",
+        "permissions:\n  issues: write\n",
+        "permissions:\n  pull-requests: write\n",
+        "permissions:\n  actions: write\n",
+        "permissions:\n  checks: write\n",
+        "permissions:\n  deployments: write\n",
+        "permissions:\n  packages: write\n",
+        "permissions:\n  id-token: write\n",
+        "permissions:\n  contents: admin\n",
+        "permissions:\n  actions: admin\n",
+    ]
+    for item in rejected:
+        res = subprocess.run(
+            ["grep", "-Eq", perm_re],
+            input=item,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert res.returncode == 0, f"Expected rejection for:\n{item}"
+
+    # Read-only permissions must pass
+    accepted = [
+        "permissions:\n  contents: read\n  issues: read\n  pull-requests: read\n",
+        "permissions:\n  actions: read\n  checks: read\n",
+        "permissions:\n  deployments: read\n  packages: read\n  id-token: read\n",
+        "permissions: read-all\n",
+        "permissions: {}\n",
+    ]
+    for item in accepted:
+        res = subprocess.run(
+            ["grep", "-Eq", perm_re],
+            input=item,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert res.returncode != 0, f"Expected acceptance for:\n{item}"
