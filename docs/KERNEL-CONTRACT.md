@@ -74,6 +74,47 @@ Missing, partial, stale, contradictory, truncated, or unauthenticated evidence
 blocks the next transition. Never repair authority by hand-editing lifecycle or
 review labels.
 
+### Semantic authorization and external metadata races
+
+The PR scope hook binds its final head reread to the same single parsed closing
+issue directive, then rereads the issue and compares its parsed touches scope.
+Benign issue prose and declaration formatting or ordering remain compatible.
+Merge submission compares two full gate evaluations, including
+the actual changed paths, declared touches, claimant, and each parsed acceptance
+item's text and completion state. Criterion counts alone are not authorization
+evidence. After CI and review reads, one bounded final PR/issue validation checks
+the open, ready PR, exact head and base, closing issue, and current issue gate
+against that evidence. One final head/base-bound queue snapshot refuses observed
+queue configuration or pending queue-entry/auto-merge request drift before the
+merge command; it does not rerun the full gates or cancel an existing request.
+After those rereads, one bounded review validation uses the final PR snapshot to
+require the same assigned authority and successful exact-head evidence for Tier
+2-3, then rereads unresolved threads for every tier. Existing provider evidence
+forms and nullable review decisions remain compatible. Invalidated evidence,
+including assignment resets, refuses submission and returns to external review
+convergence without repairing authority. Missing,
+unreadable, invalid, or changed authorization blocks submission. Description or
+verification prose outside these semantic fields may change without refusal.
+
+Separate GitHub metadata reads and the merge API are **non-atomic**. A bounded
+reread catches observed drift; it does not lock issue metadata or make the
+operations a transaction. Changes after their last read can still race submission,
+including queued merges. The expected-head argument binds the submitted commit,
+not all external metadata. Existing head, CI, review, thread, scope, and queue
+provenance gates remain required. Post-merge close-out revalidates current
+authority before Done; it cannot prevent or undo a merge already submitted.
+
+For the reported JMC #185 downstream blocker, keep review retries frozen at the
+reported head until the Factory fix is independently reviewed, merged, and
+released. Then use that released canonical source to regenerate the consumer's
+tracked Aru integration once and reinstall hooks with
+`"$ARU_SDLC_HOME/scripts/install_hooks.sh"` from the consumer checkout. Verify the
+generated hook matches canonical source, run the focused semantic-drift probes
+and consumer verification, and obtain one distinct current-head follow-up review.
+Release publication and consumer regeneration are separate operator work; neither
+is an acceptance prerequisite for this source fix. Do not patch consumer copies
+independently or relax merge-group provenance to unblock regeneration.
+
 ## Review and continuation
 
 Tier 0-1 changes do not wait for an authoritative review. Tier 2-3 changes use
