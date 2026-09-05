@@ -162,6 +162,7 @@ def issue_gate(
     return [{
         "issue": number,
         "criteria": len(items),
+        "acceptance": [{"done": done, "text": text} for done, text in items],
         "touches": declared,
         "claimant": owners[0][len(AGENT_PREFIX) :],
     }]

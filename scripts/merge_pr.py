@@ -12,40 +12,18 @@ from typing import Any
 
 from check_ci import ci_verdict, check_name, check_state
 from common import (
-    AUTHOR_FAMILY_PREFIX,
-    AUTHOR_PREFIX,
-    CODING_REVIEWERS,
-    REVIEW_PREFIX,
-    REVIEWER_ACTOR_PREFIX,
-    REVIEWER_PREFIX,
-    REVIEW_AUTHORITIES,
-    REVIEW_SERVICES,
-    KernelError,
-    gh_paginated,
-    gh_json,
-    json_print,
-    label_names,
-    same_github_actor,
-    review_risk_tier,
-    review_evidence_unavailable,
-    repo_slug,
-    run,
+    AUTHOR_FAMILY_PREFIX, AUTHOR_PREFIX, CODING_REVIEWERS, REVIEW_PREFIX,
+    REVIEWER_ACTOR_PREFIX, REVIEWER_PREFIX, REVIEW_AUTHORITIES, REVIEW_SERVICES,
+    KernelError, gh_paginated, gh_json, json_print, label_names, same_github_actor,
+    review_risk_tier, review_evidence_unavailable, repo_slug, run,
 )
 from fetch_pr_feedback import fetch_feedback
 from merge_state import (
-    base_snapshot,
-    close_out,
-    issue_gate,
-    linked_issues,
-    merge_queue_snapshot,
-    pull_changed_paths,
-    pull_request,
+    base_snapshot, close_out, issue_gate, linked_issues, merge_queue_snapshot,
+    pull_changed_paths, pull_request,
 )
 from review_evidence import (
-    UNAVAILABLE,
-    authority_assigned_at,
-    evidence_time,
-    external_state,
+    UNAVAILABLE, authority_assigned_at, evidence_time, external_state,
 )
 
 REVIEW_ACTORS = {
@@ -660,6 +638,26 @@ def evaluate(number: int, expected_head: str) -> dict[str, object]:
     }
 
 
+def revalidate_review(pr: dict[str, Any], number: int, gates: dict[str, Any], issues: list[int]) -> None:
+    """Recheck live review validity after the final PR/issue/queue reads."""
+    if gates["risk_tier"] >= 2:
+        service = assigned_service(pr)
+        if service != gates["reviewer"]:
+            raise KernelError("review authority changed before merge submission")
+        if service in CODING_REVIEWERS:
+            verdict = coding_review_verdict(pr, pull_reviews(number), service, issues)
+            if verdict == "REQUEST_CHANGES":
+                raise KernelError(f"{service} exact-head authoritative review requested changes")
+            valid = verdict == "APPROVE"
+        else:
+            valid = exact_head_review(pr, number, service, issues)
+        if not valid:
+            raise KernelError(f"{service} has no successful exact-head verdict before merge submission")
+    feedback = fetch_feedback(number)
+    if feedback:
+        raise KernelError(f"{len(feedback)} unresolved review thread(s) before merge submission")
+
+
 def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str, object]:
     gates = evaluate(number, expected_head)
     if dry_run:
@@ -682,6 +680,26 @@ def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str
     if not gates["merge_queue"]:
         command.append("--merge")
     command.extend(["--delete-branch", "--match-head-commit", expected_head])
+    # One bounded semantic reread after CI/review reads, immediately before
+    # submission. Separate GitHub metadata reads and merge remain non-atomic.
+    final_pr = pull_request(number)
+    if (
+        final_pr.get("state") != "OPEN" or final_pr.get("isDraft") is not False
+        or final_pr.get("headRefOid") != expected_head
+        or final_pr.get("baseRefName") != gates["base"]
+        or base_snapshot(final_pr) != gates["base_sha"]
+        or final_pr.get("reviewDecision") == "CHANGES_REQUESTED"
+        or linked_issues(str(final_pr.get("body") or "")) != issue_numbers
+    ):
+        raise KernelError("PR authorization changed before merge submission")
+    if issue_gate(issue_numbers, gates["changed_paths"]) != gates["issues"]:
+        raise KernelError("issue authorization changed before merge submission")
+    final_queue = merge_queue_snapshot(number, expected_head, str(gates["base_sha"]))
+    if (final_queue["configured"], final_queue["entry"], final_queue["auto_merge"]) != (
+        gates["merge_queue"], gates["queue_entry"], gates["auto_merge"],
+    ):
+        raise KernelError("merge queue or pending request changed before merge submission")
+    revalidate_review(final_pr, number, gates, issue_numbers)
     run(command)
     merged = pull_request(number)
     if merged.get("headRefOid") != expected_head:
