@@ -1,0 +1,118 @@
+"""Explicit machine-local configuration. No credentials or shell evaluation."""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+
+
+class DriverError(RuntimeError):
+    """An action cannot safely proceed."""
+
+
+def absolute(value: object, name: str) -> Path:
+    if not isinstance(value, str) or not Path(value).is_absolute():
+        raise DriverError(f"{name} must be an absolute path")
+    return Path(value).resolve()
+
+
+def command(value: object, name: str) -> list[str]:
+    if not isinstance(value, list) or not value or not value[0] or any(
+        not isinstance(part, str) or "\x00" in part for part in value
+    ):
+        raise DriverError(f"{name} must be a nonempty argument array")
+    return value
+
+
+class Config:
+    def __init__(self, path: str | Path):
+        self.path = Path(path).resolve()
+        try:
+            raw = json.loads(self.path.read_text())
+        except (OSError, ValueError) as exc:
+            raise DriverError(f"cannot read Driver config: {exc}") from exc
+        if not isinstance(raw, dict) or raw.get("version") != 1:
+            raise DriverError("Driver config requires version 1")
+        self.raw = raw
+        self.state_dir = absolute(raw.get("state_dir"), "state_dir")
+        self.hermes_home = absolute(raw.get("hermes_home"), "hermes_home")
+        expected_state = (self.hermes_home / "state" / "aru_project_driver").resolve()
+        if self.state_dir != expected_state:
+            raise DriverError("state_dir must be HERMES_HOME/state/aru_project_driver for shared locking")
+        binding = expected_state / "binding.json"
+        if binding.exists():
+            try:
+                existing = json.loads(binding.read_text())
+            except (OSError, ValueError) as exc:
+                raise DriverError("Driver profile binding is unreadable") from exc
+            if existing != {"config": str(self.path), "state_dir": str(self.state_dir)}:
+                raise DriverError("Hermes profile is bound to another Driver configuration")
+        self.hermes_repo = absolute(raw.get("hermes_repo"), "hermes_repo")
+        self.kernel_root = absolute(raw.get("kernel_root"), "kernel_root")
+        self.projects = raw.get("projects")
+        self.lanes = raw.get("lanes")
+        if not isinstance(self.projects, dict) or not self.projects:
+            raise DriverError("projects must explicitly name at least one repository")
+        if not isinstance(self.lanes, dict) or not self.lanes:
+            raise DriverError("lanes must explicitly name at least one coding identity")
+        for repo, project in self.projects.items():
+            self._project(repo, project)
+        for identity, lane in self.lanes.items():
+            self._lane(identity, lane)
+
+    def _project(self, repo: str, project: dict) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+            raise DriverError("project must be a literal owner/repository")
+        if not isinstance(project, dict):
+            raise DriverError(f"invalid project configuration: {repo}")
+        absolute(project.get("repo_dir"), "repo_dir")
+        lanes = project.get("lanes")
+        if (not isinstance(lanes, list) or not lanes or any(not isinstance(i, str) for i in lanes)
+                or len(lanes) != len(set(lanes))):
+            raise DriverError(f"{repo}: lanes must be a nonempty unique list")
+        if any(identity not in self.lanes for identity in lanes):
+            raise DriverError(f"{repo}: unknown lane")
+        for key, default in (("max_workers", 4), ("max_review_backlog", 4)):
+            value = project.get(key, default)
+            if type(value) is not int or not 1 <= value <= 32:
+                raise DriverError(f"{repo}: {key} must be between 1 and 32")
+        if type(project.get("auto_triage", False)) is not bool:
+            raise DriverError("auto_triage must explicitly be true or false")
+        routes = project.get("webhook_subscriptions", [])
+        if not isinstance(routes, list) or any(
+            not isinstance(route, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", route) for route in routes
+        ):
+            raise DriverError("webhook_subscriptions must name native subscription identifiers")
+
+    def _lane(self, identity: str, lane: dict) -> None:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,62}", identity):
+            raise DriverError("lane identity must be a kernel-compatible agent id")
+        if not isinstance(lane, dict):
+            raise DriverError(f"invalid lane: {identity}")
+        if not isinstance(lane.get("capacity_key"), str) or not lane["capacity_key"]:
+            raise DriverError(f"{identity}: capacity_key identifies the shared subscription")
+        if not isinstance(lane.get("family"), str) or not lane["family"]:
+            raise DriverError(f"{identity}: family is required")
+        argv = command(lane.get("command"), "command")
+        if sum(part.count("{prompt}") for part in argv) != 1:
+            raise DriverError(f"{identity}: command must contain exactly one {{prompt}}")
+        command(lane.get("capacity_command"), "capacity_command")
+        command(lane.get("probe_command"), "probe_command")
+        allowed = lane.get("projects")
+        if not isinstance(allowed, list) or not allowed or any(
+            repo not in self.projects for repo in allowed
+        ):
+            raise DriverError(f"{identity}: explicitly allowed projects are required")
+
+    def project(self, repo: str) -> dict:
+        if repo not in self.projects:
+            raise DriverError("repository is not configured for this Driver")
+        return self.projects[repo]
+
+    def lane(self, repo: str, identity: str) -> dict:
+        project = self.project(repo)
+        lane = self.lanes.get(identity)
+        if identity not in project["lanes"] or not lane or repo not in lane["projects"]:
+            raise DriverError("coding identity is not authorized for this project")
+        return lane

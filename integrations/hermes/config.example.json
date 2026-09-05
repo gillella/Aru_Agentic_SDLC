@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "state_dir": "/absolute/path/hermes-home/state/aru_project_driver",
+  "hermes_home": "/absolute/path/hermes-home",
+  "hermes_repo": "/absolute/path/hermes-agent",
+  "kernel_root": "/absolute/path/Aru_Agentic_SDLC",
+  "projects": {
+    "example/project": {
+      "repo_dir": "/absolute/path/project",
+      "lanes": ["codex-primary", "claude-primary"],
+      "max_workers": 2,
+      "max_review_backlog": 4,
+      "auto_triage": false,
+      "webhook_subscriptions": []
+    }
+  },
+  "lanes": {
+    "codex-primary": {
+      "family": "openai-codex",
+      "capacity_key": "openai-subscription-primary",
+      "projects": ["example/project"],
+      "command": [
+        "/absolute/path/codex",
+        "exec",
+        "--model",
+        "REPLACE_WITH_EXACT_CODEX_MODEL_ID",
+        "--sandbox",
+        "workspace-write",
+        "--color",
+        "never",
+        "{prompt}"
+      ],
+      "capacity_command": [
+        "/absolute/path/hermes-python",
+        "/absolute/path/hermes-home/scripts/aru_project_driver/capacity.py",
+        "--family",
+        "openai-codex"
+      ],
+      "probe_command": [
+        "/absolute/path/codex",
+        "exec",
+        "--model",
+        "REPLACE_WITH_EXACT_CODEX_MODEL_ID",
+        "--sandbox",
+        "read-only",
+        "--ephemeral",
+        "--color",
+        "never",
+        "Reply with exactly OK on one line. Do not use tools, inspect files, or perform any other work."
+      ]
+    },
+    "claude-primary": {
+      "family": "claude-code",
+      "capacity_key": "claude-subscription-primary",
+      "projects": ["example/project"],
+      "command": [
+        "/absolute/path/claude",
+        "--print",
+        "--model",
+        "REPLACE_WITH_EXACT_CLAUDE_MODEL_ID",
+        "--permission-mode",
+        "acceptEdits",
+        "--permission-prompts",
+        "none",
+        "{prompt}"
+      ],
+      "capacity_command": [
+        "/absolute/path/hermes-python",
+        "/absolute/path/hermes-home/scripts/aru_project_driver/capacity.py",
+        "--family",
+        "claude-code"
+      ],
+      "probe_command": [
+        "/absolute/path/claude",
+        "--print",
+        "--model",
+        "REPLACE_WITH_EXACT_CLAUDE_MODEL_ID",
+        "--tools",
+        "",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "{\"mcpServers\":{}}",
+        "--no-session-persistence",
+        "Reply with exactly OK on one line. Do not use tools, inspect files, or perform any other work."
+      ]
+    }
+  }
+}
