@@ -397,6 +397,7 @@ def test_close_out_rechecks_contract_after_other_post_merge_network_calls(monkey
         ("acceptance-unchecked", True), ("acceptance-text", True),
         ("claimant", True), ("closed-issue", True), ("lifecycle", True),
         ("head", True), ("base", True), ("draft", True),
+        ("review-changes", True), ("review-approved", False),
         ("unreadable-pr", True), ("unreadable-issue", True),
         ("pr-description", False), ("issue-description", False), ("closing-verb", False),
     ],
@@ -452,6 +453,10 @@ def test_semantic_drift_never_reaches_merge_command(
                 pr["headRefOid" if mutation == "head" else "baseRefOid"] = "c" * 40
             elif mutation == "draft":
                 pr["isDraft"] = True
+            elif mutation in {"review-changes", "review-approved"}:
+                pr["reviewDecision"] = (
+                    "CHANGES_REQUESTED" if mutation == "review-changes" else "APPROVED"
+                )
             elif mutation == "pr-description":
                 pr["body"] += "\n\n## Evidence\nMore test details."
             elif mutation == "issue-description":
@@ -491,6 +496,12 @@ def test_semantic_drift_never_reaches_merge_command(
         assert events.count("issue") == 3
     assert events.count("ci") <= 2
     assert events.count("issue") <= 3
+    if mutation == "review-changes":
+        assert events == ["pr", "queue", "issue", "ci"] * 2 + (
+            ["pr"] if during_ci_read == 2 else []
+        )
+    elif mutation == "review-approved":
+        assert events == ["pr", "queue", "issue", "ci"] * 2 + ["pr", "issue", "queue", "pr"]
 
 
 @pytest.mark.parametrize("configured,mutation", [

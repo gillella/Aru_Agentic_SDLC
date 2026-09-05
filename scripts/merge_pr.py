@@ -690,6 +690,7 @@ def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str
         or final_pr.get("headRefOid") != expected_head
         or final_pr.get("baseRefName") != gates["base"]
         or base_snapshot(final_pr) != gates["base_sha"]
+        or final_pr.get("reviewDecision") == "CHANGES_REQUESTED"
         or linked_issues(str(final_pr.get("body") or "")) != issue_numbers
     ):
         raise KernelError("PR authorization changed before merge submission")
