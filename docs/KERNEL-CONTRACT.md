@@ -86,7 +86,13 @@ evidence. After CI and review reads, one bounded final PR/issue validation check
 the open, ready PR, exact head and base, closing issue, and current issue gate
 against that evidence. One final head/base-bound queue snapshot refuses observed
 queue configuration or pending queue-entry/auto-merge request drift before the
-merge command; it does not rerun the full gates or cancel an existing request. Missing,
+merge command; it does not rerun the full gates or cancel an existing request.
+After those rereads, one bounded review validation uses the final PR snapshot to
+require the same assigned authority and successful exact-head evidence for Tier
+2-3, then rereads unresolved threads for every tier. Existing provider evidence
+forms and nullable review decisions remain compatible. Invalidated evidence,
+including assignment resets, refuses submission and returns to external review
+convergence without repairing authority. Missing,
 unreadable, invalid, or changed authorization blocks submission. Description or
 verification prose outside these semantic fields may change without refusal.
 

@@ -83,6 +83,7 @@ def test_merge_rechecks_head_and_base(monkeypatch):
         "base_sha": "b" * 40,
         "base": "main",
         "changed_paths": ["scripts/merge_pr.py"],
+        "risk_tier": 2, "reviewer": "coderabbit",
         "issues": [{"issue": 7, "criteria": 1}],
         "merge_queue": False,
         "queue_entry": None,
