@@ -21,6 +21,7 @@ HEAD = "a" * 40
 
 def contract(*, issue=42, conditions=None):
     data = {
+        "origin": ORIGIN,
         "target": TARGET,
         "issue": issue,
         "source_pr": 17,

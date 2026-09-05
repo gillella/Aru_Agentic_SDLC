@@ -47,8 +47,10 @@ def parse(body: str, origin: str) -> dict | None:
 
 
 def validate(data: dict, origin: str) -> None:
-    if not isinstance(data, dict) or set(data) - {"target", "issue", "source_pr", "conditions"}:
+    if not isinstance(data, dict) or set(data) - {"origin", "target", "issue", "source_pr", "conditions"}:
         raise DriverError("dependency contract contains unsupported fields")
+    if data.get("origin") != origin:
+        raise DriverError("dependency contract origin does not match the source project")
     target = data.get("target")
     if (not isinstance(target, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", target)
             or target == origin or not number(data.get("issue"))):
