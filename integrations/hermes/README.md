@@ -220,3 +220,17 @@ provider quota, or production operation. Before declaring the live Loop ready,
 separately verify installation, start twice without duplication, multiple safe
 assignments, a missed-event recovery tick, restart recovery and Stop behavior.
 This source preparation does not perform that runtime cutover.
+
+## Rollout handoff
+
+The separate live-validation item [Aru #557](https://github.com/gillella/Aru_Agentic_SDLC/issues/557)
+owns runtime acceptance. After this source is reviewed and merged, its operator
+should preview the install, apply it only under the approved canary scope,
+start two configured projects, and record sanitized route IDs, event IDs,
+target issue/Project acknowledgments, worker receipts, exact PR heads and
+Stop/restart results. The canary must cover one completion-to-next-dispatch,
+one cross-project handoff plus dependency return wake, duplicate and stale
+deliveries, unavailable capacity, and a stopped target. A failed canary rolls
+back by stopping the project, restoring the install backup, and preserving all
+GitHub claims and worktrees for review. Source merge, a green test suite, or a
+healthy listener is not live acceptance evidence.
