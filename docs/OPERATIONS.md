@@ -1040,6 +1040,23 @@ cannot solve the problem more simply.
 
 ## 17. Adoption checklist
 
+The optional [Hermes Driver](../integrations/hermes/README.md) is separately
+installed and activated by the operator. Its skill supplies the coordinating
+model's instructions; its scripts use native Hermes scheduling and kernel
+helpers. Events provide immediate continuation and a ten-minute script
+heartbeat recovers missed events, freed capacity and dependency completion.
+Healthy idle checks do not start a model turn. Stop closes the dispatch gate
+and pauses owned jobs while preserving existing workers and GitHub claims.
+
+Cross-project routing requires an explicit configured allowlist and a typed
+contract on the source GitHub issue. Acknowledgment means a validated native
+wake or an explicit blocker; it never claims a coding worker is running.
+Source PR heads, target issue/Project state, capacity and write boundaries are
+reread, and all declared merge/release/artifact conditions must be proven before
+returning to the source. The receiving project retains its own CI and review
+gates. See the integration's rollout procedure and [live-validation #557](https://github.com/gillella/Aru_Agentic_SDLC/issues/557)
+before calling a deployed Loop continuous. Source tests alone are insufficient.
+
 Do not call a consumer repository fully governed until every applicable item is
 true.
 
