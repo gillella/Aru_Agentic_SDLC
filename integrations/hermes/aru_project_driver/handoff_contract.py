@@ -47,7 +47,8 @@ def parse(body: str, origin: str) -> dict | None:
 
 
 def validate(data: dict, origin: str) -> None:
-    if not isinstance(data, dict) or set(data) - {"origin", "target", "issue", "source_pr", "conditions"}:
+    required = {"origin", "target", "issue", "source_pr", "source_head", "conditions"}
+    if not isinstance(data, dict) or set(data) != required:
         raise DriverError("dependency contract contains unsupported fields")
     if data.get("origin") != origin:
         raise DriverError("dependency contract origin does not match the source project")
@@ -55,8 +56,10 @@ def validate(data: dict, origin: str) -> None:
     if (not isinstance(target, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", target)
             or target == origin or not number(data.get("issue"))):
         raise DriverError("dependency requires another literal project and a positive target issue")
-    if "source_pr" in data and not number(data["source_pr"]):
+    if not number(data["source_pr"]):
         raise DriverError("source_pr must be a positive PR number")
+    if not isinstance(data["source_head"], str) or not re.fullmatch(r"[a-f0-9]{40}", data["source_head"]):
+        raise DriverError("source_head must be the full lowercase PR head")
     conditions = data.get("conditions")
     if not isinstance(conditions, list) or not 1 <= len(conditions) <= 12:
         raise DriverError("dependency requires one to twelve explicit all-of conditions")

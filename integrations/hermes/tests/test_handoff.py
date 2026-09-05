@@ -25,6 +25,7 @@ def contract(*, issue=42, conditions=None):
         "target": TARGET,
         "issue": issue,
         "source_pr": 17,
+        "source_head": HEAD,
         "conditions": conditions or [{"kind": "issue_done", "repo": TARGET, "issue": issue}],
     }
     marker = f"<!-- {handoff_contract.MARKER} {json.dumps(data, separators=(',', ':'))} -->"
@@ -133,6 +134,9 @@ def test_contract_requires_one_exact_target_done_condition():
                                        "pr": 17, "head": HEAD}]}
     with pytest.raises(DriverError, match="Done condition"):
         handoff_contract.validate(broken, ORIGIN)
+    missing_source_pr = {key: value for key, value in data.items() if key != "source_pr"}
+    with pytest.raises(DriverError, match="unsupported fields"):
+        handoff_contract.validate(missing_source_pr, ORIGIN)
 
 
 def test_handoff_validates_target_and_deduplicates_delivery(tmp_path, monkeypatch):

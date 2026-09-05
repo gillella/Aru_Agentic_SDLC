@@ -52,7 +52,7 @@ move a claim or create lifecycle state. A source issue may carry one typed,
 machine-readable marker in its body after the human requirements, for example:
 
 ```text
-<!-- aru-driver-dependency:v1 {"origin":"owner/source","target":"owner/consumer","issue":42,"source_pr":17,"conditions":[{"kind":"issue_done","repo":"owner/consumer","issue":42}]} -->
+<!-- aru-driver-dependency:v1 {"origin":"owner/source","target":"owner/consumer","issue":42,"source_pr":17,"source_head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","conditions":[{"kind":"issue_done","repo":"owner/consumer","issue":42}]} -->
 ```
 
 The Driver validates the exact target issue and its Project card, then sends one
