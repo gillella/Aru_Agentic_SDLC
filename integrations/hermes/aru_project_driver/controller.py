@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from . import execution, scheduler
+from . import execution, scheduler, dependencies
 from .config import Config, DriverError
 from . import handoff_contract
 from .kernel import KernelAdapter, KernelAdapterError
@@ -155,6 +155,8 @@ class Controller:
                     and self.state.capacity_holder(r["capacity_key"]) == r["id"]})
 
     def _action_due(self, action: dict) -> bool:
+        if action.get("type") == "dependency":
+            return action.get("next_action") in {"handoff", "dependency-satisfied"}
         if action.get("type") in {"external_owner", "unmanaged_claim", "ownership_conflict"}:
             return False
         if action.get("next_action") == "await-authoritative-review":
@@ -177,6 +179,9 @@ class Controller:
         reasons = self._admission_reasons(repo, snapshot)
         free, blocked = self._lane_observations(repo, snapshot)
         actions, resumes = self._existing(repo, snapshot, adapter, free)
+        dependency_actions, held = dependencies.actions(self, repo, snapshot)
+        actions = [a for a in actions if a.get("issue") not in held] + dependency_actions
+        resumes = [a for a in resumes if a.get("issue") not in held]
         reserved_accounts = {self.config.lane(repo, item)["capacity_key"]
                              for item in self._owners(snapshot) if item in project["lanes"]}
         free = [item for item in free
@@ -219,7 +224,7 @@ class Controller:
             # An actionable observation is retried on the next heartbeat even
             # when its fingerprint repeats after a failed probe or missed event.
             wake = plan["actionable"]
-            needs_attention = any(a.get("type") in {"unmanaged_claim", "ownership_conflict"}
+            needs_attention = any(a.get("type") in {"unmanaged_claim", "ownership_conflict", "dependency"}
                                   for a in plan["actions"])
             wake |= needs_attention and plan["fingerprint"] != state.get("last_fingerprint")
             if wake:
@@ -334,27 +339,42 @@ class Controller:
         if not event_id or len(event_id) > 512:
             raise DriverError("event requires a bounded unique delivery id")
         with self.state.lock():
-            accepted = self.state.event(repo, event_id, reason)
-            if accepted:
-                data = self.state.project(repo)
-                data["last_fingerprint"] = None
-                data["wake_pending_until"] = 0
-                self.state.save(repo, data)
-                if not inline:
-                    scheduler.schedule_wake(
-                        self.config.hermes_home, repo, self.config.path,
-                        Path(__file__).with_name("driver.py"), reason=reason, event_key=event_id,
-                        hermes_repo=self.config.hermes_repo,
-                    )
-        return {"accepted": accepted, "wakeAgent": accepted, "project": repo}
+            return self._event_locked(repo, event_id, reason, inline=inline)
+
+    def _event_locked(self, repo: str, event_id: str, reason: str, *, inline=False) -> dict:
+        if not self.state.project(repo)["enabled"]:
+            return {"accepted": False, "wakeAgent": False, "project": repo, "status": "stopped"}
+        if self.state.has_event(repo, event_id):
+            return {"accepted": False, "wakeAgent": False, "project": repo, "status": "duplicate"}
+        # Native scheduling is itself keyed. If it fails, do not acknowledge
+        # delivery; a retry after a crash reuses the same native job.
+        if not inline:
+            scheduler.schedule_wake(
+                self.config.hermes_home, repo, self.config.path,
+                Path(__file__).with_name("driver.py"), reason=reason, event_key=event_id,
+                hermes_repo=self.config.hermes_repo,
+            )
+        self.state.event(repo, event_id, reason)
+        data = self.state.project(repo)
+        data.update(last_fingerprint=None, wake_pending_until=0)
+        self.state.save(repo, data)
+        return {"accepted": True, "wakeAgent": True, "project": repo, "status": "delivered"}
 
     def _dependency_contract(self, repo: str, source_issue: int) -> tuple[dict, dict]:
+        if not handoff_contract.number(source_issue):
+            raise DriverError("source issue must be a positive integer")
         summary = self.adapter(repo).issue_summary(source_issue)
         if summary["state"] != "OPEN" or summary["status"] not in ACTIVE:
             raise DriverError("dependency source issue must be open and active")
         contract = handoff_contract.parse(summary["body"], repo)
         if contract is None:
             raise DriverError("source issue has no typed Driver dependency contract")
+        if contract["target"] not in self.config.project(repo).get("handoff_to", []):
+            raise DriverError("source project has no explicit route to the dependency target")
+        pr = self.adapter(repo).source_pr(contract["source_pr"])
+        if (pr.get("state") != "OPEN" or pr.get("head") != contract["source_head"]
+                or pr.get("issues") != [source_issue]):
+            raise DriverError("source PR head or linked issue differs from the dependency contract")
         return contract, summary
 
     def _target_readiness(self, target: str, issue_number: int) -> dict:
@@ -365,6 +385,10 @@ class Controller:
             raise DriverError("target dependency issue is absent from the complete snapshot")
         record = matches[0]
         blockers = list(record.get("errors", []))
+        summary = target_adapter.issue_summary(issue_number)
+        if summary["status"] != record.get("status") or summary["state"] != record.get("state"):
+            blockers.append("target issue and linked Project evidence changed")
+        blockers.extend(self._admission_reasons(target, snapshot))
         enabled = self.state.project(target).get("enabled") is True
         if not enabled:
             blockers.append("target Driver is stopped")
@@ -381,10 +405,14 @@ class Controller:
                 blockers.extend(target_adapter.blocked(snapshot, status="Backlog").get(str(issue_number), []))
             else:
                 blockers.append("target issue requires explicit triage before dispatch")
-        try:
-            free_lanes, blocked_lanes = self._lane_observations(target, snapshot)
-        except DriverError as exc:
-            free_lanes, blocked_lanes = [], {"target": {"available": False, "reason": str(exc)}}
+        free_lanes, blocked_lanes = self._lane_observations(target, snapshot)
+        owners = self._owners(snapshot)
+        reserved = {self.config.lane(target, identity)["capacity_key"] for identity in owners
+                    if identity in self.config.project(target)["lanes"]}
+        free_lanes = [identity for identity in free_lanes
+                      if self.config.lane(target, identity)["capacity_key"] not in reserved]
+        if self._worker_count(target) >= self.config.project(target).get("max_workers", 4):
+            free_lanes = []
         if not free_lanes:
             blockers.append("target has no currently available coding lane")
         return {
@@ -403,6 +431,12 @@ class Controller:
     def handoff(self, repo: str, source_issue: int) -> dict:
         """Validate and deliver one authenticated, idempotent cross-project wake."""
         self.config.project(repo)
+        with self.state.lock():
+            if not self.state.project(repo)["enabled"]:
+                return {"accepted": False, "delivered": False, "status": "stopped", "project": repo}
+            return self._handoff_locked(repo, source_issue)
+
+    def _handoff_locked(self, repo: str, source_issue: int) -> dict:
         contract, summary = self._dependency_contract(repo, source_issue)
         target = contract["target"]
         if target not in self.config.project(repo).get("handoff_to", []):
@@ -420,31 +454,37 @@ class Controller:
                 "contract_digest": digest,
             }
         event_id = f"handoff:{repo}:{source_issue}:{digest}"
-        delivered = self.event(target, event_id, "dependency handoff")
+        fresh, _ = self._dependency_contract(repo, source_issue)
+        if fresh != contract:
+            raise DriverError("dependency contract changed during target validation")
+        # Acknowledge only an existing or newly scheduled native wake.
+        delivered = self._event_locked(target, event_id, "dependency handoff")
         return {
-            "accepted": True,
-            "delivered": delivered["accepted"],
-            "duplicate": not delivered["accepted"],
+            "accepted": delivered["status"] in {"delivered", "duplicate"},
+            "delivered": delivered["status"] in {"delivered", "duplicate"},
+            "duplicate": delivered["status"] == "duplicate",
             "wakeAgent": delivered["wakeAgent"],
             "project": repo,
             "source_issue": source_issue,
             "source_url": summary["url"],
             "target": readiness,
             "contract_digest": digest,
+            "next_action": "reconcile target using current priority and admission gates",
+            "source_pr": contract["source_pr"],
+            "source_head": contract["source_head"],
         }
 
     def dependency_event(self, repo: str, source_issue: int) -> dict:
         """Wake the origin only after every typed dependency proof is satisfied."""
         self.config.project(repo)
+        with self.state.lock():
+            if not self.state.project(repo)["enabled"]:
+                return {"accepted": False, "wakeAgent": False, "status": "stopped", "project": repo}
+            return self._dependency_event_locked(repo, source_issue)
+
+    def _dependency_event_locked(self, repo: str, source_issue: int) -> dict:
         contract, summary = self._dependency_contract(repo, source_issue)
-        proofs = []
-        for condition in contract["conditions"]:
-            bridge = self.adapter(condition["repo"])
-            try:
-                proof = bridge.dependency_evidence(condition)
-            except (KernelAdapterError, ValueError) as exc:
-                proof = {"satisfied": False, "reason": str(exc)}
-            proofs.append({"condition": condition, "proof": proof})
+        proofs = dependencies.proofs(self, contract)
         unsatisfied = [item for item in proofs if item["proof"].get("satisfied") is not True]
         digest = handoff_contract.digest(contract)
         if unsatisfied:
@@ -459,7 +499,10 @@ class Controller:
                 "blockers": [item["proof"].get("reason", "dependency condition is not satisfied")
                              for item in unsatisfied],
             }
-        result = self.event(repo, f"dependency:{digest}", "dependency satisfied")
+        fresh, _ = self._dependency_contract(repo, source_issue)
+        if fresh != contract:
+            raise DriverError("dependency contract changed during proof collection")
+        result = self._event_locked(repo, f"dependency:{repo}:{source_issue}:{digest}", "dependency satisfied")
         return {
             **result,
             "source_issue": source_issue,

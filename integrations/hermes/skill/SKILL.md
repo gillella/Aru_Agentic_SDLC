@@ -127,6 +127,13 @@ receipt. Use `--dependency-event` from the source project to reread every
 declared GitHub proof and wake the source only when all conditions are true.
 Never treat a handoff marker as permission to claim, close, merge or deploy;
 the receiving Driver still performs its own full reconciliation.
+For returned `type:dependency` actions, run that command with the action's issue
+when `next_action` is `handoff`; add `--dependency-event` when it is
+`dependency-satisfied`. A `wait` result records the exact blocker and stays
+quiet while unchanged. Every heartbeat discovers these contracts in active
+GitHub issues, so a lost dependency event is recoverable without a local queue.
+After a successful dependency return, perform one fresh reconciliation before
+resuming the consumer's own CI, review or merge workflow.
 
 See [references/runtime-contract.md](references/runtime-contract.md) when
 installing, checking event delivery, or diagnosing a stalled Loop.

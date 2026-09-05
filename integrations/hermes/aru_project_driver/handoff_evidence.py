@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import re
 from urllib.parse import quote
 
 
@@ -27,7 +28,7 @@ def issue_summary(bridge, number: int) -> dict:
 
 
 def _read(bridge, repo: str, suffix: str) -> dict:
-    if not isinstance(repo, str) or "/" not in repo:
+    if not isinstance(repo, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise ValueError("dependency evidence repository is invalid")
     value = bridge.common.gh_json(["api", f"repos/{repo}/{suffix}"])
     if not isinstance(value, dict):
@@ -35,10 +36,19 @@ def _read(bridge, repo: str, suffix: str) -> dict:
     return value
 
 
+def source_pr(bridge, number: int) -> dict:
+    record = _read(bridge, bridge.repo, f"pulls/{number}")
+    if record.get("number") != number:
+        raise ValueError("source PR identity is unreadable")
+    return {"state": str(record.get("state", "")).upper(),
+            "head": (record.get("head") or {}).get("sha"),
+            "issues": bridge.merge_state.linked_issues(record.get("body") or "")}
+
+
 def _commit(bridge, repo: str, ref: str) -> str:
     record = _read(bridge, repo, "commits/" + quote(ref, safe=""))
     sha = record.get("sha")
-    if not isinstance(sha, str) or len(sha) != 40:
+    if not isinstance(sha, str) or not re.fullmatch(r"[a-fA-F0-9]{40}", sha):
         raise ValueError("dependency ref did not resolve to a full commit")
     return sha.lower()
 
@@ -89,7 +99,7 @@ def evidence(bridge, request: dict) -> dict:
     """Evaluate one already-validated condition; never executes issue text."""
     kind = request["kind"]
     repo = request["repo"]
-    if repo != bridge.repo and kind != "artifact_matches_release":
+    if repo != bridge.repo:
         raise ValueError("dependency evidence repository mismatch")
     if kind == "issue_done":
         record = issue_summary(bridge, request["issue"])

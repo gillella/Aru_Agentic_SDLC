@@ -20,6 +20,14 @@ head or authority cannot be reread. Consumer deployment and incident policy
 remains consumer-owned; degraded Kernel state never authorizes production
 action.
 
+The separately installed Hermes adapter may retain operational wake receipts,
+Stop gates and account locks in its own home. These are not lifecycle evidence.
+A scheduler failure must not be acknowledged as delivery. Missing routes,
+changed source heads or incomplete dependency proof leave the handoff visibly
+blocked. A later event or ten-minute recovery heartbeat rereads GitHub; only
+valid current evidence permits another bounded action. No degraded state
+authorizes new scope, account takeover, review bypass or deployment.
+
 If every `aru-ci` self-hosted Mac is offline, leave `aru-governed-pr` queued and
 restore runner availability. Do not change the workflow to a GitHub-hosted
 label, waive the required check, or treat an ad hoc terminal run as server

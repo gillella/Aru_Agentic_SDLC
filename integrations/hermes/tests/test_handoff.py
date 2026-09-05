@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from aru_project_driver import handoff_contract  # noqa: E402
 from aru_project_driver import handoff_evidence  # noqa: E402
+from aru_project_driver import dependencies, scheduler  # noqa: E402
 from aru_project_driver.config import Config, DriverError  # noqa: E402
 from aru_project_driver.controller import Controller  # noqa: E402
 from aru_project_driver.state import State  # noqa: E402
@@ -53,7 +54,11 @@ class Adapter:
         if self.repo == ORIGIN:
             return {"number": number, "state": "OPEN", "status": "In Progress",
                     "body": self.source_body, "url": f"https://example/{number}"}
-        raise AssertionError("target issue summaries must come from the complete snapshot")
+        return {"number": number, "state": "OPEN", "status": self.target_status,
+                "body": "", "url": f"https://example/{number}"}
+
+    def source_pr(self, number):
+        return {"state": "OPEN", "head": HEAD, "issues": [9]}
 
     def snapshot(self):
         self.calls.append(("snapshot",))
@@ -150,7 +155,7 @@ def test_handoff_validates_target_and_deduplicates_delivery(tmp_path, monkeypatc
     duplicate = fixture.controller.handoff(ORIGIN, 9)
     assert first["accepted"] is True and first["delivered"] is True
     assert duplicate["accepted"] is True and duplicate["duplicate"] is True
-    assert scheduled == [first["target"] and f"handoff:{ORIGIN}:9:{first['contract_digest']}"]
+    assert scheduled == [f"handoff:{ORIGIN}:9:{first['contract_digest']}"]
     assert len(fixture.state.project(TARGET)["events"]) == 1
 
 
@@ -184,7 +189,7 @@ def test_dependency_event_requires_all_proofs_then_wakes_source_once(tmp_path, m
     again = fixture.controller.dependency_event(ORIGIN, 9)
     assert result["accepted"] is True and result["wakeAgent"] is True
     assert again["accepted"] is False
-    assert scheduled == [f"dependency:{handoff_contract.digest(data)}"]
+    assert scheduled == [f"dependency:{ORIGIN}:9:{handoff_contract.digest(data)}"]
 
 
 def test_dependency_event_reports_unsatisfied_proof_without_wake(tmp_path, monkeypatch):
@@ -226,3 +231,146 @@ def test_release_evidence_checks_declared_head_and_published_tag():
         "pr": 17, "head": HEAD,
     })
     assert result["satisfied"] is True and result["commit"] == "c" * 40
+
+
+@pytest.mark.parametrize("pr", [
+    {"state": "OPEN", "head": "b" * 40, "issues": [9]},
+    {"state": "CLOSED", "head": HEAD, "issues": [9]},
+    {"state": "OPEN", "head": HEAD, "issues": [10]},
+])
+def test_stale_source_blocks_delivery_and_return(tmp_path, monkeypatch, pr):
+    fixture = Fixture(tmp_path)
+    fixture.adapters[ORIGIN].source_pr = lambda _: pr
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: pytest.fail("stale wake"))
+    for action in (fixture.controller.handoff, fixture.controller.dependency_event):
+        with pytest.raises(DriverError, match="source PR head or linked issue"):
+            action(ORIGIN, 9)
+
+
+def test_source_head_advanced_during_target_validation_prevents_delivery(tmp_path, monkeypatch):
+    fixture = Fixture(tmp_path)
+    heads = iter([HEAD, "b" * 40])
+    fixture.adapters[ORIGIN].source_pr = lambda _: {
+        "state": "OPEN", "head": next(heads), "issues": [9],
+    }
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: pytest.fail("stale wake"))
+    with pytest.raises(DriverError, match="source PR head"):
+        fixture.controller.handoff(ORIGIN, 9)
+
+
+@pytest.mark.parametrize("repo", [ORIGIN, TARGET])
+def test_stop_prevents_cross_project_delivery(tmp_path, monkeypatch, repo):
+    fixture = Fixture(tmp_path)
+    state = fixture.state.project(repo)
+    state["enabled"] = False
+    fixture.state.save(repo, state)
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: pytest.fail("stopped wake"))
+    result = fixture.controller.handoff(ORIGIN, 9)
+    assert result["accepted"] is False and result["delivered"] is False
+
+
+def test_missing_route_also_blocks_dependency_return(tmp_path):
+    fixture = Fixture(tmp_path, route=False)
+    fixture.adapters[TARGET].proofs["issue_done"] = {"satisfied": True}
+    with pytest.raises(DriverError, match="explicit route"):
+        fixture.controller.dependency_event(ORIGIN, 9)
+
+
+def test_target_board_mismatch_and_no_capacity_are_explicit_blockers(tmp_path):
+    fixture = Fixture(tmp_path)
+    fixture.adapters[TARGET].issue_summary = lambda n: {"state": "OPEN", "status": "Backlog"}
+    fixture.controller.available = lambda *_: {"available": False, "reason": "quota exhausted"}
+    result = fixture.controller.handoff(ORIGIN, 9)
+    assert not result["accepted"]
+    assert "target issue and linked Project evidence changed" in result["target"]["blockers"]
+    assert "target has no currently available coding lane" in result["target"]["blockers"]
+
+
+def test_scheduler_failure_does_not_poison_delivery_deduplication(tmp_path, monkeypatch):
+    fixture = Fixture(tmp_path)
+    def fail(*a, **k):
+        raise scheduler.SchedulerError("receiver unavailable")
+    monkeypatch.setattr(scheduler, "schedule_wake", fail)
+    with pytest.raises(scheduler.SchedulerError, match="unavailable"):
+        fixture.controller.handoff(ORIGIN, 9)
+    assert fixture.state.project(TARGET)["events"] == []
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: {})
+    assert fixture.controller.handoff(ORIGIN, 9)["delivered"]
+    restarted = Controller(fixture.config, adapter_factory=fixture.controller.adapter_factory,
+                           availability=fixture.controller.available)
+    assert restarted.handoff(ORIGIN, 9)["duplicate"]
+
+
+def test_heartbeat_discovers_handoff_and_return_without_a_local_dependency_queue(tmp_path, monkeypatch):
+    fixture = Fixture(tmp_path)
+    source = record(9, "In Progress", body=fixture.adapters[ORIGIN].source_body)
+    snapshot = {"issues": [source]}
+    plan, held = dependencies.actions(fixture.controller, ORIGIN, snapshot)
+    assert held == {9} and plan[0]["next_action"] == "handoff"
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: {})
+    fixture.controller.handoff(ORIGIN, 9)
+    plan, held = dependencies.actions(fixture.controller, ORIGIN, snapshot)
+    assert plan[0]["next_action"] == "wait" and held == {9}
+    fixture.adapters[TARGET].proofs["issue_done"] = {"satisfied": True}
+    plan, held = dependencies.actions(fixture.controller, ORIGIN, snapshot)
+    assert plan[0]["next_action"] == "dependency-satisfied" and held == set()
+    fixture.controller.dependency_event(ORIGIN, 9)
+    plan, held = dependencies.actions(fixture.controller, ORIGIN, snapshot)
+    assert plan[0]["next_action"] == "wait" and held == set()
+
+
+def test_merge_without_required_release_does_not_unlock_source(tmp_path, monkeypatch):
+    fixture = Fixture(tmp_path)
+    _, fixture.adapters[ORIGIN].source_body = contract(conditions=[
+        {"kind": "issue_done", "repo": TARGET, "issue": 42},
+        {"kind": "pr_merged", "repo": TARGET, "pr": 17, "head": HEAD},
+        {"kind": "release_contains_pr", "repo": TARGET, "tag": "v1", "pr": 17, "head": HEAD},
+    ])
+    fixture.adapters[TARGET].proofs.update(issue_done={"satisfied": True},
+                                           pr_merged={"satisfied": True})
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: pytest.fail("premature return"))
+    assert not fixture.controller.dependency_event(ORIGIN, 9)["wakeAgent"]
+
+
+def test_blocked_source_keeps_independent_ready_lane_available(tmp_path):
+    fixture = Fixture(tmp_path)
+    fixture.config.project(ORIGIN)["lanes"].append("target-agent")
+    fixture.config.lanes["target-agent"]["projects"].append(ORIGIN)
+    adapter = fixture.adapters[ORIGIN]
+    snapshot = adapter.snapshot()
+    source = record(9, "In Progress", body=adapter.source_body, agents=["source-agent"])
+    snapshot["issues"] = [source, record(10)]
+    snapshot["prs"] = [{"number": 17, "head": HEAD, "issues": [9],
+                        "author_agent": "source-agent"}]
+    adapter.snapshot = lambda: snapshot
+    adapter.next_work = lambda _: {"type": "merge", "pr": 17, "head": HEAD}
+    adapter.candidates = lambda _snapshot, status: [record(10)] if status == "Ready" else []
+    plan = fixture.controller._plan(ORIGIN)
+    assert plan["free_lanes"] == ["target-agent"] and plan["ready"] == [10]
+    assert all(action["type"] != "merge" for action in plan["actions"])
+    assert plan["actions"][0]["type"] == "dependency"
+
+
+@pytest.mark.parametrize("same", [False, True])
+def test_artifact_proof_compares_immutable_consumer_and_release_files(monkeypatch, same):
+    import base64
+    calls = []
+    def read(_bridge, repo, suffix):
+        calls.append((repo, suffix))
+        if suffix.startswith("commits/"):
+            return {"sha": ("a" if repo == ORIGIN else "c") * 40}
+        if suffix.startswith("releases/"):
+            return {"tag_name": "v1", "draft": False, "prerelease": False, "published_at": "now"}
+        content = b"new" if same or repo == TARGET else b"old"
+        return {"type": "file", "encoding": "base64", "content": base64.b64encode(content).decode()}
+    monkeypatch.setattr(handoff_evidence, "_read", read)
+    bridge = GithubBridge()
+    bridge.repo = ORIGIN
+    result = handoff_evidence.evidence(bridge, {
+        "kind": "artifact_matches_release", "repo": ORIGIN, "ref": "main", "path": ".aru/hook.py",
+        "release_repo": TARGET, "tag": "v1", "release_path": "hooks/hook.py",
+    })
+    assert result["satisfied"] is same
+    contents = [suffix for _, suffix in calls if suffix.startswith("contents/")]
+    assert contents == ["contents/.aru/hook.py?ref=" + "a" * 40,
+                        "contents/hooks/hook.py?ref=" + "c" * 40]

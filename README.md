@@ -29,6 +29,13 @@ summary. It separates the **Kernel** (issue to safe merge), an optional
 **consumer policy** (additional risk controls, broader engineering checks,
 release, deploy, and production).
 
+The optional [Hermes Project Driver integration](integrations/hermes/README.md)
+is versioned here and installed separately into an operator-owned Hermes home.
+It combines immediate events with a ten-minute recovery heartbeat, fills safe
+free coding lanes, and coordinates typed cross-project dependencies. The kernel
+and consumer bootstrap do not install or run it. Live installation and canary
+acceptance remain tracked by [#557](https://github.com/gillella/Aru_Agentic_SDLC/issues/557).
+
 ## See the whole system in one minute
 
 ```mermaid

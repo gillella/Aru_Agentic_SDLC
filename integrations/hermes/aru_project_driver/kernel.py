@@ -177,6 +177,9 @@ class KernelAdapter:
     def dependency_evidence(self, request: dict) -> dict:
         return self._invoke("dependency_evidence", request=request)
 
+    def source_pr(self, number: int) -> dict:
+        return self._invoke("source_pr", number=number)
+
 
 class _Bridge:
     """One invocation, one repository, no persistent module/global state."""
@@ -457,10 +460,12 @@ class _Bridge:
         import handoff_evidence
         if operation == "issue_summary":
             return handoff_evidence.issue_summary(self, payload["number"])
+        if operation == "source_pr":
+            return handoff_evidence.source_pr(self, payload["number"])
         return handoff_evidence.evidence(self, payload["request"])
 
     def dispatch(self, operation: str, payload: dict) -> Any:
-        if operation in {"issue_summary", "dependency_evidence"}:
+        if operation in {"issue_summary", "dependency_evidence", "source_pr"}:
             return self._handoff_operation(operation, payload)
         if operation == "snapshot":
             return self.snapshot()

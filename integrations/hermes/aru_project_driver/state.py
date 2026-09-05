@@ -92,6 +92,9 @@ class State:
         self.save(repo, data)
         return True
 
+    def has_event(self, repo: str, event_id: str) -> bool:
+        return any(event["key"] == key(event_id) for event in self.project(repo)["events"])
+
     def workers(self, repo: str | None = None) -> list[dict]:
         result = []
         for path in sorted((self.root / "workers").glob("*.json")):

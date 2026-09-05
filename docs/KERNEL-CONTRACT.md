@@ -32,6 +32,14 @@ task, or another event-driven agent outside this repository. Consumer policy
 may be stricter than the Kernel for a particular product, but it must not be
 presented as a universal Aru requirement.
 
+Optional external Driver source may be versioned under `integrations/` while
+its execution and operational receipts live in the operator's separate Hermes
+home. It is not imported by kernel helpers or installed by consumer bootstrap.
+The [Hermes integration](../integrations/hermes/README.md) owns immediate event
+wakes, one ten-minute recovery heartbeat per enabled project, capacity locks,
+and typed dependency handoffs. GitHub remains the sole lifecycle authority;
+operational receipts never authorize a claim, review, merge or issue closure.
+
 ## Kernel invariant
 
 One open issue with a valid contract moves through `Backlog`, `Ready`,
