@@ -11,7 +11,7 @@ from pathlib import Path
 
 NAMES = {
     "openai-codex": {"codex"}, "claude-code": {"claude"},
-    "xai-cursor": {"cursor-agent", "agent"}, "google-antigravity": {"agy", "antigravity"},
+    "xai-cursor": {"cursor-agent"}, "google-antigravity": {"agy", "antigravity"},
 }
 
 

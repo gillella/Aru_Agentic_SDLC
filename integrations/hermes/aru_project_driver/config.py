@@ -60,6 +60,25 @@ class Config:
             self._project(repo, project)
         for identity, lane in self.lanes.items():
             self._lane(identity, lane)
+        self._bind()
+
+    def _bind(self) -> None:
+        from .state import State, read_json, write_json
+
+        path = self.state_dir / "binding.json"
+        expected = {"config": str(self.path), "state_dir": str(self.state_dir)}
+        if path.exists():
+            if read_json(path) != expected:
+                raise DriverError("Hermes profile is bound to another Driver configuration")
+            return
+        # Establish the binding once, before any entrypoint can touch the journal.
+        # Existing bindings need no lock: a child may load config while its parent
+        # still holds the coordination lock during launch.
+        with State(self.state_dir).lock():
+            if read_json(path, expected) != expected:
+                raise DriverError("Hermes profile is bound to another Driver configuration")
+            if not path.exists():
+                write_json(path, expected)
 
     def _project(self, repo: str, project: dict) -> None:
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
@@ -73,6 +92,11 @@ class Config:
             raise DriverError(f"{repo}: lanes must be a nonempty unique list")
         if any(identity not in self.lanes for identity in lanes):
             raise DriverError(f"{repo}: unknown lane")
+        for identity in lanes:
+            lane = self.lanes[identity]
+            if (not isinstance(lane, dict) or not isinstance(lane.get("projects"), list)
+                    or repo not in lane["projects"]):
+                raise DriverError(f"{repo}: referenced lane must explicitly authorize this project")
         for key, default in (("max_workers", 4), ("max_review_backlog", 4)):
             value = project.get(key, default)
             if type(value) is not int or not 1 <= value <= 32:
@@ -108,7 +132,7 @@ class Config:
         command(lane.get("probe_command"), "probe_command")
         allowed = lane.get("projects")
         if not isinstance(allowed, list) or not allowed or any(
-            repo not in self.projects for repo in allowed
+            not isinstance(repo, str) or repo not in self.projects for repo in allowed
         ):
             raise DriverError(f"{identity}: explicitly allowed projects are required")
 

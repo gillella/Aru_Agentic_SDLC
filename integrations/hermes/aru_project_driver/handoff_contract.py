@@ -10,7 +10,8 @@ from pathlib import PurePosixPath
 from .config import DriverError
 
 MARKER = "aru-driver-dependency:v1"
-PATTERN = re.compile(r"^<!-- aru-driver-dependency:v1 (\{[^\n]+\}) -->$", re.MULTILINE)
+PATTERN = re.compile(r"^[ \t]*<!-- aru-driver-dependency:v1 (\{[^\r\n]+\}) -->[ \t\r]*$",
+                     re.MULTILINE)
 
 
 def number(value: object) -> bool:

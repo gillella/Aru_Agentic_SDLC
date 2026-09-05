@@ -363,6 +363,15 @@ def test_identity_and_clean_checkout_are_required(tmp_path):
         bridge.revalidate(1)
 
 
+@pytest.mark.parametrize("number", [0, -1, True, 1.5, None, "1", [], {}])
+def test_release_rejects_invalid_issue_before_identity_or_github_reads(tmp_path, number):
+    bridge = make_bridge(Backend(), tmp_path)
+    bridge.identity = lambda **kwargs: pytest.fail("invalid release must not read GitHub")
+    bridge.claims.release = lambda *args: pytest.fail("invalid release must not mutate")
+    with pytest.raises(KernelAdapterError, match="positive integer"):
+        bridge.dispatch("release", {"number": number, "agent": "codex-a"})
+
+
 def test_subprocess_bridge_imports_only_in_child_and_preserves_cwd(tmp_path):
     scripts = tmp_path / "kernel/scripts"
     scripts.mkdir(parents=True)

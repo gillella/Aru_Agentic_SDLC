@@ -17,24 +17,13 @@ from . import execution, scheduler
 from .config import Config, DriverError
 from .controller import Controller
 from .kernel import KernelAdapterError
-from .state import State, read_json, write_json
-
-
-def _bind(config: Config) -> None:
-    """One Hermes profile must use one coordinator configuration/account journal."""
-    path = config.hermes_home / "state" / "aru_project_driver" / "binding.json"
-    expected = {"config": str(config.path), "state_dir": str(config.state_dir)}
-    existing = read_json(path, expected)
-    if existing != expected:
-        raise DriverError("Hermes profile is bound to another Driver config/state directory")
-    write_json(path, expected)
+from .state import State
 
 
 def start(config: Config, repo: str) -> dict:
     config.project(repo)
     state = State(config.state_dir)
     with state.lock():
-        _bind(config)
         data = state.project(repo)
         # The persistent stop gate stays closed until the native scheduler
         # proves it created the recurring recovery path.

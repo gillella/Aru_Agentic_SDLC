@@ -464,6 +464,12 @@ class _Bridge:
             return handoff_evidence.source_pr(self, payload["number"])
         return handoff_evidence.evidence(self, payload["request"])
 
+    def release(self, number: object, agent: str | None) -> Any:
+        if type(number) is not int or number <= 0:
+            raise KernelAdapterError("issue number must be a positive integer")
+        self.identity(clean=True)
+        return self.claims.release(number, agent)
+
     def dispatch(self, operation: str, payload: dict) -> Any:
         if operation in {"issue_summary", "dependency_evidence", "source_pr"}:
             return self._handoff_operation(operation, payload)
@@ -478,8 +484,7 @@ class _Bridge:
         number = payload["number"]
         agent = payload.get("agent")
         if operation == "release":
-            self.identity(clean=True)
-            return self.claims.release(number, agent)
+            return self.release(number, agent)
         if operation == "revalidate":
             return self.revalidate(number, agent)
         if operation == "promote":

@@ -233,8 +233,20 @@ def test_review_timer_consumption_does_not_spin_and_stop_can_resume_pending(setu
 def test_review_sync_rejects_ambiguous_authority_before_mutating(setup):
     home, project, config, driver, api = setup
     event = {"pr": 18, "head": "a" * 40, "reviewer": "coderabbit", "retry_at": 1790865600}
-    with pytest.raises(ValueError, match="unique positive PR"):
+    with pytest.raises(scheduler.SchedulerError, match="unique positive PR"):
         scheduler.sync_review_wakes(home, project, config, driver, [event, {**event, "reviewer": "other"}], cron_api=api)
     assert not home.exists()
-    with pytest.raises(ValueError, match="exact full commit"):
+    with pytest.raises(scheduler.SchedulerError, match="exact full commit"):
         scheduler.sync_review_wakes(home, project, config, driver, [{**event, "head": "abcd"}], cron_api=api)
+
+
+@pytest.mark.parametrize("updates", [
+    {"pr": False}, {"reviewer": None}, {"retry_at": "not-a-date"},
+    {"retry_at": "2026-09-05T12:00:00"}, {"retry_at": 1e100},
+])
+def test_malformed_review_events_raise_catchable_error_before_native_access(setup, updates):
+    home, project, config, driver, api = setup
+    event = {"pr": 18, "head": "a" * 40, "reviewer": "coderabbit", "retry_at": 1790865600}
+    with pytest.raises(scheduler.SchedulerError):
+        scheduler.sync_review_wakes(home, project, config, driver, [{**event, **updates}], cron_api=api)
+    assert not home.exists() and not api.jobs

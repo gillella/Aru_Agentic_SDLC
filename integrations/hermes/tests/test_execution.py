@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from aru_project_driver import execution, scheduler
+from aru_project_driver import capacity, execution, scheduler
 from aru_project_driver.config import Config, DriverError
 from aru_project_driver.controller import Controller
 from aru_project_driver.state import State, read_json, write_json
@@ -84,6 +84,14 @@ def test_bounded_preflight_timeout_and_missing_executable_fail_closed(tmp_path):
         execution.run_bounded([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, 1)
     with pytest.raises(DriverError, match="preflight unavailable"):
         execution.run_bounded([str(tmp_path / "missing-command")], tmp_path)
+
+
+def test_cursor_capacity_ignores_unrelated_agent_executable(monkeypatch):
+    process = SimpleNamespace(returncode=0, stdout="42 /usr/local/bin/agent\n")
+    monkeypatch.setattr(capacity.subprocess, "run", lambda *a, **k: process)
+    assert capacity.observe("xai-cursor")["available"] is True
+    process.stdout += "43 /usr/local/bin/cursor-agent\n"
+    assert capacity.observe("xai-cursor")["available"] is False
 
 
 @pytest.mark.parametrize("payload,returncode", [

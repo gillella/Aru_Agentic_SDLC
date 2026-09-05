@@ -70,12 +70,39 @@ def test_stop_gate_remains_closed_even_if_scheduler_pause_fails(config, monkeypa
     assert not state.project("owner/repo")["enabled"]
 
 
-def test_profile_binding_rejects_other_config_on_all_entrypoints(config):
-    driver._bind(config)
+@pytest.mark.parametrize("operation", ["start", "stop", "status", "tick", "reconcile", "event", "handoff"])
+def test_profile_binding_rejects_other_config_on_all_entrypoints(config, monkeypatch, capsys, operation):
+    (config.state_dir / "binding.json").unlink()
+    monkeypatch.setattr(scheduler, "ensure_heartbeat", lambda *a, **k: {})
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: {})
+    monkeypatch.setattr(scheduler, "stop_project", lambda *a, **k: {})
+    monkeypatch.setattr(scheduler, "scheduler_status", lambda *a, **k: {})
+    suffix = [operation, "--project", "owner/repo"]
+    if operation == "event":
+        suffix += ["--event-id", "test"]
+    if operation == "handoff":
+        suffix += ["--source-issue", "1"]
+    assert driver.main(["--config", str(config.path), *suffix]) == 0
     alternate = config.path.with_name("alternate.json")
     alternate.write_text(config.path.read_text())
-    with pytest.raises(DriverError, match="bound to another"):
-        Config(alternate)
+    assert driver.main(["--config", str(alternate), *suffix]) == 1
+    assert "bound to another" in capsys.readouterr().out
+
+
+def test_worker_config_can_load_existing_binding_during_parent_coordination(config):
+    with State(config.state_dir).lock():
+        assert Config(config.path).state_dir == config.state_dir
+
+
+def test_project_lane_must_authorize_project_but_unused_lanes_are_allowed(config):
+    raw = json.loads(config.path.read_text())
+    raw["lanes"]["unused-agent"] = dict(raw["lanes"]["agent-one"])
+    config.path.write_text(json.dumps(raw))
+    assert "unused-agent" in Config(config.path).lanes
+    raw["lanes"]["agent-one"]["projects"] = []
+    config.path.write_text(json.dumps(raw))
+    with pytest.raises(DriverError, match="explicitly authorize"):
+        Config(config.path)
 
 
 def test_state_path_cannot_split_the_same_profile_into_two_coordinators(config):

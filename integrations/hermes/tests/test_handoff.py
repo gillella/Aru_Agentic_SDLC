@@ -144,6 +144,12 @@ def test_contract_requires_one_exact_target_done_condition():
         handoff_contract.validate(missing_source_pr, ORIGIN)
 
 
+def test_github_crlf_marker_and_horizontal_whitespace_are_accepted():
+    data, body = contract()
+    body = body.replace("<!--", " \t<!--").replace("-->\n", "--> \t\n")
+    assert handoff_contract.parse(body.replace("\n", "\r\n"), ORIGIN) == data
+
+
 def test_handoff_validates_target_and_deduplicates_delivery(tmp_path, monkeypatch):
     fixture = Fixture(tmp_path)
     scheduled = []
@@ -320,14 +326,49 @@ def test_heartbeat_discovers_handoff_and_return_without_a_local_dependency_queue
     assert held == {9} and plan[0]["next_action"] == "handoff"
     monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: {})
     fixture.controller.handoff(ORIGIN, 9)
+    fixture.adapters[TARGET].calls.clear()
     plan, held = dependencies.actions(fixture.controller, ORIGIN, snapshot)
     assert plan[0]["next_action"] == "wait" and held == {9}
+    assert fixture.adapters[TARGET].calls == [("dependency_evidence", "issue_done")]
     fixture.adapters[TARGET].proofs["issue_done"] = {"satisfied": True}
     plan, held = dependencies.actions(fixture.controller, ORIGIN, snapshot)
     assert plan[0]["next_action"] == "dependency-satisfied" and held == set()
     fixture.controller.dependency_event(ORIGIN, 9)
     plan, held = dependencies.actions(fixture.controller, ORIGIN, snapshot)
     assert plan[0]["next_action"] == "wait" and held == set()
+
+
+def test_one_plan_shares_target_snapshot_readiness_and_identical_proofs(tmp_path):
+    fixture = Fixture(tmp_path)
+    data, body = contract()
+    fixture.controller._dependency_contract = lambda repo, number: (data, {})
+    snapshot = {"issues": [record(n, "In Progress", body=body) for n in (9, 10)]}
+    result, held = dependencies.actions(fixture.controller, ORIGIN, snapshot)
+    assert held == {9, 10} and all(a["next_action"] == "handoff" for a in result)
+    assert fixture.adapters[TARGET].calls == [
+        ("dependency_evidence", "issue_done"), ("snapshot",), ("issue_summary", 42),
+    ]
+    fixture.adapters[TARGET].calls.clear()
+    fixture.adapters[TARGET].proofs["issue_done"] = {"satisfied": True}
+    result, held = dependencies.actions(fixture.controller, ORIGIN, snapshot)
+    assert held == set() and all(a["next_action"] == "dependency-satisfied" for a in result)
+    assert fixture.adapters[TARGET].calls == [("dependency_evidence", "issue_done")]
+
+
+def test_dependency_quota_error_enters_global_cooldown(tmp_path):
+    fixture = Fixture(tmp_path)
+    adapter = fixture.adapters[ORIGIN]
+    snapshot = adapter.snapshot()
+    snapshot["issues"] = [record(9, "In Progress", body=adapter.source_body)]
+    adapter.snapshot = lambda: snapshot
+    def unavailable(_condition):
+        raise DriverError("GitHub rate limit exhausted")
+    fixture.adapters[TARGET].dependency_evidence = unavailable
+    fixture.controller.now = lambda: 1000
+    result = fixture.controller.tick(ORIGIN)
+    assert result["status"] == "degraded"
+    assert fixture.state.project(ORIGIN)["cooldown_until"] == 4600
+    assert fixture.adapters[TARGET].calls == []
 
 
 def test_merge_without_required_release_does_not_unlock_source(tmp_path, monkeypatch):

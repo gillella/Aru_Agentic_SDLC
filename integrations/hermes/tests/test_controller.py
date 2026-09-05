@@ -372,6 +372,29 @@ def test_future_review_deadline_registered_by_tick_without_waking_brain(harness)
     assert harness.probes == [] and mutations(harness) == []
 
 
+@pytest.mark.parametrize("operation", ["tick", "reconcile"])
+def test_duplicate_claims_degrade_before_sync_or_mutation(harness, operation):
+    harness.kernel.issues = [issue(n, status="In Progress", agent="codex-one") for n in (1, 2)]
+    result = getattr(harness.controller, operation)(REPO)
+    assert result["status"] == "degraded" and "multiple active claims" in result["reason"]
+    assert harness.probes == [] and harness.synced == [] and mutations(harness) == []
+
+
+@pytest.mark.parametrize("operation", ["tick", "reconcile"])
+@pytest.mark.parametrize("deadline", ["invalid", "2026-09-05T12:00:00"])
+def test_invalid_review_deadline_degrades_before_sync_or_mutation(harness, operation, deadline):
+    harness.one_lane()
+    harness.kernel.issues = [issue(1, status="In Review", agent="codex-one")]
+    harness.kernel.prs = [pr(9, "codex-one", linked=1)]
+    harness.kernel.work["codex-one"] = {
+        "type": "wait", "pr": 9, "head": HEAD, "authority": "coderabbit",
+        "next_action": "refresh-reviewer", "retry_at": deadline,
+    }
+    result = getattr(harness.controller, operation)(REPO)
+    assert result["status"] == "degraded" and "deadline" in result["reason"]
+    assert harness.probes == [] and harness.synced == [] and mutations(harness) == []
+
+
 def test_stopped_project_does_not_inspect_or_refill(harness):
     harness.stop()
     assert harness.controller.reconcile(REPO) == {"status": "stopped", "launched": []}

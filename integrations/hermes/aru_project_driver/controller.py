@@ -168,8 +168,11 @@ class Controller:
         retry = action.get("retry_at")
         if retry:
             try:
-                return datetime.fromisoformat(retry.replace("Z", "+00:00")).timestamp() <= self.now()
-            except (ValueError, AttributeError):
+                deadline = datetime.fromisoformat(retry.replace("Z", "+00:00"))
+                if deadline.tzinfo is None or deadline.utcoffset() is None:
+                    raise ValueError("timezone required")
+                return deadline.timestamp() <= self.now()
+            except (ValueError, AttributeError, OverflowError, OSError):
                 raise DriverError("review continuation has an unreadable deadline") from None
         return True
 
@@ -244,11 +247,10 @@ class Controller:
         return {"wakeAgent": bool(precheck and changed), "status": "degraded", "reason": message}
 
     def _sync_reviews(self, repo: str, actions: list[dict]) -> dict:
-        events = [{"pr": a["pr"], "head": a["head"],
+        events = [{"pr": a.get("pr"), "head": a.get("head"),
                    "reviewer": a.get("authority", a.get("reviewer")), "retry_at": a["retry_at"]}
                   for a in actions if a.get("next_action") == "refresh-reviewer"
-                  and a.get("retry_at") and a.get("pr") and a.get("head")
-                  and a.get("authority", a.get("reviewer")) and not self._action_due(a)]
+                  and a.get("retry_at") and not self._action_due(a)]
         return scheduler.sync_review_wakes(
             self.config.hermes_home, repo, self.config.path, Path(__file__).with_name("driver.py"),
             events=events, hermes_repo=self.config.hermes_repo,
@@ -377,9 +379,9 @@ class Controller:
             raise DriverError("source PR head or linked issue differs from the dependency contract")
         return contract, summary
 
-    def _target_readiness(self, target: str, issue_number: int) -> dict:
+    def _target_readiness(self, target: str, issue_number: int, *, snapshot: dict | None = None) -> dict:
         target_adapter = self.adapter(target)
-        snapshot = target_adapter.snapshot()
+        snapshot = target_adapter.snapshot() if snapshot is None else snapshot
         matches = [record for record in snapshot["issues"] if record["number"] == issue_number]
         if len(matches) != 1:
             raise DriverError("target dependency issue is absent from the complete snapshot")

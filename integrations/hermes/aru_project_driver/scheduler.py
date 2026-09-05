@@ -287,7 +287,10 @@ def sync_review_wakes(
     """Synchronize the current pending-review set; retire stale authority/head timers."""
     hermes_home = Path(hermes_home).expanduser().resolve()
     namespace = _namespace(project)
-    desired = _review_events(events, namespace)
+    try:
+        desired = _review_events(events, namespace)
+    except (ValueError, OverflowError, OSError) as exc:
+        raise SchedulerError(f"invalid pending review event: {exc}") from exc
     api = _load_api(hermes_home, hermes_repo, cron_api)
     with _locked(hermes_home):
         existing = [j for j in _jobs(api, namespace) if str(j.get("name", "")).startswith(namespace + "review:")]
