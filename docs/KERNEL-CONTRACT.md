@@ -77,12 +77,16 @@ review labels.
 ### Semantic authorization and external metadata races
 
 The PR scope hook binds its final head reread to the same single parsed closing
-issue directive. Merge submission compares two full gate evaluations, including
+issue directive, then rereads the issue and compares its parsed touches scope.
+Benign issue prose and declaration formatting or ordering remain compatible.
+Merge submission compares two full gate evaluations, including
 the actual changed paths, declared touches, claimant, and each parsed acceptance
 item's text and completion state. Criterion counts alone are not authorization
 evidence. After CI and review reads, one bounded final PR/issue validation checks
 the open, ready PR, exact head and base, closing issue, and current issue gate
-against that evidence immediately before submitting the merge command. Missing,
+against that evidence. One final head/base-bound queue snapshot refuses observed
+queue configuration or pending queue-entry/auto-merge request drift before the
+merge command; it does not rerun the full gates or cancel an existing request. Missing,
 unreadable, invalid, or changed authorization blocks submission. Description or
 verification prose outside these semantic fields may change without refusal.
 

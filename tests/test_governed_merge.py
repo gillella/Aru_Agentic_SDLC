@@ -229,7 +229,7 @@ def test_merge_submits_to_configured_queue_without_merge_strategy(monkeypatch):
         "merge_queue_snapshot",
         lambda *_args: {
             "configured": True,
-            "entry": {"id": "entry", "state": "QUEUED"},
+            "entry": {"id": "entry", "state": "QUEUED"} if calls else None,
             "auto_merge": None,
         },
     )
@@ -461,7 +461,7 @@ def test_semantic_drift_never_reaches_merge_command(
         return {"head": HEAD, "state": "success", "checks": ["aru-governed-pr"]}
 
     def submit(argv):
-        assert events[-2:] == ["pr", "issue"]
+        assert events[-3:] == ["pr", "issue", "queue"]
         commands.append(argv)
         pr.update(state="MERGED", mergedAt="2026-09-05T12:00:00Z")
 
@@ -472,7 +472,8 @@ def test_semantic_drift_never_reaches_merge_command(
     monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _n: [])
     monkeypatch.setattr(
         merge_pr, "merge_queue_snapshot",
-        lambda *_a: {"configured": False, "entry": None, "auto_merge": None},
+        lambda *_a: events.append("queue")
+        or {"configured": False, "entry": None, "auto_merge": None},
     )
     monkeypatch.setattr(merge_pr, "run", submit)
     monkeypatch.setattr(merge_pr, "finalize_queued", lambda *_a: {"merged": True})
@@ -490,3 +491,87 @@ def test_semantic_drift_never_reaches_merge_command(
         assert events.count("issue") == 3
     assert events.count("ci") <= 2
     assert events.count("issue") <= 3
+
+
+@pytest.mark.parametrize("configured,mutation", [
+    (True, "entry"), (True, "auto"), (False, "auto"),
+    (False, "configuration"), (True, "configuration"),
+    (True, "unreadable"), (True, "malformed"),
+    (True, "head"), (True, "base"),
+    (False, "stable"), (True, "stable"),
+])
+def test_final_pending_request_reread(monkeypatch, configured, mutation):
+    import subprocess
+    from copy import deepcopy
+
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("external call"))
+    install_low_risk_gate(monkeypatch)
+    monkeypatch.setattr(merge_pr, "pull_request", merge_state.pull_request)
+    monkeypatch.setattr(merge_pr, "issue_gate", merge_state.issue_gate)
+    monkeypatch.setattr(merge_pr, "merge_queue_snapshot", merge_state.merge_queue_snapshot)
+    monkeypatch.setattr(merge_state, "repo_slug", lambda: "owner/repo")
+    events, commands = [], []
+    pr = ready_pr()
+    queue = dict(number=10, headRefOid=HEAD, baseRefOid=BASE,
+                 mergeQueue={"id": "queue"} if configured else None,
+                 mergeQueueEntry=None, autoMergeRequest=None)
+
+    def read(argv, **kwargs):
+        if argv[:2] == ["pr", "view"]:
+            events.append("pr")
+            return deepcopy(pr)
+        assert argv[:2] == ["api", "graphql"]
+        assert "mergeQueueEntry{id state}" in argv[3]
+        assert "autoMergeRequest{enabledAt}" in argv[3]
+        assert kwargs["auth"] == merge_state.REPOSITORY_AUTH
+        events.append("queue")
+        if mutation == "unreadable" and events.count("ci") == 2:
+            raise merge_pr.KernelError("queue is unavailable")
+        return {"data": {"repository": {"pullRequest": deepcopy(queue)}}}
+
+    def read_issue(_number):
+        events.append("issue")
+        return issue_record("src/example.py")
+
+    def read_ci(_number):
+        events.append("ci")
+        if events.count("ci") == 2:
+            if mutation in {"entry", "malformed"}:
+                queue["mergeQueueEntry"] = {
+                    "id": "entry", "state": "QUEUED" if mutation == "entry" else "INVALID",
+                }
+            elif mutation == "auto":
+                queue["autoMergeRequest"] = {"enabledAt": "2026-09-05T12:00:00Z"}
+            elif mutation == "configuration":
+                queue["mergeQueue"] = None if configured else {"id": "queue"}
+            elif mutation in {"head", "base"}:
+                queue["headRefOid" if mutation == "head" else "baseRefOid"] = "c" * 40
+        return {"head": HEAD, "state": "success", "checks": ["aru-governed-pr"]}
+
+    def submit(argv):
+        commands.append(argv)
+        pr.update(state="MERGED", mergedAt="2026-09-05T12:00:00Z")
+
+    monkeypatch.setattr(merge_state, "gh_json", read)
+    monkeypatch.setattr(merge_state, "issue", read_issue)
+    monkeypatch.setattr(merge_pr, "ci_verdict", read_ci)
+    monkeypatch.setattr(merge_pr, "run", submit)
+    monkeypatch.setattr(merge_pr, "finalize_queued", lambda *_a: {"merged": True})
+    if mutation == "stable":
+        assert merge_pr.merge(10, HEAD)["merged"] is True
+        assert commands == [[
+            "gh", "pr", "merge", "10", *([] if configured else ["--merge"]),
+            "--delete-branch", "--match-head-commit", HEAD,
+        ]]
+        assert events[-4:] == ["pr", "issue", "queue", "pr"]
+    else:
+        error = None
+        try:
+            merge_pr.merge(10, HEAD)
+        except merge_pr.KernelError as exc:
+            error = exc
+        assert commands == [], f"stale command submitted: {commands}"
+        assert error is not None
+    assert events.count("ci") == 2
+    assert events.count("issue") == 3
+    assert events.count("queue") == 3

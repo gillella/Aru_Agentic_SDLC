@@ -695,6 +695,11 @@ def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str
         raise KernelError("PR authorization changed before merge submission")
     if issue_gate(issue_numbers, gates["changed_paths"]) != gates["issues"]:
         raise KernelError("issue authorization changed before merge submission")
+    final_queue = merge_queue_snapshot(number, expected_head, str(gates["base_sha"]))
+    if (final_queue["configured"], final_queue["entry"], final_queue["auto_merge"]) != (
+        gates["merge_queue"], gates["queue_entry"], gates["auto_merge"],
+    ):
+        raise KernelError("merge queue or pending request changed before merge submission")
     run(command)
     merged = pull_request(number)
     if merged.get("headRefOid") != expected_head:

@@ -669,3 +669,54 @@ def test_final_hook_semantic_authorization(monkeypatch, final_body, refused):
     else:
         assert HOOK.check_pull_request(9, "a" * 40) == ([], 12, "a" * 40)
     assert sum(call[:3] == ["gh", "pr", "view"] for call in reads) == 2
+
+
+@pytest.mark.parametrize("mutation,refused", [
+    ("excluded", True), ("expanded", True), ("missing", True),
+    ("duplicate", True), ("unsafe", True), ("unreadable", True),
+    ("prose", False), ("format-order", False), ("stable", False),
+])
+def test_final_hook_issue_scope_reread(monkeypatch, mutation, refused):
+    import json
+
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("external call"))
+    events = []
+    body = "touches: scripts/a.py, docs/**"
+
+    def read(argv):
+        nonlocal body
+        if argv[:3] == ["gh", "pr", "view"]:
+            events.append("pr")
+            if events.count("pr") == 2:
+                body = {
+                    "excluded": "touches: other.py",
+                    "expanded": "touches: scripts/**, docs/**",
+                    "missing": "No scope",
+                    "duplicate": body + "\ntouches: other.py",
+                    "unsafe": "touches: ../outside",
+                    "prose": body + "\n\n## Evidence\nMore detail.",
+                    "format-order": "### touches:\n\ndocs/**, scripts/a.py\n",
+                }.get(mutation, body)
+            return json.dumps(dict(number=9, state="OPEN", isDraft=False,
+                                   headRefOid="a" * 40, body="Closes #12"))
+        if argv[:3] == ["gh", "repo", "view"]:
+            return '{"nameWithOwner":"owner/repo"}'
+        if argv[:2] == ["gh", "api"]:
+            events.append("files")
+            assert argv[-1] == "repos/owner/repo/pulls/9/files?per_page=100"
+            return '[[{"filename":"scripts/a.py"}]]'
+        assert argv[:4] == ["gh", "issue", "view", "12"]
+        events.append("issue")
+        if mutation == "unreadable" and events.count("issue") == 2:
+            raise HOOK.Refusal("issue is unavailable")
+        return json.dumps(dict(state="OPEN", body=body, labels=[
+            {"name": "status:in-review"}, {"name": "agent:codex-1"},
+        ]))
+
+    monkeypatch.setattr(HOOK, "run", read)
+    if refused:
+        with pytest.raises(HOOK.Refusal):
+            HOOK.check_pull_request(9, "a" * 40)
+    else:
+        assert HOOK.check_pull_request(9, "a" * 40) == ([], 12, "a" * 40)
+    assert events == ["pr", "files", "issue", "pr", "issue"]
