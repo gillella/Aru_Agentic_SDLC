@@ -119,6 +119,7 @@ class Fixture:
         self.controller = Controller(
             self.config,
             adapter_factory=lambda *args: self.adapters[args[-1]],
+            availability=lambda *_: {"available": True},
             sync_reviews=lambda *_: {},
         )
 
@@ -153,7 +154,7 @@ def test_handoff_fails_closed_when_target_is_backlog_or_route_missing(tmp_path):
     fixture = Fixture(tmp_path, target_status="Backlog")
     result = fixture.controller.handoff(ORIGIN, 9)
     assert result["accepted"] is False
-    assert "explicit triage" in result["target"]["blockers"][0]
+    assert any("explicit triage" in blocker for blocker in result["target"]["blockers"])
     missing = Fixture(tmp_path / "missing", route=False)
     with pytest.raises(DriverError, match="explicit route"):
         missing.controller.handoff(ORIGIN, 9)

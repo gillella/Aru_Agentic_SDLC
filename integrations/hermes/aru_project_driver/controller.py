@@ -376,8 +376,17 @@ class Controller:
             blockers.append(f"target issue is {record.get('status') or 'untracked'}")
         if record.get("status") == "Ready":
             blockers.extend(target_adapter.blocked(snapshot, status="Ready").get(str(issue_number), []))
-        else:
-            blockers.append("target issue requires explicit triage before dispatch")
+        elif record.get("status") == "Backlog":
+            if self.config.project(target).get("auto_triage", False):
+                blockers.extend(target_adapter.blocked(snapshot, status="Backlog").get(str(issue_number), []))
+            else:
+                blockers.append("target issue requires explicit triage before dispatch")
+        try:
+            free_lanes, blocked_lanes = self._lane_observations(target, snapshot)
+        except DriverError as exc:
+            free_lanes, blocked_lanes = [], {"target": {"available": False, "reason": str(exc)}}
+        if not free_lanes:
+            blockers.append("target has no currently available coding lane")
         return {
             "repo": target,
             "issue": issue_number,
@@ -385,6 +394,8 @@ class Controller:
             "priority": record.get("priority"),
             "touches": record.get("touches", []),
             "enabled": enabled,
+            "free_lanes": free_lanes,
+            "blocked_lanes": blocked_lanes,
             "blockers": sorted(set(blockers)),
             "snapshot_at": snapshot.get("observed_at"),
         }
