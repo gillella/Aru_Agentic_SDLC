@@ -130,6 +130,7 @@ def test_issue_gate_checks_actual_paths_with_canonical_touches_parser(monkeypatc
         {
             "issue": 7,
             "criteria": 1,
+            "acceptance": [{"done": True, "text": "exact behavior is verified"}],
             "touches": ["src/example.py", "tests/**"],
             "claimant": "codex-1",
         }
@@ -207,13 +208,16 @@ def test_merge_queue_snapshot_is_bound_to_exact_head(monkeypatch):
 
 
 def test_merge_submits_to_configured_queue_without_merge_strategy(monkeypatch):
+    install_low_risk_gate(monkeypatch)
     monkeypatch.setattr(
         merge_pr,
         "evaluate",
         lambda *_args: {
             "head": HEAD,
             "base_sha": BASE,
-            "issues": [{"issue": 7}],
+            "base": "main",
+            "changed_paths": ["src/example.py"],
+            "issues": [{"issue": 7, "criteria": 1}],
             "merge_queue": True,
             "queue_entry": None,
             "auto_merge": None,
@@ -383,3 +387,106 @@ def test_close_out_rechecks_contract_after_other_post_merge_network_calls(monkey
             {"allow_closed": True, "allow_done": True},
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    "mutation,refused",
+    [
+        ("linked-issue", True), ("missing-link", True), ("duplicate-link", True),
+        ("touches-excluded", True), ("touches-expanded", True),
+        ("acceptance-unchecked", True), ("acceptance-text", True),
+        ("claimant", True), ("closed-issue", True), ("lifecycle", True),
+        ("head", True), ("base", True), ("draft", True),
+        ("unreadable-pr", True), ("unreadable-issue", True),
+        ("pr-description", False), ("issue-description", False), ("closing-verb", False),
+    ],
+)
+@pytest.mark.parametrize("during_ci_read", [1, 2])
+def test_semantic_drift_never_reaches_merge_command(
+    monkeypatch, mutation, refused, during_ci_read
+):
+    import subprocess
+    from copy import deepcopy
+
+    # Run real merge/evaluate/issue_gate. Only external reads and the command
+    # boundary are fakes; any accidental subprocess (including GitHub) fails.
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("external call"))
+    pr = ready_pr()
+    record = issue_record("src/example.py")
+    events, commands = [], []
+
+    def read_pr(_number):
+        events.append("pr")
+        if mutation == "unreadable-pr" and events.count("ci") >= during_ci_read:
+            raise merge_pr.KernelError("PR is unavailable")
+        return deepcopy(pr)
+
+    def read_issue(number):
+        events.append("issue")
+        if mutation == "unreadable-issue" and events.count("ci") >= during_ci_read:
+            raise merge_pr.KernelError("issue is unavailable")
+        return deepcopy(record if number == 7 else issue_record("other.py"))
+
+    def read_ci(_number):
+        events.append("ci")
+        if events.count("ci") == during_ci_read:
+            if mutation in {"linked-issue", "missing-link", "duplicate-link"}:
+                pr["body"] = {
+                    "linked-issue": "Closes #999", "missing-link": "No directive",
+                    "duplicate-link": "Closes #7\nCloses #7",
+                }[mutation]
+            elif mutation.startswith("touches-"):
+                replacement = "other.py" if mutation == "touches-excluded" else "src/**"
+                record["body"] = record["body"].replace("src/example.py", replacement)
+            elif mutation == "acceptance-unchecked":
+                record["body"] = record["body"].replace("[x]", "[ ]")
+            elif mutation == "acceptance-text":
+                record["body"] = record["body"].replace("exact behavior", "different behavior")
+            elif mutation == "claimant":
+                record["labels"][1]["name"] = "agent:other-writer"
+            elif mutation == "closed-issue":
+                record["state"] = "CLOSED"
+            elif mutation == "lifecycle":
+                record["labels"][0]["name"] = "status:in-progress"
+            elif mutation in {"head", "base"}:
+                pr["headRefOid" if mutation == "head" else "baseRefOid"] = "c" * 40
+            elif mutation == "draft":
+                pr["isDraft"] = True
+            elif mutation == "pr-description":
+                pr["body"] += "\n\n## Evidence\nMore test details."
+            elif mutation == "issue-description":
+                record["body"] += "\n## Evidence\nMore test details."
+            elif mutation == "closing-verb":
+                pr["body"] = "Fixes #7"
+        return {"head": HEAD, "state": "success", "checks": ["aru-governed-pr"]}
+
+    def submit(argv):
+        assert events[-2:] == ["pr", "issue"]
+        commands.append(argv)
+        pr.update(state="MERGED", mergedAt="2026-09-05T12:00:00Z")
+
+    monkeypatch.setattr(merge_pr, "pull_request", read_pr)
+    monkeypatch.setattr(merge_state, "issue", read_issue)
+    monkeypatch.setattr(merge_pr, "pull_changed_paths", lambda _n: ["src/example.py"])
+    monkeypatch.setattr(merge_pr, "ci_verdict", read_ci)
+    monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _n: [])
+    monkeypatch.setattr(
+        merge_pr, "merge_queue_snapshot",
+        lambda *_a: {"configured": False, "entry": None, "auto_merge": None},
+    )
+    monkeypatch.setattr(merge_pr, "run", submit)
+    monkeypatch.setattr(merge_pr, "finalize_queued", lambda *_a: {"merged": True})
+    if refused:
+        with pytest.raises(merge_pr.KernelError):
+            merge_pr.merge(10, HEAD)
+        assert commands == []
+    else:
+        assert merge_pr.merge(10, HEAD)["merged"] is True
+        assert commands == [[
+            "gh", "pr", "merge", "10", "--merge", "--delete-branch",
+            "--match-head-commit", HEAD,
+        ]]
+        assert events.count("ci") == 2
+        assert events.count("issue") == 3
+    assert events.count("ci") <= 2
+    assert events.count("issue") <= 3

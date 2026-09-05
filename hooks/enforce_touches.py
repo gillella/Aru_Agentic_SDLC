@@ -168,6 +168,8 @@ def check_pull_request(number: int, expected_head: str | None = None) -> tuple[l
     refreshed = pull_request(number)
     if str(refreshed["headRefOid"]).lower() != head.lower():
         raise Refusal("pull request head changed during file collection")
+    if linked_issue(str(refreshed["body"])) != issue:
+        raise Refusal("pull request closing issue changed during file collection")
     return violations, issue, head
 
 

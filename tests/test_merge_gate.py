@@ -81,7 +81,9 @@ def test_merge_rechecks_head_and_base(monkeypatch):
     gates = {
         "head": "a" * 40,
         "base_sha": "b" * 40,
-        "issues": [{"issue": 7}],
+        "base": "main",
+        "changed_paths": ["scripts/merge_pr.py"],
+        "issues": [{"issue": 7, "criteria": 1}],
         "merge_queue": False,
         "queue_entry": None,
         "auto_merge": None,
@@ -126,6 +128,7 @@ def test_immediate_merge_does_not_close_out_when_post_merge_evidence_drifts(
     pr = install_happy_gate(monkeypatch)
     snapshots = iter(
         [
+            pr,
             pr,
             pr,
             {

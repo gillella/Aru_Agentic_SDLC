@@ -682,6 +682,19 @@ def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str
     if not gates["merge_queue"]:
         command.append("--merge")
     command.extend(["--delete-branch", "--match-head-commit", expected_head])
+    # One bounded semantic reread after CI/review reads, immediately before
+    # submission. Separate GitHub metadata reads and merge remain non-atomic.
+    final_pr = pull_request(number)
+    if (
+        final_pr.get("state") != "OPEN" or final_pr.get("isDraft") is not False
+        or final_pr.get("headRefOid") != expected_head
+        or final_pr.get("baseRefName") != gates["base"]
+        or base_snapshot(final_pr) != gates["base_sha"]
+        or linked_issues(str(final_pr.get("body") or "")) != issue_numbers
+    ):
+        raise KernelError("PR authorization changed before merge submission")
+    if issue_gate(issue_numbers, gates["changed_paths"]) != gates["issues"]:
+        raise KernelError("issue authorization changed before merge submission")
     run(command)
     merged = pull_request(number)
     if merged.get("headRefOid") != expected_head:

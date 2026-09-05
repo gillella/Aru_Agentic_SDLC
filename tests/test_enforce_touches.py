@@ -622,3 +622,50 @@ def test_changed_paths_malformed_nul_evidence_fails_closed(monkeypatch, bad_outp
     monkeypatch.setattr(HOOK, "run", lambda _argv: bad_output)
     with pytest.raises(HOOK.Refusal, match="changed-path evidence is malformed"):
         HOOK.changed_paths("HEAD~1..HEAD")
+
+
+@pytest.mark.parametrize(
+    "final_body,refused",
+    [
+        ("Closes #999", True),
+        ("Evidence only; closing directive removed", True),
+        ("Closes #12\nCloses #12", True),
+        ("Closes #12\nCloses #999", True),
+        ("## Evidence\nUpdated verification details\n\nCloses #12", False),
+        ("Fixes #12", False),
+    ],
+)
+def test_final_hook_semantic_authorization(monkeypatch, final_body, refused):
+    import json
+
+    reads = []
+
+    def fake_github(argv):
+        reads.append(argv)
+        if argv[:3] == ["gh", "pr", "view"]:
+            count = sum(call[:3] == ["gh", "pr", "view"] for call in reads)
+            return json.dumps({
+                "number": 9, "state": "OPEN", "isDraft": False,
+                "headRefOid": "a" * 40,
+                "body": "Closes #12" if count == 1 else final_body,
+            })
+        if argv[:3] == ["gh", "repo", "view"]:
+            return '{"nameWithOwner":"isolated/repo"}'
+        if argv[:4] == ["gh", "api", "--paginate", "--slurp"]:
+            return '[[{"filename":"scripts/a.py"}]]'
+        if argv[:3] == ["gh", "issue", "view"]:
+            return json.dumps({
+                "state": "OPEN",
+                "body": "touches: scripts/a.py" if argv[3] == "12" else "touches: other.py",
+                "labels": [{"name": "agent:writer"}, {"name": "status:in-review"}],
+            })
+        pytest.fail(f"unexpected command: {argv}")
+
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("external call"))
+    monkeypatch.setattr(HOOK, "run", fake_github)
+    if refused:
+        with pytest.raises(HOOK.Refusal, match="closing issue"):
+            HOOK.check_pull_request(9, "a" * 40)
+    else:
+        assert HOOK.check_pull_request(9, "a" * 40) == ([], 12, "a" * 40)
+    assert sum(call[:3] == ["gh", "pr", "view"] for call in reads) == 2
