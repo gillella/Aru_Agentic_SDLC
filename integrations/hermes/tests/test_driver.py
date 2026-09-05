@@ -110,3 +110,12 @@ def test_empty_argument_values_are_preserved_without_shell_evaluation(config):
     config.path.write_text(json.dumps(raw))
     parsed = Config(config.path)
     assert parsed.lanes["agent-one"]["probe_command"][-2:] == ["", "$(not-a-command)"]
+
+
+def test_handoff_command_has_explicit_source_issue_and_proof_mode(config):
+    args = driver.parser().parse_args([
+        "--config", str(config.path), "handoff", "--project", "owner/repo",
+        "--source-issue", "42", "--dependency-event",
+    ])
+    assert args.operation == "handoff"
+    assert args.source_issue == 42 and args.dependency_event is True

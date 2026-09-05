@@ -47,6 +47,20 @@ self-hosted runner, unknown runner/queue evidence, unresolved dependency,
 `needs-human`, `needs-design`, or overlapping write boundary blocks new work.
 Existing work and PR convergence receive attention before new claims.
 
+`handoff_to` is an optional allowlist of other configured projects. It does not
+move a claim or create lifecycle state. A source issue may carry one typed,
+machine-readable marker in its body after the human requirements, for example:
+
+```text
+<!-- aru-driver-dependency:v1 {"target":"owner/consumer","issue":42,"source_pr":17,"conditions":[{"kind":"issue_done","repo":"owner/consumer","issue":42}]} -->
+```
+
+The Driver validates the exact target issue and its Project card, then sends one
+authenticated idempotent wake to the target Driver. The target rereads its own
+kernel authority before dispatch. After every declared condition is proven from
+GitHub, the source can be woken once with `handoff --dependency-event`; missing
+routes, stale heads, unfinished issues and unavailable authority fail closed.
+
 `auto_triage` is an explicit boolean and defaults to `false`. Set it to `true`
 only when the project's existing Backlog is authorized for automatic promotion.
 The Driver promotes one eligible issue at a time through the canonical helper
@@ -142,9 +156,12 @@ configuration path for every command. For example:
 | `reconcile --project OWNER/REPO` | Resume managed work, promote if explicitly enabled, claim and launch eligible writers; return PR actions for Hermes |
 | `event --project OWNER/REPO --event-id ID --reason event` | Deduplicate a trusted event receipt and request a native immediate wake |
 | Same event command with `--inline` | Return whether the current authenticated event turn should reconcile, avoiding another scheduled turn |
+| `handoff --project OWNER/REPO --source-issue N` | Validate the source issue's typed dependency contract and wake its configured target once |
+| `handoff --project OWNER/REPO --source-issue N --dependency-event` | Prove every declared GitHub condition and wake the source once when all are satisfied |
 
 `_worker` is an internal supervised-worker entrypoint, not an operator command.
-There is no handoff or review-dispatch subcommand in this interface.
+Review dispatch remains owned by the canonical kernel and configured providers;
+the handoff commands only coordinate bounded cross-project wakeups.
 
 Stop preserves live writers, their claims, worktrees and PRs. It does not kill
 processes, free their accounts prematurely, or cancel unrelated jobs. On

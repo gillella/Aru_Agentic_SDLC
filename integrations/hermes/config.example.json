@@ -11,7 +11,8 @@
       "max_workers": 2,
       "max_review_backlog": 4,
       "auto_triage": false,
-      "webhook_subscriptions": []
+      "webhook_subscriptions": [],
+      "handoff_to": []
     }
   },
   "lanes": {

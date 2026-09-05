@@ -37,7 +37,7 @@ def surface_budget_violations(production_total: int, test_total: int, max_file: 
 
 
 def test_hard_surface_budgets():
-    tracked = tracked_paths()
+    tracked = [path for path in tracked_paths() if not path.is_relative_to(ROOT / "integrations")]
     production = [
         path
         for path in tracked
@@ -172,9 +172,22 @@ def test_wrong_layer_surfaces_are_absent():
 
 
 def test_one_state_authority_no_tracked_runtime_ledgers():
+    # A static install template contains no execution or lifecycle state.
+    example = ROOT / "integrations/hermes/config.example.json"
     tracked_state = [
         path
         for path in tracked_paths()
-        if path.suffix in {".json", ".db", ".sqlite"}
+        if path.suffix in {".json", ".db", ".sqlite"} and path != example
     ]
     assert tracked_state == []
+
+
+def test_external_driver_is_separately_bounded_and_has_no_tracked_state():
+    adapter = ROOT / "integrations/hermes"
+    paths = [path for path in tracked_paths() if path.is_relative_to(adapter)]
+    source = [p for p in paths if p.suffix == ".py" and p.parent.name != "tests"]
+    tests = [p for p in paths if p.suffix == ".py" and p.parent.name == "tests"]
+    assert sum(lines(p) for p in source) <= 6000
+    assert sum(lines(p) for p in tests) <= 6000
+    assert all(lines(p) <= FILE_LINE_BUDGET for p in source + tests)
+    assert not any(p.name in {"binding.json", "jobs.json", "coordination.lock"} for p in paths)

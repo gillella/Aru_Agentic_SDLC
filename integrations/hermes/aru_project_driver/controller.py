@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import execution, scheduler
 from .config import Config, DriverError
+from . import handoff_contract
 from .kernel import KernelAdapter, KernelAdapterError
 from .state import State, write_json
 
@@ -346,3 +347,112 @@ class Controller:
                         hermes_repo=self.config.hermes_repo,
                     )
         return {"accepted": accepted, "wakeAgent": accepted, "project": repo}
+
+    def _dependency_contract(self, repo: str, source_issue: int) -> tuple[dict, dict]:
+        summary = self.adapter(repo).issue_summary(source_issue)
+        if summary["state"] != "OPEN" or summary["status"] not in ACTIVE:
+            raise DriverError("dependency source issue must be open and active")
+        contract = handoff_contract.parse(summary["body"], repo)
+        if contract is None:
+            raise DriverError("source issue has no typed Driver dependency contract")
+        return contract, summary
+
+    def _target_readiness(self, target: str, issue_number: int) -> dict:
+        target_adapter = self.adapter(target)
+        snapshot = target_adapter.snapshot()
+        matches = [record for record in snapshot["issues"] if record["number"] == issue_number]
+        if len(matches) != 1:
+            raise DriverError("target dependency issue is absent from the complete snapshot")
+        record = matches[0]
+        blockers = list(record.get("errors", []))
+        enabled = self.state.project(target).get("enabled") is True
+        if not enabled:
+            blockers.append("target Driver is stopped")
+        if record.get("agents"):
+            blockers.append("target issue already has an agent claim")
+        if record.get("state") != "OPEN":
+            blockers.append("target issue is not open")
+        if record.get("status") not in {"Backlog", "Ready"}:
+            blockers.append(f"target issue is {record.get('status') or 'untracked'}")
+        if record.get("status") == "Ready":
+            blockers.extend(target_adapter.blocked(snapshot, status="Ready").get(str(issue_number), []))
+        else:
+            blockers.append("target issue requires explicit triage before dispatch")
+        return {
+            "repo": target,
+            "issue": issue_number,
+            "status": record.get("status"),
+            "priority": record.get("priority"),
+            "touches": record.get("touches", []),
+            "enabled": enabled,
+            "blockers": sorted(set(blockers)),
+            "snapshot_at": snapshot.get("observed_at"),
+        }
+
+    def handoff(self, repo: str, source_issue: int) -> dict:
+        """Validate and deliver one authenticated, idempotent cross-project wake."""
+        self.config.project(repo)
+        contract, summary = self._dependency_contract(repo, source_issue)
+        target = contract["target"]
+        if target not in self.config.project(repo).get("handoff_to", []):
+            raise DriverError("source project has no explicit route to the dependency target")
+        readiness = self._target_readiness(target, contract["issue"])
+        digest = handoff_contract.digest(contract)
+        if readiness["blockers"]:
+            return {
+                "accepted": False,
+                "delivered": False,
+                "project": repo,
+                "source_issue": source_issue,
+                "source_url": summary["url"],
+                "target": readiness,
+                "contract_digest": digest,
+            }
+        event_id = f"handoff:{repo}:{source_issue}:{digest}"
+        delivered = self.event(target, event_id, "dependency handoff")
+        return {
+            "accepted": True,
+            "delivered": delivered["accepted"],
+            "duplicate": not delivered["accepted"],
+            "wakeAgent": delivered["wakeAgent"],
+            "project": repo,
+            "source_issue": source_issue,
+            "source_url": summary["url"],
+            "target": readiness,
+            "contract_digest": digest,
+        }
+
+    def dependency_event(self, repo: str, source_issue: int) -> dict:
+        """Wake the origin only after every typed dependency proof is satisfied."""
+        self.config.project(repo)
+        contract, summary = self._dependency_contract(repo, source_issue)
+        proofs = []
+        for condition in contract["conditions"]:
+            bridge = self.adapter(condition["repo"])
+            try:
+                proof = bridge.dependency_evidence(condition)
+            except (KernelAdapterError, ValueError) as exc:
+                proof = {"satisfied": False, "reason": str(exc)}
+            proofs.append({"condition": condition, "proof": proof})
+        unsatisfied = [item for item in proofs if item["proof"].get("satisfied") is not True]
+        digest = handoff_contract.digest(contract)
+        if unsatisfied:
+            return {
+                "accepted": False,
+                "wakeAgent": False,
+                "project": repo,
+                "source_issue": source_issue,
+                "source_url": summary["url"],
+                "contract_digest": digest,
+                "proofs": proofs,
+                "blockers": [item["proof"].get("reason", "dependency condition is not satisfied")
+                             for item in unsatisfied],
+            }
+        result = self.event(repo, f"dependency:{digest}", "dependency satisfied")
+        return {
+            **result,
+            "source_issue": source_issue,
+            "source_url": summary["url"],
+            "contract_digest": digest,
+            "proofs": proofs,
+        }

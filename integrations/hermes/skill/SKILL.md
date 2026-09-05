@@ -119,6 +119,15 @@ After completing returned convergence actions, one fresh bounded reconcile
 may refill newly freed capacity. If no action is available, return; the
 heartbeat and genuine events own future continuation.
 
+For a cross-project dependency, use `handoff --source-issue N` only when the
+source issue contains the single `aru-driver-dependency:v1` marker and its
+configured `handoff_to` route names the target. The command returns the target
+issue, Project status, claim and boundary blockers, and an idempotent delivery
+receipt. Use `--dependency-event` from the source project to reread every
+declared GitHub proof and wake the source only when all conditions are true.
+Never treat a handoff marker as permission to claim, close, merge or deploy;
+the receiving Driver still performs its own full reconciliation.
+
 See [references/runtime-contract.md](references/runtime-contract.md) when
 installing, checking event delivery, or diagnosing a stalled Loop.
 

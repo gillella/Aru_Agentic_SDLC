@@ -97,6 +97,11 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--reason", choices=("event", "worker", "review", "operator"), default="event")
             command.add_argument("--inline", action="store_true",
                                  help="caller already has a Hermes activation; do not queue another")
+    handoff = sub.add_parser("handoff", help="validate and deliver a typed dependency handoff")
+    handoff.add_argument("--project", required=True, help="source configured owner/repository")
+    handoff.add_argument("--source-issue", required=True, type=int)
+    handoff.add_argument("--dependency-event", action="store_true",
+                         help="prove the contract and wake the source project when satisfied")
     worker = sub.add_parser("_worker", help=argparse.SUPPRESS)
     worker.add_argument("--worker-id", required=True)
     worker.add_argument("--capacity-fd", type=int, required=True)
@@ -112,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
         controller = Controller(config)
         if args.operation == "event":
             result = controller.event(args.project, args.event_id, args.reason, inline=args.inline)
+        elif args.operation == "handoff":
+            result = (controller.dependency_event(args.project, args.source_issue)
+                      if args.dependency_event
+                      else controller.handoff(args.project, args.source_issue))
         elif args.operation in {"tick", "reconcile"}:
             result = getattr(controller, args.operation)(args.project)
         else:

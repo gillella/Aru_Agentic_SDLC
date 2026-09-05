@@ -171,6 +171,12 @@ class KernelAdapter:
     def reviewer_status(self) -> dict:
         return self._invoke("reviewer_status")
 
+    def issue_summary(self, number: int) -> dict:
+        return self._invoke("issue_summary", number=number)
+
+    def dependency_evidence(self, request: dict) -> dict:
+        return self._invoke("dependency_evidence", request=request)
+
 
 class _Bridge:
     """One invocation, one repository, no persistent module/global state."""
@@ -446,7 +452,16 @@ class _Bridge:
             raise KernelAdapterError(f"issue #{number}: " + "; ".join(sorted(set(errors))))
         return record
 
+    def _handoff_operation(self, operation: str, payload: dict) -> Any:
+        # The bridge is executed as a file, with this directory on sys.path.
+        import handoff_evidence
+        if operation == "issue_summary":
+            return handoff_evidence.issue_summary(self, payload["number"])
+        return handoff_evidence.evidence(self, payload["request"])
+
     def dispatch(self, operation: str, payload: dict) -> Any:
+        if operation in {"issue_summary", "dependency_evidence"}:
+            return self._handoff_operation(operation, payload)
         if operation == "snapshot":
             return self.snapshot()
         if operation == "next_work":

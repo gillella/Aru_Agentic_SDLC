@@ -84,6 +84,13 @@ class Config:
             not isinstance(route, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", route) for route in routes
         ):
             raise DriverError("webhook_subscriptions must name native subscription identifiers")
+        handoff_to = project.get("handoff_to", [])
+        if (not isinstance(handoff_to, list)
+                or any(not isinstance(target, str) for target in handoff_to)
+                or len(handoff_to) != len(set(handoff_to))
+                or any(target not in self.projects for target in handoff_to)
+                or repo in handoff_to):
+            raise DriverError("handoff_to must name distinct configured projects other than itself")
 
     def _lane(self, identity: str, lane: dict) -> None:
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,62}", identity):
