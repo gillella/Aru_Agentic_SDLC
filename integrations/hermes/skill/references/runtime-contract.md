@@ -39,11 +39,15 @@ types, but normally creates an independent session for each delivery. Its
 in-memory delivery cache alone does not coordinate a heartbeat with an event
 or survive a restart. Managed subscription prompts emit the typed
 `ARU_PROJECT_DRIVER_AUTHENTICATED_EVENT_V1` trigger. Their fixed Python snippet
-reads `HERMES_SESSION_PLATFORM`, `HERMES_SESSION_CHAT_ID`, and
-`HERMES_SESSION_MESSAGE_ID`, injected by the native gateway into local terminal
-subprocesses. It requires the configured route, validates the bounded delivery
-identifier, and invokes the fixed Driver/config/project argument array without
-using a shell or substituting any payload text.
+reads `HERMES_SESSION_PLATFORM` and `HERMES_SESSION_CHAT_ID`, injected by the
+native gateway into local terminal subprocesses. The gateway creates the
+`webhook:ROUTE:DELIVERY` chat binding only after authenticating the request.
+The snippet requires the configured route and validates the bounded delivery
+identifier from that binding. If `HERMES_SESSION_MESSAGE_ID` is also exported,
+it must agree; some supported runtimes omit this separate terminal export.
+The snippet invokes the fixed Driver/config/project argument array without
+using a shell or substituting any payload text. Missing or malformed native
+bindings and contradictory identifiers fail before any Driver call.
 
 That snippet first runs `event --inline --event-id DELIVERY --reason event`.
 Only a receipt with `wakeAgent:true` permits its immediate `reconcile` call;
