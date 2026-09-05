@@ -247,6 +247,17 @@ def test_stale_source_blocks_delivery_and_return(tmp_path, monkeypatch, pr):
             action(ORIGIN, 9)
 
 
+def test_dependency_revoked_during_final_source_read_prevents_return(tmp_path, monkeypatch):
+    fixture = Fixture(tmp_path)
+    answers = iter([True, False])
+    fixture.adapters[TARGET].dependency_evidence = lambda _: {"satisfied": next(answers)}
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: pytest.fail("revoked wake"))
+    result = fixture.controller.dependency_event(ORIGIN, 9)
+    assert not result["accepted"] and not result["wakeAgent"]
+    assert result["blockers"] == ["dependency proof changed before return delivery"]
+    assert fixture.state.project(ORIGIN)["events"] == []
+
+
 def test_source_head_advanced_during_target_validation_prevents_delivery(tmp_path, monkeypatch):
     fixture = Fixture(tmp_path)
     heads = iter([HEAD, "b" * 40])

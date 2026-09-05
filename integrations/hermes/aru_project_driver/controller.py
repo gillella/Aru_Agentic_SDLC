@@ -502,6 +502,11 @@ class Controller:
         fresh, _ = self._dependency_contract(repo, source_issue)
         if fresh != contract:
             raise DriverError("dependency contract changed during proof collection")
+        proofs = dependencies.proofs(self, fresh)
+        if any(item["proof"].get("satisfied") is not True for item in proofs):
+            return {"accepted": False, "wakeAgent": False, "project": repo,
+                    "source_issue": source_issue, "contract_digest": digest, "proofs": proofs,
+                    "blockers": ["dependency proof changed before return delivery"]}
         result = self._event_locked(repo, f"dependency:{repo}:{source_issue}:{digest}", "dependency satisfied")
         return {
             **result,

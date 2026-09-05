@@ -5,7 +5,9 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
+import re
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -44,6 +46,33 @@ def read_json(path: Path, default: dict | None = None) -> dict:
     return data
 
 
+def _timestamp(value: object) -> bool:
+    return type(value) in {int, float} and math.isfinite(value) and value >= 0
+
+
+def _validate_project(data: dict) -> None:
+    if type(data.get("generation")) is not int or data["generation"] < 0:
+        raise DriverError("operational project generation is invalid")
+    events = data.get("events")
+    if not isinstance(events, list) or len(events) > 256:
+        raise DriverError("operational project events are invalid")
+    keys = set()
+    for event in events:
+        if (not isinstance(event, dict) or not isinstance(event.get("key"), str)
+                or not re.fullmatch(r"[a-f0-9]{24}", event["key"])
+                or event["key"] in keys or not isinstance(event.get("reason"), str)
+                or len(event["reason"]) > 120 or not _timestamp(event.get("observed_at"))):
+            raise DriverError("operational project event entry is invalid")
+        keys.add(event["key"])
+    for field in ("cooldown_until", "wake_pending_until", "last_checked_at", "last_reconciled_at",
+                  "started_at", "stopped_at"):
+        if field in data and not _timestamp(data[field]):
+            raise DriverError(f"operational project {field} is invalid")
+    handled = data.get("handled_generation", 0)
+    if type(handled) is not int or not 0 <= handled <= data["generation"]:
+        raise DriverError("operational project handled_generation is invalid")
+
+
 class State:
     def __init__(self, root: Path):
         self.root = root
@@ -71,6 +100,7 @@ class State:
         })
         if result.get("repo") != repo or type(result.get("enabled")) is not bool:
             raise DriverError("project operational identity is invalid")
+        _validate_project(result)
         return result
 
     def save(self, repo: str, data: dict) -> None:

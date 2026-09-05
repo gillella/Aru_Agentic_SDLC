@@ -89,6 +89,21 @@ def test_repository_identity_cannot_be_rebound_by_state_file(state):
         state.project("owner/one")
 
 
+@pytest.mark.parametrize("field,value", [
+    ("generation", "1"), ("generation", True), ("generation", -1),
+    ("events", {}), ("events", [{}]), ("events", [None]),
+    ("events", [{"key": "a" * 24, "reason": "event", "observed_at": "now"}]),
+    ("cooldown_until", "later"), ("wake_pending_until", float("nan")),
+    ("handled_generation", 1),
+])
+def test_malformed_project_schema_fails_with_bounded_error(state, field, value):
+    data = state.project("owner/one")
+    data[field] = value
+    write_json(state.project_path("owner/one"), data)
+    with pytest.raises(DriverError, match="operational project"):
+        state.has_event("owner/one", "delivery")
+
+
 def test_coordination_lock_excludes_an_independent_process_and_releases_on_error(state):
     script = (
         "import fcntl,sys\n"

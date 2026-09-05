@@ -60,6 +60,9 @@ authenticated idempotent wake to the target Driver. The target rereads its own
 kernel authority before dispatch. After every declared condition is proven from
 GitHub, the source can be woken once with `handoff --dependency-event`; missing
 routes, stale heads, unfinished issues and unavailable authority fail closed.
+Every declared proof is reread immediately before a dependency-return wake is
+scheduled. Separate GitHub reads and scheduler writes are not atomic; the
+receiving activation must still revalidate its own live gates before acting.
 
 `auto_triage` is an explicit boolean and defaults to `false`. Set it to `true`
 only when the project's existing Backlog is authorized for automatic promotion.
