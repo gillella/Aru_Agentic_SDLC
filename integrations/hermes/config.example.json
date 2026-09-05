@@ -18,6 +18,7 @@
   "lanes": {
     "codex-primary": {
       "family": "openai-codex",
+      "execution_timeout_seconds": 3600,
       "capacity_key": "openai-subscription-primary",
       "projects": ["example/project"],
       "command": [
@@ -52,6 +53,7 @@
     },
     "claude-primary": {
       "family": "claude-code",
+      "execution_timeout_seconds": 3600,
       "capacity_key": "claude-subscription-primary",
       "projects": ["example/project"],
       "command": [

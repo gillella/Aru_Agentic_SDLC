@@ -58,6 +58,14 @@ An online but busy CI runner can accept later verification through the bounded
 queue. It does not need to be idle before coding starts; the queue and review
 backlog limits prevent unlimited work from accumulating behind it.
 
+Each lane has an `execution_timeout_seconds` limit (default 3,600; allowed
+1–86,400). On expiry, the supervisor terminates the agent's isolated process
+group, escalates to a forced stop after five seconds, and records exit code 124
+before requesting recovery. The existing claim and worktree are preserved.
+Commands must keep their children in that process group; detached background
+workers are unsupported. An inherited capacity lock held by a surviving process
+continues to block reuse until it exits.
+
 `handoff_to` is an optional allowlist of other configured projects. It does not
 move a claim or create lifecycle state. A source issue may carry one typed,
 machine-readable marker in its body after the human requirements, for example:

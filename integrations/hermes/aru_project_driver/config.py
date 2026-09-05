@@ -130,6 +130,9 @@ class Config:
             raise DriverError(f"{identity}: command must contain exactly one {{prompt}}")
         command(lane.get("capacity_command"), "capacity_command")
         command(lane.get("probe_command"), "probe_command")
+        timeout = lane.get("execution_timeout_seconds", 3600)
+        if type(timeout) is not int or not 1 <= timeout <= 86400:
+            raise DriverError(f"{identity}: execution_timeout_seconds must be between 1 and 86400")
         allowed = lane.get("projects")
         if not isinstance(allowed, list) or not allowed or any(
             not isinstance(repo, str) or repo not in self.projects for repo in allowed

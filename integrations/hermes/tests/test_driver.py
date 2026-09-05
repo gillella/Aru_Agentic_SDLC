@@ -139,6 +139,15 @@ def test_empty_argument_values_are_preserved_without_shell_evaluation(config):
     assert parsed.lanes["agent-one"]["probe_command"][-2:] == ["", "$(not-a-command)"]
 
 
+@pytest.mark.parametrize("timeout", [0, -1, 86401, True, 1.5, "60", None])
+def test_execution_deadline_requires_a_bounded_positive_integer(config, timeout):
+    raw = json.loads(config.path.read_text())
+    raw["lanes"]["agent-one"]["execution_timeout_seconds"] = timeout
+    config.path.write_text(json.dumps(raw))
+    with pytest.raises(DriverError, match="execution_timeout_seconds"):
+        Config(config.path)
+
+
 def test_handoff_command_has_explicit_source_issue_and_proof_mode(config):
     args = driver.parser().parse_args([
         "--config", str(config.path), "handoff", "--project", "owner/repo",

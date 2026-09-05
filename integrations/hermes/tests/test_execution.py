@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import signal
 from pathlib import Path
 import sys
 import time
@@ -199,7 +200,7 @@ def test_stop_before_execution_keeps_receipt_and_does_not_schedule(setup, monkey
 def test_worker_finishing_after_stop_does_not_recreate_a_wake(setup, monkeypatch):
     config, state, worktree = setup
     descriptor, record = reserve_worker(config, state, worktree)
-    def finish_after_stop():
+    def finish_after_stop(*, timeout):
         project = state.project("owner/repo")
         project["enabled"] = False
         state.save("owner/repo", project)
@@ -260,7 +261,9 @@ def test_real_detached_worker_holds_account_lock_and_keeps_failed_wake_receipt(s
     launched = execution.launch(config, "owner/repo", "model-one", 1, str(worktree))
     try:
         wait_until(entered.exists)
-        assert int(entered.read_text()) == launched["pid"]
+        receipt = state.worker(launched["id"])
+        assert int(entered.read_text()) == receipt["child_pid"]
+        assert receipt["child_pid"] != launched["pid"]
         assert state.capacity_busy("same-subscription") is True
         assert execution.availability(config, "owner/repo", "model-two", state)["available"] is False
         with pytest.raises(DriverError, match="reserved by another worker"):
@@ -310,3 +313,49 @@ def test_other_project_holder_does_not_count_or_revive_a_stale_local_receipt(set
     assert resumes == []
     assert len(actions) == 1 and actions[0]["type"] == "merge"
     assert actions[0]["issue"] == 1
+
+
+@pytest.mark.parametrize("leader_ignores_term", [False, True])
+def test_hung_agent_and_descendant_timeout_preserves_work_and_releases_lane(
+    setup, monkeypatch, leader_ignores_term,
+):
+    config, state, worktree = setup
+    partial = worktree / "partial-work"
+    partial.write_text("preserve me")
+    raw = json.loads(config.path.read_text())
+    raw["lanes"]["model-one"]["execution_timeout_seconds"] = 1
+    raw["lanes"]["model-one"]["command"] = [
+        sys.executable, "-c",
+        "import os,signal,time\n"
+        "child = os.fork()\n"
+        f"if child == 0 or {leader_ignores_term!r}: signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "while True: time.sleep(.02)\n", "{prompt}",
+    ]
+    config.path.write_text(json.dumps(raw))
+    config = Config(config.path)
+    descriptor, original = reserve_worker(config, state, worktree)
+    monkeypatch.setattr(execution, "TERMINATION_GRACE_SECONDS", .2)
+    wakes = []
+    def completed(*args, **kwargs):
+        receipt = state.worker(original["id"])
+        assert receipt["state"] == "exited" and receipt["exit_code"] == 124
+        assert "exceeded 1 seconds" in receipt["reason"]
+        wakes.append(kwargs["event_key"])
+    monkeypatch.setattr(scheduler, "schedule_wake", completed)
+    started = time.monotonic()
+    try:
+        assert execution.worker_main(config, original["id"], descriptor) == 124
+        wait_until(lambda: not state.capacity_busy("same-subscription"))
+        assert time.monotonic() - started < 5
+        receipt = state.worker(original["id"])
+        assert receipt["issue"] == original["issue"] and receipt["agent"] == original["agent"]
+        assert partial.read_text() == "preserve me"
+        assert wakes == [original["id"]]
+        assert execution.availability(config, "owner/repo", "model-two", state)["available"] is True
+    finally:
+        pid = state.worker(original["id"]).get("child_pid")
+        if pid is not None:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass

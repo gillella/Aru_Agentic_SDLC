@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -14,6 +15,23 @@ from pathlib import Path
 
 from .config import Config, DriverError
 from .state import State, key, read_json, write_json
+
+TERMINATION_GRACE_SECONDS = 5
+
+
+def stop_process_group(process: subprocess.Popen) -> None:
+    """Stop the isolated agent group, including children that ignore SIGTERM."""
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGTERM)
+    try:
+        process.wait(timeout=TERMINATION_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    finally:
+        # The leader may exit while descendants still hold the capacity lock.
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    process.wait(timeout=TERMINATION_GRACE_SECONDS)
 
 
 def run_bounded(argv: list[str], cwd: Path, timeout: int = 30) -> subprocess.CompletedProcess:
@@ -163,13 +181,19 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
                 # Operator-owned command array; the prompt remains one literal argument.
                 process = subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
                     argv, cwd=record["worktree"], stdin=subprocess.DEVNULL,
-                    pass_fds=(descriptor,), shell=False,
+                    pass_fds=(descriptor,), shell=False, start_new_session=True,
                 )
                 record["child_pid"] = process.pid
                 write_json(path, record)
         if process is not None:
-            exit_code = process.wait()
-    except (OSError, DriverError) as exc:
+            timeout = lane.get("execution_timeout_seconds", 3600)
+            try:
+                exit_code = process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                exit_code = 124
+                record["reason"] = f"agent execution exceeded {timeout} seconds"
+                stop_process_group(process)
+    except (OSError, DriverError, subprocess.TimeoutExpired) as exc:
         record["reason"] = str(exc) if isinstance(exc, DriverError) else type(exc).__name__
     finally:
         record.update(state="exited", exit_code=exit_code, finished_at=time.time())
