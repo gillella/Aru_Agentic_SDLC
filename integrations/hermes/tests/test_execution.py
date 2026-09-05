@@ -315,9 +315,11 @@ def test_other_project_holder_does_not_count_or_revive_a_stale_local_receipt(set
     assert actions[0]["issue"] == 1
 
 
-@pytest.mark.parametrize("leader_ignores_term", [False, True])
+@pytest.mark.parametrize("leader_ignores_term,child_cleans_up", [
+    (False, False), (True, False), (False, True),
+])
 def test_hung_agent_and_descendant_timeout_preserves_work_and_releases_lane(
-    setup, monkeypatch, leader_ignores_term,
+    setup, monkeypatch, leader_ignores_term, child_cleans_up,
 ):
     config, state, worktree = setup
     partial = worktree / "partial-work"
@@ -326,15 +328,20 @@ def test_hung_agent_and_descendant_timeout_preserves_work_and_releases_lane(
     raw["lanes"]["model-one"]["execution_timeout_seconds"] = 1
     raw["lanes"]["model-one"]["command"] = [
         sys.executable, "-c",
-        "import os,signal,time\n"
+        "import os,signal,time\nfrom pathlib import Path\n"
+        "def cleanup(*args):\n"
+        "    time.sleep(.15)\n"
+        "    Path('child-cleanup').write_text('flushed')\n"
+        "    raise SystemExit(0)\n"
         "child = os.fork()\n"
         f"if child == 0 or {leader_ignores_term!r}: signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"if child == 0 and {child_cleans_up!r}: signal.signal(signal.SIGTERM, cleanup)\n"
         "while True: time.sleep(.02)\n", "{prompt}",
     ]
     config.path.write_text(json.dumps(raw))
     config = Config(config.path)
     descriptor, original = reserve_worker(config, state, worktree)
-    monkeypatch.setattr(execution, "TERMINATION_GRACE_SECONDS", .2)
+    monkeypatch.setattr(execution, "TERMINATION_GRACE_SECONDS", .5)
     wakes = []
     def completed(*args, **kwargs):
         receipt = state.worker(original["id"])
@@ -350,6 +357,8 @@ def test_hung_agent_and_descendant_timeout_preserves_work_and_releases_lane(
         receipt = state.worker(original["id"])
         assert receipt["issue"] == original["issue"] and receipt["agent"] == original["agent"]
         assert partial.read_text() == "preserve me"
+        if child_cleans_up:
+            assert (worktree / "child-cleanup").read_text() == "flushed"
         assert wakes == [original["id"]]
         assert execution.availability(config, "owner/repo", "model-two", state)["available"] is True
     finally:

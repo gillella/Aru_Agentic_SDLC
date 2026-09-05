@@ -23,14 +23,19 @@ def stop_process_group(process: subprocess.Popen) -> None:
     """Stop the isolated agent group, including children that ignore SIGTERM."""
     with suppress(ProcessLookupError):
         os.killpg(process.pid, signal.SIGTERM)
-    try:
-        process.wait(timeout=TERMINATION_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        pass
-    finally:
-        # The leader may exit while descendants still hold the capacity lock.
-        with suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGKILL)
+    deadline = time.monotonic() + TERMINATION_GRACE_SECONDS
+    while True:
+        process.poll()  # Reap the leader without shortening descendant cleanup.
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            break
+        time.sleep(min(.05, remaining))
     process.wait(timeout=TERMINATION_GRACE_SECONDS)
 
 
@@ -194,7 +199,9 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
                 record["reason"] = f"agent execution exceeded {timeout} seconds"
                 stop_process_group(process)
     except (OSError, DriverError, subprocess.TimeoutExpired) as exc:
-        record["reason"] = str(exc) if isinstance(exc, DriverError) else type(exc).__name__
+        record["termination_error" if exit_code == 124 else "reason"] = (
+            str(exc) if isinstance(exc, DriverError) else type(exc).__name__
+        )
     finally:
         record.update(state="exited", exit_code=exit_code, finished_at=time.time())
         try:
