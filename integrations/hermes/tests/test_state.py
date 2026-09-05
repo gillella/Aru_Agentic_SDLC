@@ -72,10 +72,20 @@ def test_stopped_event_has_no_effect_and_recent_event_history_is_bounded(state):
     assert project["generation"] == 260
     assert len(project["events"]) == 256
     assert len(project["events"][-1]["reason"]) <= 120
+    restarted = State(state.root)
+    assert restarted.event("owner/repo", "0", "old delivery retry") is False
+    assert restarted.project("owner/repo")["generation"] == 260
+    assert len(list((state.root / "events").rglob("*.json"))) == 260
     project["enabled"] = False
     state.save("owner/repo", project)
     assert state.event("owner/repo", "after-stop", "ignored") is False
     assert state.project("owner/repo")["generation"] == 260
+
+
+def test_corrupt_durable_event_receipt_fails_closed(state):
+    write_json(state.event_path("owner/repo", "delivery"), {"repo": "other/repo", "key": key("delivery")})
+    with pytest.raises(DriverError, match="receipt identity"):
+        state.has_event("owner/repo", "delivery")
 
 
 def test_repository_identity_cannot_be_rebound_by_state_file(state):

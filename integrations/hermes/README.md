@@ -41,6 +41,12 @@ One key permits one concurrent managed worker. Separate Hermes homes or hosts
 do not share these filesystem locks; do not run independent allocators for the
 same account.
 
+The status display keeps the most recent 256 events. Small delivery-identity
+receipts under `state_dir/events/` retain older deduplication keys across
+restarts and have no automatic expiry. Keep them for the lifetime of the
+coordinator profile; remove them only when retiring that profile and its event
+routes. They contain hashes and repository identity, never issue lifecycle state.
+
 `max_workers` bounds project concurrency. `max_review_backlog` bounds open PRs
 and queued verification work before new admission. An offline eligible
 self-hosted runner, unknown runner/queue evidence, unresolved dependency,
@@ -130,6 +136,11 @@ After runtime installation is authorized, add `--apply`. The installer copies
 the scripts to `$HERMES_HOME/scripts/aru_project_driver/` and the skill to
 `$HERMES_HOME/skills/autonomous-ai-agents/hermes-project-driver/`, preserving
 backups of replaced files. It does not start projects or schedule jobs.
+Source and optional webhook changes are validated together. A write failure
+restores this installation's earlier writes; a concurrent writer's changes are
+preserved and any incomplete rollback reports the retained backup location.
+Keep the Driver stopped during installation: multiple file replacements are
+not an atomic runtime upgrade, and a host crash may require backup restoration.
 
 Existing authenticated Hermes webhook routes can be explicitly listed in the
 project's optional `webhook_subscriptions` array. Add `--update-webhooks` to

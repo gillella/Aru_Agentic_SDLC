@@ -10,7 +10,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import tempfile
 import uuid
 
@@ -126,20 +125,50 @@ def _webhook_plan(config_path: Path, hermes_home: Path) -> dict:
     }
 
 
-def _write_subscription_plan(plan: dict, hermes_home: Path, backup_root: Path) -> list[str]:
-    if not any(change["changed"] for change in plan["changes"]):
-        return []
-    destination = plan["destination"]
-    _inside(destination, hermes_home)
-    if destination.read_bytes() != plan["original"]:
-        raise InstallError("Native webhook subscriptions changed during installation; preview again")
-    backup = backup_root / "webhook_subscriptions.json"
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(plan["original"])
-    _atomic_write(destination, plan["content"])
-    return [str(backup)]
+def _current(path: Path) -> bytes | None:
+    return path.read_bytes() if path.exists() else None
+
+
+def _rollback(written: list, hermes_home: Path) -> list[str]:
+    failed = []
+    for destination, before, after, mode in reversed(written):
+        try:
+            _inside(destination, hermes_home)
+            if _current(destination) != after:
+                raise InstallError("another writer changed an installed file")
+            if before is None:
+                destination.unlink()
+            else:
+                _atomic_write(destination, before)
+                destination.chmod(mode)
+        except (OSError, InstallError):
+            failed.append(str(destination.relative_to(hermes_home)))
+    return failed
+
+
+def _apply_changes(plan: list, hermes_home: Path, backup_root: Path) -> list[str]:
+    backups, written = [], []
+    try:
+        # Validate the complete source/webhook transaction before its first write.
+        for destination, before, _after, _mode in plan:
+            _inside(destination, hermes_home)
+            if _current(destination) != before:
+                raise InstallError("Destination changed during installation; preview again")
+        for destination, before, after, mode in plan:
+            _inside(destination, hermes_home)
+            if _current(destination) != before:
+                raise InstallError("Destination changed during installation; preview again")
+            if before is not None:
+                backup = backup_root / destination.relative_to(hermes_home)
+                _atomic_write(backup, before)
+                backups.append(str(backup))
+            _atomic_write(destination, after)
+            written.append((destination, before, after, mode))
+    except (OSError, InstallError) as exc:
+        failed = _rollback(written, hermes_home)
+        recovery = ("rollback needs manual recovery: " + ", ".join(failed)) if failed else "prior files restored"
+        raise InstallError(f"Installation failed; {recovery}; backups: {backup_root}; {exc}") from exc
+    return backups
 
 
 def _atomic_write(destination: Path, content: bytes) -> None:
@@ -166,30 +195,24 @@ def install(
     destination_home = _configured_home(config_path, hermes_home)
     payload = _payload(source_root, destination_home)
     webhook_plan = _webhook_plan(config_path, destination_home) if update_webhooks else None
-    changes = []
+    changes, plan = [], []
     for source, destination in payload:
         content = source.read_bytes()
-        changed = not destination.exists() or destination.read_bytes() != content
+        before = _current(destination)
+        changed = before != content
+        if changed:
+            plan.append((destination, before, content, destination.stat().st_mode & 0o777 if before is not None else None))
         changes.append({
             "source": str(source), "destination": str(destination),
             "sha256": hashlib.sha256(content).hexdigest(), "changed": changed,
         })
-    backups = []
+    if webhook_plan and any(change["changed"] for change in webhook_plan["changes"]):
+        destination = webhook_plan["destination"]
+        plan.append((destination, webhook_plan["original"], webhook_plan["content"],
+                     destination.stat().st_mode & 0o777))
     backup_root = destination_home / "state" / "aru_project_driver" / "install-backups" / uuid.uuid4().hex
     _inside(backup_root, destination_home)
-    if apply:
-        for (source, destination), change in zip(payload, changes):
-            if not change["changed"]:
-                continue
-            _inside(destination, destination_home)
-            if destination.exists():
-                backup = backup_root / destination.relative_to(destination_home)
-                backup.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(destination, backup)
-                backups.append(str(backup))
-            _atomic_write(destination, source.read_bytes())
-        if webhook_plan:
-            backups.extend(_write_subscription_plan(webhook_plan, destination_home, backup_root))
+    backups = _apply_changes(plan, destination_home, backup_root) if apply else []
     return {
         "applied": apply, "activated": False, "hermes_home": str(destination_home),
         "config_path": str(config_path), "files": changes, "backups": backups,

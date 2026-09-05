@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import sys
 import time
-from contextlib import suppress
 from types import SimpleNamespace
 
 import pytest
@@ -217,21 +216,29 @@ def test_worker_finishing_after_stop_does_not_recreate_a_wake(setup, monkeypatch
     assert state.capacity_busy("same-subscription") is False
 
 
-def test_worker_rejects_capacity_descriptor_from_another_device(setup, monkeypatch):
+@pytest.mark.parametrize("invalid", ["other-device", "closed", "other-file"])
+def test_worker_reservation_failure_records_exit_and_requests_recovery(setup, monkeypatch, invalid):
     config, state, worktree = setup
     descriptor, record = reserve_worker(config, state, worktree)
     actual_fstat = execution.os.fstat
     def different_device(fd):
         result = actual_fstat(fd)
         return SimpleNamespace(st_ino=result.st_ino, st_dev=result.st_dev + 1)
-    monkeypatch.setattr(execution.os, "fstat", different_device)
-    try:
-        with pytest.raises(DriverError, match="capacity reservation"):
-            execution.worker_main(config, record["id"], descriptor)
-    finally:
-        with suppress(OSError):
-            os.close(descriptor)
-    assert read_json(state.worker_path(record["id"]))["state"] == "launching"
+    if invalid == "other-device":
+        monkeypatch.setattr(execution.os, "fstat", different_device)
+    else:
+        os.close(descriptor)
+        if invalid == "other-file":
+            descriptor = os.open(worktree / "unrelated", os.O_WRONLY | os.O_CREAT, 0o600)
+    wakes = []
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("invalid reservation must not launch"))
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: wakes.append(k["event_key"]))
+    assert execution.worker_main(config, record["id"], descriptor) == 1
+    receipt = read_json(state.worker_path(record["id"]))
+    assert receipt["state"] == "exited" and receipt["exit_code"] == 1
+    assert receipt["reason"]
+    assert wakes == [record["id"]]
+    assert state.capacity_busy("same-subscription") is False
 
 
 def test_real_detached_worker_holds_account_lock_and_keeps_failed_wake_receipt(setup, monkeypatch):

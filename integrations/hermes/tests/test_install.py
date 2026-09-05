@@ -143,12 +143,48 @@ def test_bad_webhook_mapping_fails_before_source_install(setup, kind):
     assert not (home / "scripts").exists()
 
 
-def test_webhook_apply_detects_concurrent_change(setup):
+@pytest.mark.parametrize("failure", ["concurrent-webhook", "webhook-write", "source-write"])
+def test_install_rolls_back_source_when_webhook_or_later_source_write_fails(setup, monkeypatch, failure):
     source, home, config = setup
     path, original = _subscriptions(setup)
-    plan = installer._webhook_plan(config, home)
-    original["peer-route"] = {"secret": "peer-secret", "prompt": "peer"}
-    path.write_text(json.dumps(original))
-    with pytest.raises(installer.InstallError, match="changed during installation"):
-        installer._write_subscription_plan(plan, home, home / "state" / "backups")
+    destination = home / "scripts" / "aru_project_driver" / "driver.py"
+    destination.parent.mkdir(parents=True)
+    destination.write_text("old driver\n")
+    destination.chmod(0o750)
+    atomic = installer._atomic_write
+    def fail(target, content):
+        if target == path and failure == "webhook-write":
+            raise PermissionError("synthetic subscription write failure")
+        if target == destination.with_name("scheduler.py") and failure == "source-write":
+            raise PermissionError("synthetic source write failure")
+        atomic(target, content)
+        if target == destination and content != b"old driver\n" and failure == "concurrent-webhook":
+            original["peer-route"] = {"secret": "peer-secret", "prompt": "peer"}
+            path.write_text(json.dumps(original))
+    monkeypatch.setattr(installer, "_atomic_write", fail)
+    with pytest.raises(installer.InstallError, match="prior files restored"):
+        installer.install(source, config, apply=True, update_webhooks=True)
+    assert destination.read_text() == "old driver\n"
+    assert destination.stat().st_mode & 0o777 == 0o750
+    assert not destination.with_name("scheduler.py").exists()
+    assert not list((home / "skills").rglob("*.md"))
     assert json.loads(path.read_text()) == original
+
+
+def test_install_rollback_preserves_concurrent_writer_and_reports_backup(setup, monkeypatch):
+    source, home, config = setup
+    destination = home / "scripts" / "aru_project_driver" / "driver.py"
+    destination.parent.mkdir(parents=True)
+    destination.write_text("old driver\n")
+    atomic = installer._atomic_write
+    def fail(target, content):
+        if target == destination.with_name("scheduler.py"):
+            destination.write_text("peer change\n")
+            raise PermissionError("synthetic source write failure")
+        atomic(target, content)
+    monkeypatch.setattr(installer, "_atomic_write", fail)
+    with pytest.raises(installer.InstallError, match="manual recovery"):
+        installer.install(source, config, apply=True)
+    assert destination.read_text() == "peer change\n"
+    backups = list((home / "state").rglob("driver.py"))
+    assert len(backups) == 1 and backups[0].read_text() == "old driver\n"

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import suppress
 from pathlib import Path
 
 from .config import Config, DriverError
@@ -138,17 +139,18 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
     state = State(config.state_dir)
     path = state.worker_path(worker_id)
     record = read_json(path)
-    lane = config.lane(record["repo"], record["agent"])
-    # Prove the descriptor really is the configured capacity lock before launching code.
-    inherited = os.fstat(descriptor)
-    expected = state.capacity_path(lane["capacity_key"]).stat()
-    if (inherited.st_ino, inherited.st_dev) != (expected.st_ino, expected.st_dev):
-        raise DriverError("worker capacity reservation is invalid")
-    record.update(pid=os.getpid(), state="running")
-    write_json(path, record)
-    argv = [part.replace("{prompt}", record["prompt"]) for part in lane["command"]]
     exit_code = 1
     try:
+        lane = config.lane(record["repo"], record["agent"])
+        # Invalid inheritance is a supervised failure with the same durable
+        # completion/recovery path; it must never leave a launching receipt.
+        inherited = os.fstat(descriptor)
+        expected = state.capacity_path(lane["capacity_key"]).stat()
+        if (inherited.st_ino, inherited.st_dev) != (expected.st_ino, expected.st_dev):
+            raise DriverError("worker capacity reservation is invalid")
+        record.update(pid=os.getpid(), state="running")
+        write_json(path, record)
+        argv = [part.replace("{prompt}", record["prompt"]) for part in lane["command"]]
         process = None
         # Wait for the launching reconciliation to release its lock, then make
         # the final stop check and process creation atomic with Stop.
@@ -162,12 +164,15 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
                 write_json(path, record)
         if process is not None:
             exit_code = process.wait()
-    except OSError as exc:
-        record["reason"] = type(exc).__name__
+    except (OSError, DriverError) as exc:
+        record["reason"] = str(exc) if isinstance(exc, DriverError) else type(exc).__name__
     finally:
         record.update(state="exited", exit_code=exit_code, finished_at=time.time())
-        write_json(path, record)
-        os.close(descriptor)
+        try:
+            write_json(path, record)
+        finally:
+            with suppress(OSError):
+                os.close(descriptor)
     # Completion receipt precedes wake creation. Heartbeat can recover a failed wake.
     try:
         from .scheduler import schedule_wake

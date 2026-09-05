@@ -113,8 +113,11 @@ class State:
         if not data["enabled"]:
             return False
         digest = key(event_id)
-        if any(event["key"] == digest for event in data["events"]):
+        if self.has_event(repo, event_id):
             return False
+        # Retain delivery identity independently of the bounded display history.
+        # Receipts expire only when the operator retires the whole profile.
+        write_json(self.event_path(repo, event_id), {"repo": repo, "key": digest})
         data["events"] = (data["events"] + [{
             "key": digest, "reason": reason[:120], "observed_at": time.time(),
         }])[-256:]
@@ -123,7 +126,18 @@ class State:
         return True
 
     def has_event(self, repo: str, event_id: str) -> bool:
-        return any(event["key"] == key(event_id) for event in self.project(repo)["events"])
+        recent = self.project(repo)["events"]
+        path = self.event_path(repo, event_id)
+        expected = {"repo": repo, "key": key(event_id)}
+        if path.exists():
+            if read_json(path) != expected:
+                raise DriverError("event receipt identity is invalid")
+            return True
+        return any(event["key"] == expected["key"] for event in recent)
+
+    def event_path(self, repo: str, event_id: str) -> Path:
+        digest = key(event_id)
+        return self.root / "events" / key(repo) / digest[:2] / f"{digest}.json"
 
     def workers(self, repo: str | None = None) -> list[dict]:
         result = []
