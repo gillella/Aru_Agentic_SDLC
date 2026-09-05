@@ -93,9 +93,10 @@ class KernelAdapter:
             str(self.kernel_root), str(self.repo_dir), self.repo, operation,
         ]
         try:
-            result = subprocess.run(
+            # Fixed interpreter/bridge entrypoint; untrusted payload is JSON stdin.
+            result = subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
                 command, input=json.dumps(payload), text=True, capture_output=True,
-                check=False, timeout=180,
+                check=False, timeout=180, shell=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise KernelAdapterError(

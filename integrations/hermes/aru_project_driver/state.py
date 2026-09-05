@@ -14,6 +14,8 @@ from pathlib import Path
 
 from .config import DriverError
 
+MAX_EVENT_KEYS = 65_536
+
 
 def key(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()[:24]
@@ -64,6 +66,13 @@ def _validate_project(data: dict) -> None:
                 or len(event["reason"]) > 120 or not _timestamp(event.get("observed_at"))):
             raise DriverError("operational project event entry is invalid")
         keys.add(event["key"])
+    deliveries = data.get("delivery_keys", list(keys))
+    if (not isinstance(deliveries, list) or len(deliveries) > MAX_EVENT_KEYS
+            or any(not isinstance(k, str) or not re.fullmatch(r"[a-f0-9]{24}", k) for k in deliveries)
+            or len(deliveries) != len(set(deliveries)) or not keys.issubset(set(deliveries))
+            or len(deliveries) > data["generation"]):
+        raise DriverError("operational delivery keys are invalid")
+    data["delivery_keys"] = deliveries
     for field in ("cooldown_until", "wake_pending_until", "last_checked_at", "last_reconciled_at",
                   "started_at", "stopped_at"):
         if field in data and not _timestamp(data[field]):
@@ -71,6 +80,23 @@ def _validate_project(data: dict) -> None:
     handled = data.get("handled_generation", 0)
     if type(handled) is not int or not 0 <= handled <= data["generation"]:
         raise DriverError("operational project handled_generation is invalid")
+
+
+def _validate_worker(data: dict) -> None:
+    if any(not isinstance(data.get(field), str) or not data[field] for field in (
+        "id", "repo", "agent", "capacity_key", "state",
+    )):
+        raise DriverError("operational worker identity is invalid")
+    if (type(data.get("issue")) is not int or data["issue"] <= 0
+            or data["state"] not in {"claiming", "prepared", "launching", "running", "launch_failed", "exited"}
+            or not _timestamp(data.get("started_at"))):
+        raise DriverError("operational worker state is invalid")
+    worktree = data.get("worktree")
+    if worktree is not None and (not isinstance(worktree, str) or not Path(worktree).is_absolute()):
+        raise DriverError("operational worker worktree is invalid")
+    for field in ("pid", "child_pid"):
+        if data.get(field) is not None and (type(data[field]) is not int or data[field] <= 0):
+            raise DriverError("operational worker process identity is invalid")
 
 
 class State:
@@ -115,9 +141,9 @@ class State:
         digest = key(event_id)
         if self.has_event(repo, event_id):
             return False
-        # Retain delivery identity independently of the bounded display history.
-        # Receipts expire only when the operator retires the whole profile.
-        write_json(self.event_path(repo, event_id), {"repo": repo, "key": digest})
+        self.check_event_capacity(repo, event_id)
+        # One atomic project write commits both deduplication and generation.
+        data["delivery_keys"] = data["delivery_keys"] + [digest]
         data["events"] = (data["events"] + [{
             "key": digest, "reason": reason[:120], "observed_at": time.time(),
         }])[-256:]
@@ -126,23 +152,28 @@ class State:
         return True
 
     def has_event(self, repo: str, event_id: str) -> bool:
-        recent = self.project(repo)["events"]
-        path = self.event_path(repo, event_id)
-        expected = {"repo": repo, "key": key(event_id)}
-        if path.exists():
-            if read_json(path) != expected:
-                raise DriverError("event receipt identity is invalid")
-            return True
-        return any(event["key"] == expected["key"] for event in recent)
+        data = self.project(repo)
+        return key(event_id) in data["delivery_keys"]
 
-    def event_path(self, repo: str, event_id: str) -> Path:
-        digest = key(event_id)
-        return self.root / "events" / key(repo) / digest[:2] / f"{digest}.json"
+    def check_event_capacity(self, repo: str, event_id: str) -> None:
+        data = self.project(repo)
+        if key(event_id) not in data["delivery_keys"] and len(data["delivery_keys"]) >= MAX_EVENT_KEYS:
+            raise DriverError("event receipt capacity reached; retire the profile and routes before clearing history")
+
+    def worker(self, worker_id: str) -> dict:
+        record = read_json(self.worker_path(worker_id))
+        _validate_worker(record)
+        if record["id"] != worker_id:
+            raise DriverError("operational worker receipt identity mismatch")
+        return record
 
     def workers(self, repo: str | None = None) -> list[dict]:
         result = []
         for path in sorted((self.root / "workers").glob("*.json")):
             record = read_json(path)
+            _validate_worker(record)
+            if self.worker_path(record["id"]) != path:
+                raise DriverError("operational worker receipt identity mismatch")
             if repo is None or record.get("repo") == repo:
                 result.append(record)
         return result

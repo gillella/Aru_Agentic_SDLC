@@ -348,6 +348,7 @@ class Controller:
             return {"accepted": False, "wakeAgent": False, "project": repo, "status": "stopped"}
         if self.state.has_event(repo, event_id):
             return {"accepted": False, "wakeAgent": False, "project": repo, "status": "duplicate"}
+        self.state.check_event_capacity(repo, event_id)
         # Native scheduling is itself keyed. If it fails, do not acknowledge
         # delivery; a retry after a crash reuses the same native job.
         if not inline:

@@ -18,9 +18,10 @@ from .state import State, key, read_json, write_json
 
 def run_bounded(argv: list[str], cwd: Path, timeout: int = 30) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(
+        # The executable comes from operator policy; external text is literal argv.
+        return subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
             argv, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
-            text=True, timeout=timeout, check=False,
+            text=True, timeout=timeout, check=False, shell=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise DriverError(f"agent preflight unavailable: {type(exc).__name__}") from exc
@@ -117,12 +118,13 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
     log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         with os.fdopen(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
-            process = subprocess.Popen(
+            # Fixed supervised entrypoint and generated identifiers, without a shell.
+            process = subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
                 [sys.executable, str(Path(__file__).with_name("driver.py")),
                  "--config", str(config.path), "_worker", "--worker-id", worker_id,
                  "--capacity-fd", str(descriptor)],
                 cwd=directory, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
-                start_new_session=True, pass_fds=(descriptor,),
+                start_new_session=True, pass_fds=(descriptor,), shell=False,
             )
     except OSError as exc:
         record.update(state="launch_failed", error=type(exc).__name__)
@@ -138,7 +140,7 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
     """Child retains the account lock even if the initiating Hermes session exits."""
     state = State(config.state_dir)
     path = state.worker_path(worker_id)
-    record = read_json(path)
+    record = state.worker(worker_id)
     exit_code = 1
     try:
         lane = config.lane(record["repo"], record["agent"])
@@ -158,8 +160,11 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
             if not state.project(record["repo"])["enabled"]:
                 record["reason"] = "project stopped before child execution"
             else:
-                process = subprocess.Popen(argv, cwd=record["worktree"], stdin=subprocess.DEVNULL,
-                                           pass_fds=(descriptor,))
+                # Operator-owned command array; the prompt remains one literal argument.
+                process = subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+                    argv, cwd=record["worktree"], stdin=subprocess.DEVNULL,
+                    pass_fds=(descriptor,), shell=False,
+                )
                 record["child_pid"] = process.pid
                 write_json(path, record)
         if process is not None:

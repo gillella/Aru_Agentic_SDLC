@@ -48,6 +48,7 @@ class FakeKernel:
         self.prs = []
         self.ci_available = True
         self.queued = 0
+        self.free_runners = 1
         self.calls = []
         self.work = {}
         self.continuations = {}
@@ -60,7 +61,7 @@ class FakeKernel:
             "schema": SCHEMA, "repo": REPO, "complete": True,
             "issues": self.issues, "prs": self.prs, "ci_available": self.ci_available,
             "ci": {"available": self.ci_available, "queued": self.queued,
-                   "online_runners": 1, "free_runners": 1},
+                   "online_runners": 1, "free_runners": self.free_runners},
         })
 
     def candidates(self, snapshot, status="Ready"):
@@ -378,6 +379,36 @@ def test_duplicate_claims_degrade_before_sync_or_mutation(harness, operation):
     result = getattr(harness.controller, operation)(REPO)
     assert result["status"] == "degraded" and "multiple active claims" in result["reason"]
     assert harness.probes == [] and harness.synced == [] and mutations(harness) == []
+
+
+@pytest.mark.parametrize("operation", ["tick", "reconcile"])
+@pytest.mark.parametrize("missing", ["capacity_key", "state", "started_at"])
+def test_malformed_worker_degrades_without_launching(harness, operation, missing):
+    record = {"id": "damaged", "repo": REPO, "agent": "codex-one", "issue": 1,
+              "capacity_key": "account", "state": "running", "started_at": 1}
+    del record[missing]
+    write_json(harness.state.worker_path("damaged"), record)
+    result = getattr(harness.controller, operation)(REPO)
+    assert result["status"] == "degraded" and "operational worker" in result["reason"]
+    assert harness.probes == [] and harness.synced == [] and mutations(harness) == []
+
+
+@pytest.mark.parametrize("queued,expected", [(0, 2), (4, 0)])
+def test_online_busy_ci_uses_bounded_queue_admission(harness, queued, expected):
+    harness.kernel.free_runners = 0
+    harness.kernel.queued = queued
+    result = harness.controller.reconcile(REPO)
+    assert len(result["launched"]) == expected
+
+
+def test_event_capacity_blocks_before_creating_native_wake(harness, monkeypatch):
+    from aru_project_driver import scheduler, state as state_module
+    from aru_project_driver.config import DriverError
+    monkeypatch.setattr(state_module, "MAX_EVENT_KEYS", 1)
+    assert harness.controller.event(REPO, "first", "event", inline=True)["accepted"]
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: pytest.fail("full journal must not create a wake"))
+    with pytest.raises(DriverError, match="receipt capacity"):
+        harness.controller.event(REPO, "second", "event")
 
 
 @pytest.mark.parametrize("operation", ["tick", "reconcile"])

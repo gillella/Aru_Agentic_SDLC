@@ -41,17 +41,22 @@ One key permits one concurrent managed worker. Separate Hermes homes or hosts
 do not share these filesystem locks; do not run independent allocators for the
 same account.
 
-The status display keeps the most recent 256 events. Small delivery-identity
-receipts under `state_dir/events/` retain older deduplication keys across
-restarts and have no automatic expiry. Keep them for the lifetime of the
-coordinator profile; remove them only when retiring that profile and its event
-routes. They contain hashes and repository identity, never issue lifecycle state.
+The status display keeps the most recent 256 events. The same atomic project
+record retains up to 65,536 delivery hashes (about 2 MiB) across restarts.
+Generation, recent history and duplicate suppression commit together. At that
+limit, new deliveries fail with an explicit capacity error before creating a
+wake; existing keys still suppress retries. There is no automatic expiry.
+Clear history only when retiring the profile and its event routes. These are
+delivery identities, never issue lifecycle state.
 
 `max_workers` bounds project concurrency. `max_review_backlog` bounds open PRs
 and queued verification work before new admission. An offline eligible
 self-hosted runner, unknown runner/queue evidence, unresolved dependency,
 `needs-human`, `needs-design`, or overlapping write boundary blocks new work.
 Existing work and PR convergence receive attention before new claims.
+An online but busy CI runner can accept later verification through the bounded
+queue. It does not need to be idle before coding starts; the queue and review
+backlog limits prevent unlimited work from accumulating behind it.
 
 `handoff_to` is an optional allowlist of other configured projects. It does not
 move a claim or create lifecycle state. A source issue may carry one typed,

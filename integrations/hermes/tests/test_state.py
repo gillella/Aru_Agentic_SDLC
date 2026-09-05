@@ -75,17 +75,48 @@ def test_stopped_event_has_no_effect_and_recent_event_history_is_bounded(state):
     restarted = State(state.root)
     assert restarted.event("owner/repo", "0", "old delivery retry") is False
     assert restarted.project("owner/repo")["generation"] == 260
-    assert len(list((state.root / "events").rglob("*.json"))) == 260
+    assert len(restarted.project("owner/repo")["delivery_keys"]) == 260
     project["enabled"] = False
     state.save("owner/repo", project)
     assert state.event("owner/repo", "after-stop", "ignored") is False
     assert state.project("owner/repo")["generation"] == 260
 
 
-def test_corrupt_durable_event_receipt_fails_closed(state):
-    write_json(state.event_path("owner/repo", "delivery"), {"repo": "other/repo", "key": key("delivery")})
-    with pytest.raises(DriverError, match="receipt identity"):
+def test_corrupt_delivery_keys_fail_closed(state):
+    data = state.project("owner/repo")
+    data["delivery_keys"] = ["not-a-hash"]
+    write_json(state.project_path("owner/repo"), data)
+    with pytest.raises(DriverError, match="delivery keys"):
         state.has_event("owner/repo", "delivery")
+
+
+def test_failed_project_save_leaves_event_eligible_for_retry(state, monkeypatch):
+    data = state.project("owner/repo")
+    data["enabled"] = True
+    state.save("owner/repo", data)
+    save = state.save
+    monkeypatch.setattr(state, "save", lambda *a: (_ for _ in ()).throw(OSError("synthetic write failure")))
+    with pytest.raises(OSError):
+        state.event("owner/repo", "delivery", "event")
+    assert not state.has_event("owner/repo", "delivery")
+    assert state.project("owner/repo")["generation"] == 0
+    monkeypatch.setattr(state, "save", save)
+    assert state.event("owner/repo", "delivery", "retry") is True
+    assert state.project("owner/repo")["generation"] == 1
+
+
+def test_event_capacity_preserves_old_keys_across_restart(state, monkeypatch):
+    monkeypatch.setattr(state_module, "MAX_EVENT_KEYS", 2)
+    data = state.project("owner/repo")
+    data["enabled"] = True
+    state.save("owner/repo", data)
+    assert state.event("owner/repo", "first", "event")
+    assert state.event("owner/repo", "second", "event")
+    restarted = State(state.root)
+    assert not restarted.event("owner/repo", "first", "retry")
+    with pytest.raises(DriverError, match="receipt capacity"):
+        restarted.event("owner/repo", "third", "event")
+    assert restarted.project("owner/repo")["generation"] == 2
 
 
 def test_repository_identity_cannot_be_rebound_by_state_file(state):
@@ -160,7 +191,8 @@ def test_capacity_lock_is_shared_by_key_and_recovered_after_process_exit(state):
 
 def test_worker_receipts_are_filtered_by_repository_and_malformed_receipts_block(state):
     for worker_id, repo in (("one", "owner/one"), ("two", "owner/two")):
-        write_json(state.worker_path(worker_id), {"id": worker_id, "repo": repo, "state": "exited"})
+        write_json(state.worker_path(worker_id), {"id": worker_id, "repo": repo, "state": "exited",
+                   "agent": "worker-agent", "issue": 1, "capacity_key": "account", "started_at": 1})
     assert [record["id"] for record in state.workers("owner/one")] == ["one"]
     assert len(state.workers()) == 2
     state.worker_path("broken").write_text(json.dumps([]))
