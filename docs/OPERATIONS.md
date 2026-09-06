@@ -1121,7 +1121,9 @@ the consumer project's own controls remain mandatory.
 Use the operator's installed Python environment, configuration and Hermes home.
 Replace every absolute-path placeholder and `OWNER/REPO` below; the project must
 already be explicitly configured. Export `HERMES_HOME` with that same real home
-before running these commands. Start from a read-only status inspection:
+before running these commands. Start by inspecting status. On an unbound
+profile, configuration loading creates the local profile binding; status is
+read-only once that binding already exists:
 
 ```sh
 export HERMES_HOME=/absolute/path/hermes-home
@@ -1141,8 +1143,11 @@ For an operator-authorized Loop or Stop, respectively:
 ```
 
 These are alternatives, not a sequence to run automatically. Repeated Loop
-keeps one native ten-minute heartbeat; Stop disables this project's future
-owned jobs and closes admission. Stop preserves active workers, account locks,
+keeps one native ten-minute heartbeat. Stop closes admission before pausing
+owned jobs. Verify that it succeeds and that status reports no enabled owned
+jobs: a scheduler failure can leave jobs enabled even with admission closed.
+Inspect the error and retry Stop before assuming scheduling is paused. Stop
+preserves active workers, account locks,
 claims, worktrees and PRs. It does not terminate a worker or stop unrelated
 services. Before transferring a claim for manual recovery, verify its worker
 has actually exited, inspect the worktree, and use the canonical release/claim
@@ -1156,7 +1161,7 @@ helpers. Preserve earlier receipts and any unfinished changes.
 | Driver status | `enabled`, `last_checked_at`, `last_error`, `last_observation` | The recorded gate, latest observation and errors; check their age |
 | Native scheduler | `scheduler.enabled_heartbeats` and each job's `enabled`, `state`, `next_run_at`, `last_status` | One enabled recovery heartbeat and its actual next activation when Loop is enabled |
 | Worker record | `state`, `pid`, `started_at`, `finished_at`, `exit_code`, `wake_error` | Process activity or exit; even exit code zero does not prove task completion |
-| Authenticated ingress | Route authentication, real delivery ID, native webhook session and durable delivery receipt | That the intended event was accepted and handled, separately from scheduler health |
+| Authenticated ingress | Route authentication, real delivery ID, native webhook session and durable delivery receipt | That ingress authenticated and accepted the intended event; reconciliation or worker evidence is still needed to prove handling |
 | GitHub | Current issue ownership, PR head, required CI/review, actual merge and Done state | Authoritative work completion |
 
 An installed release or listening forwarder alone proves neither delivery nor
@@ -1184,10 +1189,12 @@ is explicitly enabled. It is an action, not a read-only status command:
 "$driver_python" "$driver_entry" --config "$driver_config" reconcile --project "$driver_project"
 ```
 
-For an actual trusted delivery, replace `DELIVERY_ID` with its authenticated
-identity. The command deduplicates that receipt and requests a native wake;
-replaying the same genuine ID within an approved test must not create another
-wake. Add `--inline` only inside the already authenticated Hermes event turn:
+The following command is an operator-only wake request: the local CLI does not
+authenticate ingress, and a supplied `DELIVERY_ID` is not delivery evidence.
+Obtain delivery evidence through the authenticated native ingress/session path.
+For an approved replay test, use that path's actual ID; repeating it must not
+create another wake. Reserve `--inline` for the already authenticated Hermes
+event turn. Do not pre-seed an ID before testing the real ingress path:
 
 ```sh
 "$driver_python" "$driver_entry" --config "$driver_config" event --project "$driver_project" \
