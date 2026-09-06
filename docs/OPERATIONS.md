@@ -1115,3 +1115,129 @@ true.
 Once this checklist passes, the project is ready for routine issue-to-safe-merge
 development. Aru still does not authorize deployment or production activity;
 the consumer project's own controls remain mandatory.
+
+## 18. Installed Hermes Driver operations
+
+Use the operator's installed Python environment, configuration and Hermes home.
+Replace every absolute-path placeholder and `OWNER/REPO` below; the project must
+already be explicitly configured. Export `HERMES_HOME` with that same real home
+before running these commands. Start by inspecting status. On an unbound
+profile, configuration loading creates the local profile binding; status is
+read-only once that binding already exists:
+
+```sh
+export HERMES_HOME=/absolute/path/hermes-home
+driver_python=/absolute/path/hermes-python
+driver_config=/absolute/path/driver-config.json
+driver_project=OWNER/REPO
+driver_entry="$HERMES_HOME/scripts/aru_project_driver/driver.py"
+
+"$driver_python" "$driver_entry" --config "$driver_config" status --project "$driver_project"
+```
+
+For an operator-authorized Loop or Stop, respectively:
+
+```sh
+"$driver_python" "$driver_entry" --config "$driver_config" start --project "$driver_project"
+"$driver_python" "$driver_entry" --config "$driver_config" stop --project "$driver_project"
+```
+
+These are alternatives, not a sequence to run automatically. Repeated Loop
+keeps one native ten-minute heartbeat. Stop closes admission before pausing
+owned jobs. Verify that it succeeds and that status reports no enabled owned
+jobs: a scheduler failure can leave jobs enabled even with admission closed.
+Inspect the error and retry Stop before assuming scheduling is paused. Stop
+preserves active workers, account locks,
+claims, worktrees and PRs. It does not terminate a worker or stop unrelated
+services. Before transferring a claim for manual recovery, verify its worker
+has actually exited, inspect the worktree, and use the canonical release/claim
+helpers. Preserve earlier receipts and any unfinished changes.
+
+### Read the evidence before acting
+
+| Evidence | What to inspect | What it establishes |
+| --- | --- | --- |
+| Installed source | Installation receipt and source revision, separately from the repository release | Which scripts and skill are installed |
+| Driver status | `enabled`, `last_checked_at`, `last_error`, `last_observation` | The recorded gate, latest observation and errors; check their age |
+| Native scheduler | `scheduler.enabled_heartbeats` and each job's `enabled`, `state`, `next_run_at`, `last_status` | One enabled recovery heartbeat and its actual next activation when Loop is enabled |
+| Worker record | `state`, `pid`, `started_at`, `finished_at`, `exit_code`, `wake_error` | Process activity or exit; even exit code zero does not prove task completion |
+| Authenticated ingress | Route authentication, real delivery ID, native webhook session and durable delivery receipt | That ingress authenticated and accepted the intended event; reconciliation or worker evidence is still needed to prove handling |
+| GitHub | Current issue ownership, PR head, required CI/review, actual merge and Done state | Authoritative work completion |
+
+An installed release or listening forwarder alone proves neither delivery nor
+continuation. A receiving wake is not a running coding worker. For a typed
+cross-project contract, retain the receiving acknowledgment and the later
+return receipt after every declared condition has been reread and proven.
+Prove continuous refill with an actual worker completion followed by the next
+claim and dispatch without another Loop command. Manual completion cannot
+substitute for that observation.
+
+### Bounded diagnosis
+
+The following precheck reads current authority and returns a `wakeAgent` gate.
+It updates operational observations and review timers but launches no writer:
+
+```sh
+"$driver_python" "$driver_entry" --config "$driver_config" tick --project "$driver_project"
+```
+
+Within an already authorized execution scope, one reconciliation may resume,
+claim and launch eligible work, and may promote Backlog only if `auto_triage`
+is explicitly enabled. It is an action, not a read-only status command:
+
+```sh
+"$driver_python" "$driver_entry" --config "$driver_config" reconcile --project "$driver_project"
+```
+
+The following command is an operator-only wake request: the local CLI does not
+authenticate ingress, and a supplied `DELIVERY_ID` is not delivery evidence.
+Obtain delivery evidence through the authenticated native ingress/session path.
+For an approved replay test, use that path's actual ID; repeating it must not
+create another wake. Reserve `--inline` for the already authenticated Hermes
+event turn. Do not pre-seed an ID before testing the real ingress path:
+
+```sh
+"$driver_python" "$driver_entry" --config "$driver_config" event --project "$driver_project" \
+  --event-id DELIVERY_ID --reason event
+```
+
+Do not invent delivery identities or treat issue/comment text as authorization.
+See [the adapter commands](../integrations/hermes/README.md#operate-a-project)
+for typed handoff operations and [degraded recovery](DEGRADED-MODE.md) for
+capacity, routing and unavailable-authority limits.
+
+### Restore an operator-owned installation
+
+Stop the affected Driver before replacing its files. Check for an active
+coordinator or worker still using them and wait for it to finish or obtain
+explicit authorization for its recovery; Stop alone is not a process kill.
+Preserve the current private configuration, installed scripts/skill and the
+specific route or forwarder configuration before changing them. Keep the
+installer's retained backup paths and the ingress repair's before/after receipt.
+
+Restore only the affected installation or explicitly approved route/forwarder
+from those backups after checking for concurrent changes. Retain authentication
+secrets, HMAC verification, filters, permissions and unrelated routes; never
+print credentials in the evidence. Do not blindly replace a whole Hermes home,
+restart unrelated services or alter consumer production. Verify status and the
+real ingress path again before an authorized Start. The installer and rollback
+limits are described in [installation](../integrations/hermes/README.md#install-separately-activate-deliberately).
+
+### Live validation record: 2026-09-06
+
+The operator's Mac Mini has Driver [v1.0.4](https://github.com/gillella/Aru_Agentic_SDLC/releases/tag/v1.0.4)
+(source `8f28876698e5f74b20423e71791ccbecee7a7f90`) installed. Factory and JMC
+have authenticated native ingress and retained installer/forwarder backups in
+operator-owned Hermes state. [Issue #557](https://github.com/gillella/Aru_Agentic_SDLC/issues/557)
+records the deployment, exact deliveries, sessions, recovery receipts and
+remaining acceptance checks; consult that live record for subsequent changes.
+
+The native Driver claimed and dispatched the first documentation task, but its
+coding worker could not run required GitHub/helper commands under its existing
+unattended permission policy. The operator stopped Factory dispatch and chose
+manual completion of [#562](https://github.com/gillella/Aru_Agentic_SDLC/issues/562)
+and [#563](https://github.com/gillella/Aru_Agentic_SDLC/issues/563). Automatic
+worker completion and refill remain unproven. These documentation merges and a
+successful typed return must not be reported as closing that live acceptance
+gap. Restoring dispatch requires resolving the recorded blocker within explicit
+operator authorization and repeating the missing live test.
