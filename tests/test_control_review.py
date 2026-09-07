@@ -36,6 +36,46 @@ def test_control_only_pr_requires_current_head_authoritative_review(monkeypatch,
     assert gates["reviewer"] == "coderabbit"
 
 
+@pytest.mark.parametrize("path", [
+    "scripts/review_policy.py",
+    "integrations/hermes/aru_project_driver/controller.py",
+    "integrations/hermes/install.py",
+    "integrations/hermes/skill/SKILL.md",
+])
+@pytest.mark.parametrize("withdrawn", [False, True])
+def test_control_review_is_revalidated_before_merge_submission(monkeypatch, path, withdrawn):
+    install_low_risk_gate(monkeypatch, paths=[path])
+    monkeypatch.setattr(merge_pr, "review_risk_tier", review_risk_tier)
+    monkeypatch.setattr(merge_pr, "pull_request", lambda _number: ready_pr(
+        labels=[{"name": "review:coderabbit"}],
+    ))
+    reviews, commands = [], []
+
+    def review(*_args):
+        reviews.append(True)
+        # Withdraw approval only after both initial evaluations have passed.
+        return not (withdrawn and len(reviews) == 3)
+
+    def submit(argv):
+        commands.append(argv)
+        raise RuntimeError("command spy reached")
+
+    monkeypatch.setattr(merge_pr, "exact_head_review", review)
+    monkeypatch.setattr(merge_pr, "run", submit)
+    if withdrawn:
+        with pytest.raises(merge_pr.KernelError, match="verdict before merge submission"):
+            merge_pr.merge(10, HEAD)
+        assert commands == []
+    else:
+        with pytest.raises(RuntimeError, match="command spy reached"):
+            merge_pr.merge(10, HEAD)
+        assert commands == [[
+            "gh", "pr", "merge", "10", "--merge", "--delete-branch",
+            "--match-head-commit", HEAD,
+        ]]
+    assert len(reviews) == 3
+
+
 @pytest.mark.parametrize("path,tier", [
     ("src/app.py", 1),
     ("integrations/hermes/tests/test_controller.py", 1),
