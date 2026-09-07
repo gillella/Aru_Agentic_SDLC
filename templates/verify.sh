@@ -148,7 +148,8 @@ if [ -n "${base}" ]; then
     [ "${scan_status}" -eq 1 ] || fail "secret-scan added-line extraction failed (exit ${scan_status})"
   fi
 else
-  if git -c core.fsmonitor=false grep -a -h -e '' -- . > "${scan_file}"; then
+  # Inspect the verified commit even if local files or the index have changed.
+  if git -c core.fsmonitor=false grep -a -h -e '' HEAD -- . > "${scan_file}"; then
     :
   else
     scan_status="$?"

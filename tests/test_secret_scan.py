@@ -129,6 +129,22 @@ def test_empty_tracked_content_is_a_valid_no_match(tmp_path):
     assert "no credential-shaped literal found" in result.stdout
 
 
+@pytest.mark.parametrize("local_change", ["replace", "delete"])
+def test_tree_scan_reads_committed_content_despite_local_changes(tmp_path, local_change):
+    secret = ("API_SECRET_KEY=" + "A" * 32 + "\n").encode()
+    repo = repository(tmp_path, "tree", secret)
+    sample = repo / "sample.txt"
+    if local_change == "replace":
+        sample.write_text("safe local content\n")
+        git(repo, "add", "sample.txt")
+    else:
+        sample.unlink()
+    result = scan(repo)
+    assert result.returncode == 1
+    assert "credential-shaped literal found" in result.stderr
+    assert "no credential-shaped literal found" not in result.stdout
+
+
 @pytest.mark.parametrize("change", ["mode", "deletion"])
 def test_diff_without_added_content_passes(tmp_path, change):
     repo = repository(tmp_path, "diff")
