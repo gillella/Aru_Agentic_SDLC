@@ -39,7 +39,7 @@ _KERNEL_GATE_SCRIPTS = {
     "create_github_issue.py", "create_pr.py", "fetch_next_issue.py",
     "fetch_next_work.py", "fetch_pr_feedback.py", "init_project.py",
     "install_agent_integration.sh", "merge_pr.py", "merge_state.py",
-    "review_evidence.py", "review_risk.py", "reviewer_probe.py", "touches.py",
+    "review_evidence.py", "review_policy.py", "review_risk.py", "reviewer_probe.py", "touches.py",
     "triage_backlog.py",
 }
 
@@ -54,12 +54,14 @@ def _sensitive_contract_path(normalized: str, name: str) -> bool:
     return bool(
         name in {"agents.md", "claude.md", "copilot-instructions.md", "codeowners"}
         or normalized == ".github/pull_request_template.md"
+        or normalized == "integrations/hermes/install.py"
         or normalized in _KERNEL_POLICY_DOCS
         or normalized.startswith(
             (
                 ".agents/", ".aru/", ".codex/", ".cursor/rules/",
                 ".github/issue_template/", ".github/pull_request_template/",
                 ".github/workflows/", "hooks/", "skills/", "templates/",
+                "integrations/hermes/aru_project_driver/", "integrations/hermes/skill/",
             )
         )
         or "/skills/" in normalized
