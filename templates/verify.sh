@@ -135,12 +135,32 @@ section "Secret scan"
 secret_re="gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{50,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|sk-[A-Za-z0-9]{32,}|sk-proj-[A-Za-z0-9_-]{20,}|(API_SECRET_KEY|JMC_API_SECRET)[[:space:]]*=[[:space:]]*['\"]?[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]{0,20}PRIVATE KEY-----"
 scan_file="${scope_dir}/secret-scan.tmp"
 if [ -n "${base}" ]; then
-  git -c core.fsmonitor=false diff -a "${base}...HEAD" -- | LC_ALL=C grep -a -E '^\+' > "${scan_file}" || true
+  # Collect first so an empty filter result cannot conceal a Git read failure.
+  diff_file="${scope_dir}/secret-diff.tmp"
+  if ! git -c core.fsmonitor=false diff -a "${base}...HEAD" -- > "${diff_file}"; then
+    fail "secret-scan content is unavailable (git diff failed)"
+  fi
+  if LC_ALL=C grep -a -E '^\+' "${diff_file}" > "${scan_file}"; then
+    :
+  else
+    scan_status="$?"
+    # A mode-only change legitimately has no added lines.
+    [ "${scan_status}" -eq 1 ] || fail "secret-scan added-line extraction failed (exit ${scan_status})"
+  fi
 else
-  git -c core.fsmonitor=false grep -a -h -e '' -- . > "${scan_file}" || true
+  if git -c core.fsmonitor=false grep -a -h -e '' -- . > "${scan_file}"; then
+    :
+  else
+    scan_status="$?"
+    # A tracked tree containing only empty files has no matching lines.
+    [ "${scan_status}" -eq 1 ] || fail "secret-scan content is unavailable (git grep exit ${scan_status})"
+  fi
 fi
 if LC_ALL=C grep -a -Eq "${secret_re}" "${scan_file}"; then
   fail "credential-shaped literal found in the verified content"
+else
+  scan_status="$?"
+  [ "${scan_status}" -eq 1 ] || fail "secret-scan failed (exit ${scan_status})"
 fi
 echo "no credential-shaped literal found"
 
