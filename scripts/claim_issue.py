@@ -185,11 +185,23 @@ def restore_released_claim(number: int, claim_label: str) -> None:
     record = issue(number)
     if status_of(record) != "Ready" or claimants(record):
         raise KernelError("release race could not safely restore the claim")
-    run(["gh", "issue", "edit", str(number), "--add-label", claim_label])
-    set_status(number, "In Progress", expected_current="Ready")
-    settled = issue(number)
-    if status_of(settled) != "In Progress" or claimants(settled) != [claim_label]:
-        raise KernelError("release race claim restoration did not settle")
+    try:
+        run(["gh", "issue", "edit", str(number), "--add-label", claim_label])
+        set_status(
+            number, "In Progress", expected_current="Ready",
+            pre_mutation_check=lambda: require_claim_state(number, claim_label, "Ready"),
+        )
+        settled = issue(number)
+        if status_of(settled) != "In Progress" or claimants(settled) != [claim_label]:
+            raise KernelError("release race claim restoration did not settle")
+    except KernelError as restore_error:
+        try:
+            rollback_claim(number, claim_label)
+        except KernelError as rollback_error:
+            raise KernelError(
+                f"{rollback_error}; original restoration failure: {restore_error}"
+            ) from rollback_error
+        raise
 
 
 def release(number: int, agent: str) -> dict[str, object]:

@@ -111,11 +111,8 @@ def test_claim_settlement_and_race_rollback(monkeypatch, race):
 
 @pytest.mark.parametrize("mutation_failure", [False, True])
 def test_claim_rollback_quota_surfaces_original_failure(monkeypatch, capsys, mutation_failure):
-    snapshots = [
-        {"number": 7, "labels": [], "state": "OPEN"},
-        {"number": 7, "labels": [{"name": "agent:codex-1"}, {"name": "agent:codex-2"}], "state": "OPEN"},
-        {"number": 7, "labels": [{"name": "agent:codex-1"}, {"name": "agent:codex-2"}], "state": "OPEN"},
-    ]
+    contested = backlog_issue("agent:codex-1", "agent:codex-2", number=7)
+    snapshots = [backlog_issue(number=7), contested, contested]
     _mock_claim_context(monkeypatch, snapshots, status="Ready")
     commands = []
 
@@ -146,10 +143,12 @@ def test_agent_ids_are_bounded(agent):
 
 
 @pytest.mark.parametrize("partial", [False, True])
-def test_app_claim_failure_retries_and_release_preserves_human_assignees(monkeypatch, partial):
+@pytest.mark.parametrize("restore_peer", [None, "Ready", "In Progress"])
+def test_app_claim_failure_retries_and_release_preserves_human_assignees(monkeypatch, partial, restore_peer):
     record = backlog_issue("status:ready")
     record["assignees"] = [{"login": "human-owner"}]
     failure = [True]
+    attempts = []
     monkeypatch.setattr(claim_issue, "issue", lambda _number: record)
     monkeypatch.setattr(claim_issue, "ensure_label", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(claim_issue, "other_active_claims", lambda *_args: [])
@@ -157,6 +156,8 @@ def test_app_claim_failure_retries_and_release_preserves_human_assignees(monkeyp
     def command(argv):
         assert "--add-assignee" not in argv and "--remove-assignee" not in argv
         adding = "--add-label" in argv
+        if adding:
+            attempts.append(True)
         fail = adding and bool(failure) and failure.pop()
         label = {"name": "agent:codex-1"}
         if not fail or partial:
@@ -164,11 +165,15 @@ def test_app_claim_failure_retries_and_release_preserves_human_assignees(monkeyp
                 record["labels"].append(label)
             else:
                 record["labels"].remove(label)
+        if adding and len(attempts) == 3 and restore_peer:
+            record["labels"].append({"name": "agent:peer"})
+            transition(3, restore_peer, expected_current="Ready")
         if fail:
             raise claim_issue.KernelError("App edit failed")
 
     def transition(_number, status, *, expected_current, pre_mutation_check=None):
-        assert claim_issue.status_of(record) == expected_current
+        if claim_issue.status_of(record) != expected_current:
+            raise claim_issue.KernelError("status precondition failed")
         if pre_mutation_check:
             pre_mutation_check()
         record["labels"] = [label for label in record["labels"] if not label["name"].startswith("status:")]
@@ -184,6 +189,10 @@ def test_app_claim_failure_retries_and_release_preserves_human_assignees(monkeyp
     monkeypatch.setattr(claim_issue, "linked_open_prs", lambda _number: next(linked))
     with pytest.raises(claim_issue.KernelError, match="release raced"):
         claim_issue.release(3, "codex-1")
+    assert record["assignees"] == [{"login": "human-owner"}]
+    if restore_peer:
+        assert claim_issue.status_of(record) == restore_peer and claim_issue.claimants(record) == ["agent:peer"]
+        return
     assert claim_issue.status_of(record) == "In Progress"
     assert claim_issue.claimants(record) == ["agent:codex-1"]
     monkeypatch.setattr(claim_issue, "linked_open_prs", lambda _number: [])
