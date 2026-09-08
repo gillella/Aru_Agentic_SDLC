@@ -112,6 +112,16 @@ def test_only_the_lanes_own_claude_profile_vetoes(monkeypatch, environment, avai
         assert observed["reason"] == "managed session for profile 1 is live (pid 77)"
 
 
+def test_failed_profile_inspection_fails_closed(monkeypatch):
+    def run(argv, **_kwargs):
+        if argv[:2] == ["ps", "-axo"]:
+            return SimpleNamespace(returncode=0, stdout="77 /opt/homebrew/bin/claude\n")
+        return SimpleNamespace(returncode=1, stdout="")  # pid listed but its environment is unreadable
+    monkeypatch.setattr(capacity.subprocess, "run", run)
+    observed = capacity.observe("claude-code", "1")
+    assert observed["available"] is False and observed["reason"].startswith("observer unavailable")
+
+
 def test_unreachable_observer_blocks_only_this_observation(setup, monkeypatch):
     config, state, _ = setup
     monkeypatch.setattr(execution, "run_bounded", lambda *args: (_ for _ in ()).throw(

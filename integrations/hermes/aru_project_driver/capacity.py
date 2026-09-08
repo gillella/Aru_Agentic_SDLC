@@ -38,6 +38,11 @@ def observe(family: str, profile: str | None = None) -> dict:
             # Inspect only this process's profile identifier; never print its arguments/environment.
             environment = subprocess.run(["ps", "eww", "-p", parts[0], "-o", "command="],
                                          capture_output=True, text=True, timeout=10, check=False)
+            if environment.returncode:
+                # The process is listed but its profile cannot be read: do not guess
+                # that it is unrelated. Fail closed for this observation only.
+                return {"available": False,
+                        "reason": f"observer unavailable: profile inspection failed for pid {parts[0]}"}
             match = re.search(r"(?:^|\s)CLAUDE_CONFIG_DIR=([^\s]+)", environment.stdout)
             if match and Path(match[1]).name == f"config-{profile}":
                 return {"available": False,
