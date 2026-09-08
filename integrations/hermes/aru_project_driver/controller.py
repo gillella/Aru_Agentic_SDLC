@@ -48,14 +48,20 @@ class Controller:
                     pr["author_agent"] for pr in snapshot["prs"] if pr.get("author_agent")
                 }
 
+    def _sessions(self, identity: str) -> int:
+        """Managed sessions allowed on the lane's subscription (1 unless configured)."""
+        lane = self.config.lanes.get(identity) or {}
+        return int(lane.get("max_sessions", 1)) if lane else 1
+
     def _lane_observations(self, repo: str, snapshot: dict) -> tuple[list, dict]:
-        ready, blocked, seen = [], {}, set()
+        ready, blocked, seen = [], {}, {}
         owners = self._owners(snapshot)
         # A current claimant gets first use of its account, including across model aliases.
         identities = sorted(self.config.project(repo)["lanes"], key=lambda item: item not in owners)
         for identity in identities:
             lane = self.config.lane(repo, identity)
-            if lane["capacity_key"] in seen:
+            # One free lane per remaining session slot on the shared subscription.
+            if seen.get(lane["capacity_key"], 0) >= self._sessions(identity):
                 blocked[identity] = {"available": False, "reason": "shared account already represented"}
                 continue
             try:
@@ -63,7 +69,7 @@ class Controller:
             except DriverError as exc:
                 result = {"available": False, "reason": str(exc)}
             if result.get("available") is True:
-                seen.add(lane["capacity_key"])
+                seen[lane["capacity_key"]] = seen.get(lane["capacity_key"], 0) + 1
                 ready.append(identity)
             else:
                 blocked[identity] = result
@@ -86,7 +92,7 @@ class Controller:
             # Do not race a managed live writer. Unavailable quota alone must not
             # prevent read-only PR inspection, merge/finalize or reviewer refresh.
             if any(r.get("state") in {"launching", "running"}
-                   and self.state.capacity_holder(r["capacity_key"]) == r["id"] for r in receipts):
+                   and self._holds_reservation(r) for r in receipts):
                 continue
             work = adapter.next_work(identity)
             work = {**work.get("work", work), "agent": identity}
@@ -116,7 +122,7 @@ class Controller:
 
     def _settle_live_review(self, work: dict, managed: list) -> dict:
         active = next((r for r in managed if r.get("kind") == "review" and r.get("pr") == work.get("pr")
-                       and self.state.capacity_holder(r["capacity_key"]) == r["id"]), None)
+                       and self._holds_reservation(r)), None)
         if active:
             # A substantive review settles before any author mutation.
             return {"type": "wait", "agent": work["agent"], "pr": work["pr"],
@@ -163,10 +169,14 @@ class Controller:
             reasons.append("queued verification limit reached")
         return reasons
 
+    def _holds_reservation(self, receipt: dict) -> bool:
+        holders = self.state.capacity_holders(receipt["capacity_key"], self._sessions(receipt.get("agent", "")))
+        return receipt["id"] in holders
+
     def _worker_count(self, repo: str) -> int:
-        return len({r["capacity_key"] for r in self.state.workers(repo)
-                    if r.get("state") in {"launching", "running"}
-                    and self.state.capacity_holder(r["capacity_key"]) == r["id"]})
+        # Count live reservations, not accounts: one subscription may hold several slots.
+        return len({r["id"] for r in self.state.workers(repo)
+                    if r.get("state") in {"launching", "running"} and self._holds_reservation(r)})
 
     def _action_due(self, action: dict) -> bool:
         if action.get("execution") == "running":
@@ -201,15 +211,19 @@ class Controller:
         dependency_actions, held = dependencies.actions(self, repo, snapshot)
         actions = [a for a in actions if a.get("issue") not in held] + dependency_actions
         resumes = [a for a in resumes if a.get("issue") not in held]
-        reserved_accounts = {self.config.lane(repo, item)["capacity_key"]
-                             for item in self._owners(snapshot) if item in project["lanes"]}
-        reserved_accounts.update(
-            self.config.lane(repo, name[9:])["capacity_key"]
-            for pr in snapshot["prs"] for name in pr.get("labels", [])
+        # Owners and assigned reviewers hold their account's session slots; a
+        # subscription stays open for new work only while it has slots to spare.
+        reserved_accounts: dict[str, int] = {}
+        holders = [item for item in self._owners(snapshot) if item in project["lanes"]] + [
+            name[9:] for pr in snapshot["prs"] for name in pr.get("labels", [])
             if name.startswith("reviewer:") and name[9:] in project["lanes"]
-        )
+        ]
+        for item in holders:
+            account = self.config.lane(repo, item)["capacity_key"]
+            reserved_accounts[account] = reserved_accounts.get(account, 0) + 1
         free = [item for item in free
-                if self.config.lane(repo, item)["capacity_key"] not in reserved_accounts]
+                if reserved_accounts.get(self.config.lane(repo, item)["capacity_key"], 0)
+                < self._sessions(item)]
         slots = max(0, project.get("max_workers", 4) - self._worker_count(repo))
         resumes = resumes[:slots]
         free = free[:max(0, slots - len(resumes))] if not reasons else []
@@ -357,7 +371,7 @@ class Controller:
                         "owner": "Hermes Driver", "next_step": "Use current kernel convergence action"}
             receipts = [r for r in self.state.workers(repo) if r.get("kind") == "review"
                         and r.get("pr") == binding["pr"]]
-            if any(self.state.capacity_holder(r["capacity_key"]) == r["id"] for r in receipts):
+            if any(self._holds_reservation(r) for r in receipts):
                 return {**work, "execution": "running", "owner": "Hermes Driver",
                         "next_step": "Existing worker completion event or recovery heartbeat"}
             matching = [r for r in receipts if r.get("review") == binding]

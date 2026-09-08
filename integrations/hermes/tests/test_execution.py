@@ -405,3 +405,38 @@ def test_hung_agent_and_descendant_timeout_preserves_work_and_releases_lane(
                 os.killpg(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+def test_session_slots_bound_reservations_on_one_subscription(setup, monkeypatch):
+    config, state, worktree = setup
+    for lane in config.lanes.values():
+        lane["max_sessions"] = 2
+    # Slot 0 is already held by a live worker (historical single-lock path).
+    descriptor, _record = reserve_worker(config, state, worktree)
+    try:
+        assert state.capacity_busy("same-subscription", 2) is False
+        assert execution.availability(config, "owner/repo", "model-two", state)["available"] is True
+        monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: SimpleNamespace(pid=4242))
+        launched = execution.launch(config, "owner/repo", "model-two", 2, str(worktree))
+        receipt = read_json(state.worker_path(launched["id"]))
+        assert receipt["capacity_slot"] == 1
+        assert state.capacity_path("same-subscription", 1).name.endswith(".slot1.lock")
+        # Hold slot 1 as the child would; now the subscription is full.
+        second = os.open(state.capacity_path("same-subscription", 1), os.O_RDWR)
+        fcntl.flock(second, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            assert state.capacity_busy("same-subscription", 2) is True
+            assert launched["id"] in state.capacity_holders("same-subscription", 2)
+            observed = execution.availability(config, "owner/repo", "model-two", state)
+            assert observed["available"] is False and "every managed session slot" in observed["reason"]
+            with pytest.raises(DriverError, match="reserved by another worker"):
+                execution.launch(config, "owner/repo", "model-two", 3, str(worktree))
+        finally:
+            os.close(second)
+        # With max_sessions 1 the same account is simply busy.
+        for lane in config.lanes.values():
+            lane["max_sessions"] = 1
+        with pytest.raises(DriverError, match="reserved by another worker"):
+            execution.launch(config, "owner/repo", "model-two", 3, str(worktree))
+    finally:
+        os.close(descriptor)
