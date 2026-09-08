@@ -1332,6 +1332,51 @@ restart unrelated services or alter consumer production. Verify status and the
 real ingress path again before an authorized Start. The installer and rollback
 limits are described in [installation](../integrations/hermes/README.md#install-separately-activate-deliberately).
 
+### Migrate to the canonical capacity observer and bounded concurrency
+
+Use this after the source fixes #602 (process presence is diagnostic) and #603
+(`max_sessions`) are installed. It retires any operator-owned capacity wrapper
+that vetoes on remote or desktop process presence, such as the Mini's
+`aru_driver_account_capacity.py`, which sshes to another host and carries stale
+PID exceptions. Every step is reversible from the backup taken first.
+
+1. **Stop** every configured project (`driver.py --config … stop --project …`)
+   and confirm `status` shows `enabled: false` and zero enabled heartbeats.
+   Wait for live workers to exit; Stop preserves them and is not a process kill.
+2. **Back up** the Driver configuration and the installed scripts
+   (`cp aru-project-driver.json aru-project-driver.json.bak-<date>`; the
+   installer already keeps `state/aru_project_driver/install-backups/`).
+3. **Install** the merged source (`install.py --config … --apply`) and confirm
+   the installed `capacity.py`, `execution.py`, `controller.py`, `config.py` and
+   `state.py` byte-match the kernel revision you intend to run.
+4. **Point every lane** at the canonical observer:
+   `"capacity_command": ["<hermes-python>", "<hermes-home>/scripts/aru_project_driver/capacity.py", "--family", "claude-code", "--claude-profile", "<n>"]`.
+   Do not keep a wrapper that recreates the veto; if remote-host observation is
+   still wanted, it must return a quota-based result, not process presence.
+5. **Select accounts explicitly.** Only non-employer subscriptions may serve
+   personal projects; on the Mini, `claude-sub` profile 4 is the Unum seat and
+   stays out of every lane. A successful probe never authorizes employer-account
+   use.
+6. **Set `max_sessions`** conservatively: start at 1 (today's behavior), then 2
+   on one subscription once a refill canary has passed. Every lane sharing a
+   `capacity_key` must declare the same value or the configuration is refused.
+7. **Start** each project and run the minimal-PATH heartbeat canary: execute the
+   generated wrapper under `env -i PATH=/usr/bin:/bin HOME=… HERMES_HOME=…` and
+   expect `wakeAgent` JSON with exit 0 and no `status: degraded`. Then confirm
+   `status` shows `last_error: null` and one enabled heartbeat per project.
+8. **Roll back** by stopping, restoring the configuration backup and the
+   installer's retained backup, and starting again; GitHub claims, worktrees and
+   PRs are untouched by any of these steps.
+
+Read `blocked_lanes` reasons after the migration with these meanings:
+`every managed session slot on the shared subscription is reserved` is a managed
+reservation (wait for a worker to exit); `provider cooldown` is a recorded
+rate-limit or failed probe (wait for `reset_at`); `observer unavailable` is a
+failed or unreachable observer (fix the command, nothing is vetoed
+permanently); `managed session for profile N is live` is a second session on
+exactly that profile's config directory. None of these means the desktop can no
+longer be used while the Driver runs.
+
 ### Live validation record: 2026-09-06
 
 The operator's Mac Mini has Driver [v1.0.4](https://github.com/gillella/Aru_Agentic_SDLC/releases/tag/v1.0.4)
