@@ -12,7 +12,7 @@ import pytest
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from aru_project_driver.config import Config  # noqa: E402
+from aru_project_driver.config import Config, DriverError  # noqa: E402
 from aru_project_driver.controller import Controller  # noqa: E402
 from aru_project_driver.kernel import KernelAdapter, KernelAdapterError, SCHEMA  # noqa: E402
 from aru_project_driver.state import State, write_json  # noqa: E402
@@ -82,6 +82,34 @@ class FakeKernel:
     def reviewer_continuation(self, number):
         self.calls.append(("reviewer_continuation", number))
         return deepcopy(self.continuations[number])
+
+    def review_binding(self, number, expected=None):
+        self.calls.append(("review_binding", number))
+        binding = self.binding
+        if expected and any(binding[k] != v for k, v in expected.items() if k != "verdict"):
+            raise KernelAdapterError("review head or assignment changed")
+        return deepcopy(binding)
+
+    def review_worktree(self, binding):
+        self.review_binding(binding["pr"], binding)
+        path = self.harness.repo_dir / ".worktrees" / "review-pr-9"
+        path.mkdir(parents=True, exist_ok=True)
+        return str(path)
+
+    def refresh_reviewer(self, number, expected, reason=None):
+        self.calls.append(("refresh_reviewer", number, reason))
+        with pytest.raises(DriverError, match="coordinating"):
+            with self.harness.state.lock():
+                pass
+        if reason:
+            self.review_binding(number, expected)
+        target = getattr(self, "recovery_target", None)
+        if target is None:
+            raise KernelAdapterError((reason or "review unavailable") + "; no untried reviewer has available capacity")
+        self.binding = deepcopy(target)
+        self.prs[0]["labels"] = ["review:" + target["authority"], "reviewer:" + target["reviewer"]]
+        self.work[target["author"]].update(authority=target["authority"], next_action="await-authoritative-review")
+        return {"authority": target["authority"], "next_action": "await-authoritative-review", "retry_at": None}
 
     def record(self, number):
         return next(record for record in self.issues if record["number"] == number)
@@ -565,3 +593,151 @@ def test_pending_ci_with_ambiguous_review_authority_fails_closed(harness):
     assert result["status"] == "degraded"
     assert ("reviewer_continuation", 9) not in harness.kernel.calls
     assert harness.synced == [] and harness.probes == [] and mutations(harness) == []
+
+
+def assigned_review(harness):
+    harness.kernel.issues = [issue(1, status="In Review", agent="codex-one")]
+    opened = pr(9, "codex-one", linked=1)
+    opened["labels"] = ["review:claude-code", "reviewer:claude-one"]
+    harness.kernel.prs = [opened]
+    harness.kernel.binding = {
+        "repo": REPO, "pr": 9, "issue": 1, "head": HEAD, "authority": "claude-code",
+        "reviewer": "claude-one", "reviewer_actor": "independent-bot",
+        "author": "codex-one", "author_family": "openai-codex", "author_actor": "test-author",
+        "verdict": None,
+    }
+    harness.kernel.work["codex-one"] = {
+        "type": "wait", "pr": 9, "head": HEAD, "authority": "claude-code",
+        "next_action": "await-authoritative-review", "retry_at": None,
+    }
+
+
+def test_assigned_review_executes_once_across_duplicate_delivery_and_restart(harness):
+    assigned_review(harness)
+    assert harness.controller.event(REPO, "review-event", "review", inline=True)["accepted"]
+    result = harness.controller.reconcile(REPO)
+    assert len(result["launched"]) == 1
+    receipt = harness.state.workers(REPO)[0]
+    assert receipt["kind"] == "review" and receipt["review"] == harness.kernel.binding
+    assert receipt["agent"] == "claude-one"
+    assert result["actions"][0]["execution"] == "queued"
+    assert harness.kernel.record(1)["agents"] == ["codex-one"]
+    assert mutations(harness) == []
+    assert not harness.controller.event(REPO, "review-event", "review", inline=True)["accepted"]
+    restarted = Controller(harness.config, adapter_factory=lambda *a: harness.kernel,
+                           availability=harness.availability, probe=harness.probe,
+                           launch=harness.launch, sync_reviews=harness.sync_reviews)
+    running = restarted.reconcile(REPO)
+    assert running["launched"] == [] and running["status"] == "running"
+    assert running["actions"][0]["execution"] == "running"
+    assert restarted.tick(REPO)["wakeAgent"] is False
+    assert len(harness.launched) == 1
+
+
+def test_configured_reviewer_can_review_an_external_authors_pr(harness):
+    assigned_review(harness)
+    harness.config.project(REPO)["lanes"] = ["claude-one"]
+    result = harness.controller.reconcile(REPO)
+    assert result["launched"][0]["agent"] == "claude-one"
+    assert harness.kernel.record(1)["agents"] == ["codex-one"]
+
+
+def test_completed_review_returns_to_existing_merge_and_finalization_actions(harness):
+    assigned_review(harness)
+    harness.controller.reconcile(REPO)
+    for descriptor in harness.descriptors:
+        os.close(descriptor)
+    harness.descriptors.clear()
+    for kind in ("merge", "finalize"):
+        harness.kernel.work["codex-one"] = {"type": kind, "pr": 9, "head": HEAD}
+        result = harness.controller.reconcile(REPO)
+        assert result["launched"] == []
+        assert result["actions"][0]["type"] == kind
+        assert result["actions"][0]["agent"] == "codex-one"
+
+
+@pytest.mark.parametrize("failure", ["head", "authority", "unavailable", "unknown", "lane", "family", "cap", "stop", "stop-recovery", "probe"])
+def test_review_dispatch_gates_are_owned_and_do_not_claim(harness, failure):
+    assigned_review(harness)
+    if failure in {"head", "authority"}:
+        harness.on_probe = lambda _id: harness.kernel.binding.update({failure: "b" * 40})
+    elif failure == "unavailable":
+        harness.available["claude-one"] = False
+    elif failure == "unknown":
+        original = harness.controller.available
+        harness.controller.available = lambda c, r, i, s: {"available": None} if i == "claude-one" else original(c, r, i, s)
+    elif failure == "lane":
+        harness.config.project(REPO)["lanes"] = ["codex-one"]
+    elif failure == "family":
+        harness.config.lanes["claude-one"]["family"] = "openai-codex"
+    elif failure == "cap":
+        harness.controller._worker_count = lambda _repo: 2
+    elif failure in {"stop", "stop-recovery"}:
+        harness.on_probe = lambda _id: harness.stop()
+        harness.probe_ok = failure == "stop"
+    else:
+        harness.probe_ok = False
+    result = harness.controller.reconcile(REPO)
+    assert result["launched"] == []
+    action = result["actions"][0]
+    assert action["execution"] == "blocked" and action["owner"] == "Hermes Driver"
+    assert action["reason"] and action["next_step"]
+    assert mutations(harness) == []
+    if failure == "stop-recovery":
+        assert not any(c[0] == "refresh_reviewer" for c in harness.kernel.calls)
+
+
+@pytest.mark.parametrize("verdict,expected", [(None, "blocked"), ("APPROVE", "completed"), ("REQUEST_CHANGES", "completed")])
+def test_review_exit_or_loss_requires_kernel_verdict_and_routes_continuation(harness, verdict, expected):
+    assigned_review(harness)
+    harness.controller.reconcile(REPO)
+    receipt = harness.state.workers(REPO)[0]
+    for descriptor in harness.descriptors:
+        os.close(descriptor)
+    harness.descriptors.clear()  # Lost reservation, even if stale receipt still says running.
+    if verdict:
+        receipt.update(state="exited", exit_code=0)
+        write_json(harness.state.worker_path(receipt["id"]), receipt)
+    harness.kernel.binding["verdict"] = verdict
+    result = harness.controller.reconcile(REPO)
+    assert result["launched"] == []
+    action = result["actions"][0]
+    assert action["execution"] == expected
+    if verdict:
+        assert action["review_binding"]["verdict"] == verdict
+        assert action["owner"] == "Hermes Driver"
+    else:
+        assert action["next_action"] == "review-blocked"
+        assert "without a valid verdict" in action["reason"]
+        assert harness.controller.reconcile(REPO)["launched"] == []
+        assert len([c for c in harness.kernel.calls if c[0] == "refresh_reviewer"]) == 1
+        assert harness.state.workers(REPO)[0]["review_recovery_attempted"] is True
+    assert len(harness.launched) == 1
+
+
+def test_due_external_fallback_is_serialized_and_launches_in_same_activation(harness):
+    assigned_review(harness)
+    harness.kernel.recovery_target = deepcopy(harness.kernel.binding)
+    harness.kernel.prs[0]["labels"] = ["review:coderabbit"]
+    harness.kernel.work["codex-one"].update(authority="coderabbit", next_action="refresh-reviewer")
+    result = harness.controller.reconcile(REPO)
+    assert len(result["launched"]) == 1 and result["launched"][0]["agent"] == "claude-one"
+    assert len([c for c in harness.kernel.calls if c[0] == "refresh_reviewer"]) == 1
+    assert harness.synced[-1][1][0]["execution"] == "queued"
+
+
+def test_lost_worker_recovery_runs_once_and_launches_new_bound_reviewer(harness):
+    assigned_review(harness)
+    harness.controller.reconcile(REPO)
+    for descriptor in harness.descriptors:
+        os.close(descriptor)
+    harness.descriptors.clear()
+    harness.config.project(REPO)["lanes"].append("codex-review")
+    harness.config.lanes["codex-review"] = {**harness.config.lanes["codex-one"], "capacity_key": "review-account"}
+    harness.available["codex-review"] = True
+    harness.kernel.recovery_target = {**harness.kernel.binding, "reviewer": "codex-review",
+                                      "reviewer_actor": "review-two", "authority": "openai-codex"}
+    result = harness.controller.reconcile(REPO)
+    assert result["launched"][0]["agent"] == "codex-review"
+    assert len([c for c in harness.kernel.calls if c[0] == "refresh_reviewer"]) == 1
+    assert harness.controller.reconcile(REPO)["launched"] == []

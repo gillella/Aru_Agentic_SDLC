@@ -32,6 +32,7 @@ from common import (
     normalized_identity,
     review_risk_tier,
     run,
+    same_github_actor,
     set_status,
     status_of,
 )
@@ -184,6 +185,12 @@ def _same_assignment(reference: dict[str, Any], live: dict[str, Any]) -> bool:
         == _one_label_value(reference, AUTHOR_PREFIX)
         and _one_label_value(live, AUTHOR_FAMILY_PREFIX)
         == _one_label_value(reference, AUTHOR_FAMILY_PREFIX)
+        and {name for name in label_names(live) if name.startswith((REVIEWER_PREFIX, REVIEWER_ACTOR_PREFIX))}
+        == {name for name in label_names(reference) if name.startswith((REVIEWER_PREFIX, REVIEWER_ACTOR_PREFIX))}
+        and same_github_actor(
+            str((live.get("author") or {}).get("login") or ""),
+            str((reference.get("author") or {}).get("login") or ""),
+        )
     )
 
 def replace_authority(

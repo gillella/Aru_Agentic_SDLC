@@ -21,6 +21,7 @@ REVIEW_AUTHORITIES = {
     "coderabbit", "sourcery", "codeant", "claude-code", "openai-codex",
     "xai-cursor", "google-antigravity",
 }
+CODING_AUTHORITIES = REVIEW_AUTHORITIES - {"coderabbit", "sourcery", "codeant"}
 
 
 class Controller:
@@ -76,10 +77,12 @@ class Controller:
                       and identity in issue["agents"]]
             if len(issues) > 1:
                 raise DriverError("multiple active claims for one identity")
-            if identity not in self.config.project(repo)["lanes"]:
+            if identity not in self.config.project(repo)["lanes"] and not any(
+                pr.get("author_agent") == identity for pr in snapshot["prs"]
+            ):
                 actions.append({"type": "external_owner", "agent": identity})
                 continue
-            receipts = [r for r in managed if r.get("agent") == identity]
+            receipts = [r for r in managed if r.get("agent") == identity and r.get("kind") != "review"]
             # Do not race a managed live writer. Unavailable quota alone must not
             # prevent read-only PR inspection, merge/finalize or reviewer refresh.
             if any(r.get("state") in {"launching", "running"}
@@ -87,6 +90,7 @@ class Controller:
                 continue
             work = adapter.next_work(identity)
             work = {**work.get("work", work), "agent": identity}
+            work = self._settle_live_review(work, managed)
             if not self._pr_matches_claim(work, snapshot, issues):
                 actions.append({"type": "ownership_conflict", "agent": identity,
                                 "pr": work["pr"],
@@ -103,12 +107,22 @@ class Controller:
                 elif identity in available:
                     receipt = max(owned, key=lambda r: r["started_at"])
                     resumes.append({**work, "worktree": receipt.get("worktree")})
-            elif work["type"] not in {"wait", "idle", "issue"} or work.get("next_action"):
+            elif work["type"] not in {"wait", "idle", "issue"} or work.get("next_action") or work.get("execution"):
                 actions.append(work)
             elif not issues and work["type"] in {"idle", "issue"}:
                 actions.append({"type": "ownership_conflict", "agent": identity,
                                 "reason": "authored PR exists but picker did not resume it"})
         return actions, resumes
+
+    def _settle_live_review(self, work: dict, managed: list) -> dict:
+        active = next((r for r in managed if r.get("kind") == "review" and r.get("pr") == work.get("pr")
+                       and self.state.capacity_holder(r["capacity_key"]) == r["id"]), None)
+        if active:
+            # A substantive review settles before any author mutation.
+            return {"type": "wait", "agent": work["agent"], "pr": work["pr"],
+                    "head": work.get("head"), "execution": "running", "worker_id": active["id"],
+                    "owner": "Hermes Driver", "next_step": "Worker completion or recovery heartbeat"}
+        return work
 
     @staticmethod
     def _pr_matches_claim(work: dict, snapshot: dict, issues: list) -> bool:
@@ -123,7 +137,7 @@ class Controller:
         # CI and external review proceed concurrently. The single-agent picker
         # only exposes review continuation after green CI, so observe an
         # already assigned authority here without changing its policy.
-        if work["type"] != "wait" or work.get("next_action") or not work.get("pr"):
+        if work["type"] != "wait" or work.get("next_action") or not work.get("pr") or work.get("execution"):
             return work
         pr = next(item for item in snapshot["prs"] if item["number"] == work["pr"])
         authorities = [name[7:] for name in pr.get("labels", [])
@@ -155,6 +169,8 @@ class Controller:
                     and self.state.capacity_holder(r["capacity_key"]) == r["id"]})
 
     def _action_due(self, action: dict) -> bool:
+        if action.get("execution") == "running":
+            return False
         if action.get("type") == "dependency":
             return action.get("next_action") in {"handoff", "dependency-satisfied"}
         if action.get("type") in {"external_owner", "unmanaged_claim", "ownership_conflict"}:
@@ -187,6 +203,11 @@ class Controller:
         resumes = [a for a in resumes if a.get("issue") not in held]
         reserved_accounts = {self.config.lane(repo, item)["capacity_key"]
                              for item in self._owners(snapshot) if item in project["lanes"]}
+        reserved_accounts.update(
+            self.config.lane(repo, name[9:])["capacity_key"]
+            for pr in snapshot["prs"] for name in pr.get("labels", [])
+            if name.startswith("reviewer:") and name[9:] in project["lanes"]
+        )
         free = [item for item in free
                 if self.config.lane(repo, item)["capacity_key"] not in reserved_accounts]
         slots = max(0, project.get("max_workers", 4) - self._worker_count(repo))
@@ -268,9 +289,12 @@ class Controller:
             launched = []
             try:
                 plan = self._plan(repo)
-                timers = self.sync_reviews(repo, plan["actions"])
                 adapter = self.adapter(repo)
+                actions = [self._converge_review(repo, adapter, a, launched) for a in plan["actions"]]
+                timers = self.sync_reviews(repo, actions)
                 for work in plan["resumes"]:
+                    if self._worker_count(repo) >= self.config.project(repo).get("max_workers", 4):
+                        break
                     if not self.available(self.config, repo, work["agent"], self.state).get("available"):
                         continue
                     if not self.probe(self.config, repo, work["agent"], self.state):
@@ -290,12 +314,116 @@ class Controller:
                              last_reconciled_at=self.now(), last_error=None,
                              handled_generation=state["generation"])
                 self.state.save(repo, state)
-                return {"status": "running" if launched else "waiting",
-                        "launched": launched, "actions": plan["actions"], "review_timers": timers,
+                return {"status": "running" if launched or self._worker_count(repo) else "waiting",
+                        "launched": launched, "actions": actions, "review_timers": timers,
                         "blocked_lanes": plan["blocked_lanes"], "reasons": plan["reasons"]}
             except (KernelAdapterError, DriverError, scheduler.SchedulerError) as exc:
                 result = self._failure(repo, state, exc, precheck=False)
                 return {**result, "launched": launched}
+
+    @staticmethod
+    def _review_blocked(work: dict, reason: str) -> dict:
+        return {**work, "execution": "blocked", "owner": "Hermes Driver",
+                "reason": reason, "next_action": "review-blocked",
+                "next_step": "Restore the stated gate, then reconcile; heartbeat owns retry"}
+
+    def _converge_review(self, repo: str, adapter, work: dict, launched: list) -> dict:
+        try:
+            if work.get("next_action") == "refresh-reviewer" and self._action_due(work):
+                if not self.state.project(repo)["enabled"]:
+                    raise DriverError("project stopped before reviewer refresh")
+                expected = {"repo": repo, "pr": work["pr"], "head": work["head"],
+                            "authority": work.get("authority"), "author": work["agent"], "issue": work["issue"]}
+                work = {**work, **adapter.refresh_reviewer(work["pr"], expected)}
+            if (work.get("next_action") == "await-authoritative-review"
+                    and work.get("authority") in CODING_AUTHORITIES):
+                return self._dispatch_review(repo, adapter, work, launched)
+            return work
+        except (KernelAdapterError, DriverError) as exc:
+            return self._review_blocked(work, str(exc))
+
+    def _dispatch_review(self, repo: str, adapter, work: dict, launched: list, *, recover=True) -> dict:
+        """One receipt per exact assignment; never infer a verdict from process exit."""
+        try:
+            binding = adapter.review_binding(work["pr"], {
+                "repo": repo, "pr": work["pr"], "head": work["head"],
+                "authority": work["authority"], "author": work["agent"], "issue": work["issue"],
+            })
+            work = {**work, "review_binding": binding}
+            if binding.get("verdict"):
+                next_work = adapter.next_work(binding["author"])
+                return {**next_work.get("work", next_work), "agent": binding["author"],
+                        "execution": "completed", "review_binding": binding,
+                        "owner": "Hermes Driver", "next_step": "Use current kernel convergence action"}
+            receipts = [r for r in self.state.workers(repo) if r.get("kind") == "review"
+                        and r.get("pr") == binding["pr"]]
+            if any(self.state.capacity_holder(r["capacity_key"]) == r["id"] for r in receipts):
+                return {**work, "execution": "running", "owner": "Hermes Driver",
+                        "next_step": "Existing worker completion event or recovery heartbeat"}
+            matching = [r for r in receipts if r.get("review") == binding]
+            if matching:
+                return self._recover_review(repo, adapter, work, matching[-1], launched, recover)
+            return self._start_review(repo, adapter, work, binding, launched, recover)
+        except (KernelAdapterError, DriverError) as exc:
+            return self._review_blocked(work, str(exc))
+
+    def _recover_review(self, repo: str, adapter, work: dict, receipt: dict, launched: list, recover: bool) -> dict:
+        if not self.state.project(repo)["enabled"]:
+            return self._review_blocked(work, "project stopped before reviewer recovery")
+        reason = receipt.get("reason") or "assigned review worker ended or lost its reservation without a valid verdict"
+        if not recover:
+            return self._review_blocked(work, reason)
+        if receipt.get("review_recovery_attempted"):
+            return {**self._review_blocked(work, receipt.get("recovery_error") or reason),
+                    "next_step": "Operator must reconcile the recorded recovery attempt before another helper call"}
+        receipt["review_recovery_attempted"] = True
+        write_json(self.state.worker_path(receipt["id"]), receipt)
+        try:
+            refreshed = adapter.refresh_reviewer(work["pr"], receipt["review"], reason)
+        except (KernelAdapterError, DriverError) as exc:
+            receipt["recovery_error"] = str(exc)
+            write_json(self.state.worker_path(receipt["id"]), receipt)
+            return {**self._review_blocked(work, str(exc)),
+                    "next_step": "Operator must reconcile the recorded recovery attempt before another helper call"}
+        next_work = {**work, **refreshed}
+        next_work.pop("review_binding", None)
+        if (next_work.get("next_action") == "await-authoritative-review"
+                and next_work.get("authority") in CODING_AUTHORITIES):
+            return self._dispatch_review(repo, adapter, next_work, launched, recover=False)
+        return next_work
+
+    def _start_review(self, repo: str, adapter, work: dict, binding: dict, launched: list, recover: bool) -> dict:
+        identity = binding["reviewer"]
+        lane = self.config.lane(repo, identity)
+        if lane["family"] != binding["authority"]:
+            raise DriverError("assigned reviewer family does not match the configured lane")
+        snapshot = adapter.snapshot()
+        if identity in self._owners(snapshot):
+            raise DriverError("assigned reviewer has author work; independent review lane is unavailable")
+        if self._worker_count(repo) >= self.config.project(repo).get("max_workers", 4):
+            raise DriverError("project worker capacity is fully reserved")
+        capacity = self.available(self.config, repo, identity, self.state)
+        if capacity.get("available") is not True:
+            raise DriverError("review capacity unavailable or unknown: " + str(capacity.get("reason", "no observation")))
+        if not self.probe(self.config, repo, identity, self.state):
+            receipt = {"id": uuid.uuid4().hex, "repo": repo, "agent": identity, "issue": binding["issue"],
+                       "kind": "review", "pr": binding["pr"], "head": binding["head"], "review": binding,
+                       "capacity_key": lane["capacity_key"], "state": "launch_failed", "started_at": self.now(),
+                       "reason": "assigned reviewer's bounded execution probe failed", "worktree": None}
+            write_json(self.state.worker_path(receipt["id"]), receipt)
+            return self._recover_review(repo, adapter, work, receipt, launched, recover)
+        current = adapter.review_binding(work["pr"], binding)
+        if current.get("verdict"):
+            return self._dispatch_review(repo, adapter, work, launched, recover=recover)
+        worktree = adapter.review_worktree(binding)
+        adapter.review_binding(work["pr"], binding)
+        if not self.state.project(repo)["enabled"]:
+            raise DriverError("project stopped before review launch")
+        receipt = self.launch(self.config, repo, identity, binding["issue"], worktree,
+                              kind="review", pr=binding["pr"], head=binding["head"], review=binding)
+        launched.append(receipt)
+        return {**work, "execution": "queued", "worker_id": receipt["id"],
+                "owner": "Hermes Driver", "next_step": "Supervised worker and completion wake"}
 
     def _fill_one(self, repo: str, adapter, identity: str, launched: list) -> None:
         if not self.available(self.config, repo, identity, self.state).get("available"):
