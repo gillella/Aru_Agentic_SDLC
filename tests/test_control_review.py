@@ -70,7 +70,7 @@ def test_control_review_is_revalidated_before_merge_submission(monkeypatch, path
         with pytest.raises(RuntimeError, match="command spy reached"):
             merge_pr.merge(10, HEAD)
         assert commands == [[
-            "gh", "pr", "merge", "10", "--merge", "--delete-branch",
+            "gh", "pr", "merge", "10", "--merge",
             "--match-head-commit", HEAD,
         ]]
     assert len(reviews) == 3

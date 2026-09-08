@@ -65,7 +65,7 @@ def test_stable_review_evidence_order_and_nullable_decision(monkeypatch, form, d
         'reviews', 'comments', 'assignments', 'checks']
     assert events == (['pr', 'queue', 'issue', 'ci', 'threads'] + review_reads) * 2 + (
         ['pr', 'issue', 'queue'] + review_reads + ['threads'])
-    assert commands == [['gh', 'pr', 'merge', '10', '--merge', '--delete-branch',
+    assert commands == [['gh', 'pr', 'merge', '10', '--merge',
                          '--match-head-commit', HEAD]]
 
 
