@@ -212,6 +212,22 @@ identity for repository creation. Configure the App runner only after the new
 repository has an installation; routine governed repository automation should
 then use the App route.
 
+### Installed agent guidance
+
+Run `scripts/install_agent_integration.sh` from the verified canonical checkout
+on each participating host. It updates managed Codex and Claude global guidance
+and links the six skills for Codex, Claude, Cursor and shared agent discovery.
+Global guidance leaves runner selection to each repository and contains no
+unresolved template values. The recognized legacy Claude Aru section is backed
+up and replaced through its managed closing marker; personal text before and
+after that section is preserved. Ambiguous legacy boundaries are refused.
+
+Record the source revision and before/after file hashes. Repeating installation
+must preserve the resulting content. Restore the recorded backup for rollback;
+do not restore credentials or change active claims, worktrees or Driver Stop.
+Consumer copied AGENTS.md/workflows and other hosts require their own recorded
+reconciliation; installing this host does not prove their rollout.
+
 ### Reviewer readiness
 
 Register each installed provider explicitly:

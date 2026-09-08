@@ -15,11 +15,29 @@ targets=(
   "${HOME}/.agents/skills"
   "${HOME}/.codex/skills"
   "${HOME}/.cursor/skills"
+  "${HOME}/.claude/skills"
 )
-global_agents="${HOME}/.codex/AGENTS.md"
 governance_template="${aru_home}/templates/AGENTS.md"
 managed_begin="<!-- BEGIN ARU_SDLC_GOVERNANCE -->"
 managed_end="<!-- END ARU_SDLC_GOVERNANCE -->"
+global_template="$(mktemp)"
+trap 'rm -f "${global_template}"' EXIT
+python3 - "${governance_template}" "${global_template}" <<'PYTHON'
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+text, count = re.subn(
+    r"This repository is scaffolded.*?whose declared profile and `runs-on:` disagree\.\n",
+    "Each repository must use its declared runner profile and trust boundary. "
+    "Read its local AGENTS.md and .aru/verify.sh; global guidance does not "
+    "select or change a repository's runner profile.\n",
+    text, flags=re.S,
+)
+if count != 1 or "__ARU_" in text:
+    raise SystemExit("error: global runner guidance could not be rendered")
+Path(sys.argv[2]).write_text(text)
+PYTHON
 
 retained() {
   local candidate="$1"
@@ -46,6 +64,34 @@ install_global_guidance() {
   if [[ ! -e "${target}" ]]; then
     cp "${template}" "${target}"
     echo "installed managed Aru guidance in ${target}"
+    return
+  fi
+
+  # The known Claude directive predates the managed block. Replace that Aru
+  # section through its closing marker, preserving personal text on both sides.
+  if grep -Fxq "# MASTER OPERATING DIRECTIVE: Aru_Agentic_SDLC" "${target}"; then
+    if [[ "$(grep -Fc "${managed_begin}" "${target}")" != 1 ||
+          "$(grep -Fc "${managed_end}" "${target}")" != 1 ]]; then
+      echo "error: refusing ambiguous legacy Aru guidance in ${target}" >&2
+      exit 1
+    fi
+    python3 - "${target}" "${template}" <<'PYTHON'
+import sys
+from pathlib import Path
+from datetime import datetime, timezone
+p, template = map(Path, sys.argv[1:])
+text = p.read_text()
+start = text.index("# MASTER OPERATING DIRECTIVE: Aru_Agentic_SDLC")
+begin = text.index("<!-- BEGIN ARU_SDLC_GOVERNANCE -->")
+end = text.index("<!-- END ARU_SDLC_GOVERNANCE -->")
+if not start < begin < end or text.count("# MASTER OPERATING DIRECTIVE: Aru_Agentic_SDLC") != 1:
+    raise SystemExit("error: refusing ambiguous legacy Aru guidance")
+end += len("<!-- END ARU_SDLC_GOVERNANCE -->")
+backup = p.with_name(p.name + ".pre-aru-v2." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"))
+backup.write_bytes(p.read_bytes())
+p.write_text(text[:start] + template.read_text().rstrip("\n") + text[end:])
+print(f"migrated legacy Aru guidance in {p}; preserved {backup}")
+PYTHON
     return
   fi
 
@@ -86,7 +132,9 @@ install_global_guidance() {
   echo "appended managed Aru guidance to ${target}"
 }
 
-install_global_guidance "${global_agents}" "${governance_template}"
+for target in "${HOME}/.codex/AGENTS.md" "${HOME}/.claude/CLAUDE.md"; do
+  install_global_guidance "${target}" "${global_template}"
+done
 
 for target in "${targets[@]}"; do
   mkdir -p "${target}"
