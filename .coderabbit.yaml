@@ -17,5 +17,13 @@ reviews:
         paths, and never turn a failed authority lookup into permission.
     - path: "tests/**"
       instructions: |
-        Require deny-path coverage for stale heads, missing CI, wrong reviewer,
-        unresolved feedback, unsafe touches, and surface-budget regressions.
+        Request regression coverage for the behavior this PR changes. Before
+        asking for a test, check whether an existing suite already covers it.
+        Deny-path coverage for stale heads, missing CI, wrong reviewer,
+        unresolved feedback, unsafe touches, and surface-budget regressions
+        already lives in the merge and surface suites; require it only when
+        the PR changes those merge, review, touches, or surface behaviors.
+        Do not ask for those merge-system cases to be duplicated inside an
+        unrelated feature-specific test file merely because its path matches
+        tests/**. Never weaken fail-closed merge or security expectations,
+        and do not suppress real findings.
