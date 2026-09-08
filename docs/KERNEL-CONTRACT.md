@@ -19,6 +19,13 @@ requires a new major version. Private helper internals, evidence documents,
 consumer verification commands, external Driver cadence, and consumer release
 or deployment systems are not part of the public API.
 
+The unreleased v2 migration withdraws previously declared merge-queue support.
+The workflow verifies same-repository PR heads only; it cannot prove a combined
+queue revision and all constituent issue scopes. The helper therefore refuses
+configured queues or pending queue/auto-merge requests before submission. It
+requires explicit queue-state fields; missing evidence never means disabled.
+No existing queue is canceled or reconfigured by this correction.
+
 ## Three layers
 
 | Layer | Responsibility | State authority |
@@ -68,15 +75,18 @@ The issue contract is:
 6. Open a PR containing `Closes #N`. The consumer-owned `aru-governed-pr`
    workflow checks out the exact PR head on that profile's runners, runs the
    repository-defined `.aru/verify.sh`, and validates `touches:` against the
-   actual diff. It has no cross-profile fallback. A GitHub merge queue reruns
-   verification on its merge-group revision.
+   actual diff. It has no cross-profile fallback and accepts only verified
+   same-repository `pull_request` events. Merge-group verification is unsupported.
 7. Require that exact-head server check and resolve every current-head finding.
    Tier 2-3 changes also require one assigned authoritative reviewer distinct
    from the author. A push invalidates earlier check and review evidence.
-8. Submit with `merge_pr.py --expected-head`. When GitHub uses a merge queue,
-   submission is not completion: close out only after its merge-group check and
-   GitHub confirmation show the exact PR head merged. Then verify Done and
-   remove only clean, closed Factory worktrees.
+8. Submit a direct merge with `merge_pr.py --expected-head`. Queue configuration
+   or a pending queue/auto-merge request blocks admission. Close out only after
+   GitHub confirms the exact PR head merged and current authority still passes.
+   `--finalize` recovers confirmed direct merges; a bounded, exact-head and
+   merge-commit-bound history read refuses any historical queue entry because
+   PR-head checks alone cannot prove its combined revision. Then verify Done
+   and remove only clean, closed Factory worktrees.
 
 Missing, partial, stale, contradictory, truncated, or unauthenticated evidence
 blocks the next transition. Never repair authority by hand-editing lifecycle or
@@ -107,8 +117,8 @@ verification prose outside these semantic fields may change without refusal.
 Separate GitHub metadata reads and the merge API are **non-atomic**. A bounded
 reread catches observed drift; it does not lock issue metadata or make the
 operations a transaction. Changes after their last read can still race submission,
-including queued merges. The expected-head argument binds the submitted commit,
-not all external metadata. Existing head, CI, review, thread, scope, and queue
+including queue configuration changes. The expected-head argument binds the submitted commit,
+not all external metadata. Existing head, CI, review, thread, scope, and queue-state
 provenance gates remain required. Post-merge close-out revalidates current
 authority before Done; it cannot prevent or undo a merge already submitted.
 
