@@ -76,7 +76,7 @@ def test_evaluate_blocks_missing_required_github_check(monkeypatch):
         merge_pr.evaluate(10, "a" * 40)
 
 
-def test_merge_rechecks_head_and_base(monkeypatch):
+def test_merge_rechecks_head_and_base(monkeypatch, tmp_path):
     pr = install_happy_gate(monkeypatch)
     gates = {
         "head": "a" * 40,
@@ -96,7 +96,16 @@ def test_merge_rechecks_head_and_base(monkeypatch):
         lambda *_args: evaluations.append(True) or gates,
     )
     calls = []
-    monkeypatch.setattr(merge_pr, "run", lambda argv: calls.append(argv))
+    worktree = tmp_path / ".worktrees" / "issue-7"
+    worktree.mkdir(parents=True)
+
+    def submit(argv):
+        # gh would merge remotely, then fail deleting a checked-out local branch.
+        if "--delete-branch" in argv and worktree.exists():
+            raise merge_pr.KernelError("branch is used by worktree")
+        calls.append(argv)
+
+    monkeypatch.setattr(merge_pr, "run", submit)
     monkeypatch.setattr(merge_pr, "close_out", lambda numbers: calls.append(["close", *numbers]))
     monkeypatch.setattr(
         merge_pr,
@@ -118,6 +127,7 @@ def test_merge_rechecks_head_and_base(monkeypatch):
     )
     result = merge_pr.merge(10, "a" * 40)
     assert result["merged"] is True
+    assert worktree.is_dir()
     assert len(evaluations) == 2
     assert "--match-head-commit" in calls[0]
     assert calls[-1] == ["finalize", 10, "a" * 40]

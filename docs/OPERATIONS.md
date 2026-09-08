@@ -852,6 +852,13 @@ python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" \
   --json
 ```
 
+The merge command does not delete local branches: an issue worktree may still
+have its branch checked out. Cleanup below is a separate step after confirmed
+merge and close-out. If an older helper reports a local checkout/deletion error
+after submission, first read the PR's actual merged state and exact head. Use
+`--finalize` only for the confirmed merged head; never interpret a command error
+or an unavailable GitHub response as successful merge.
+
 ### Step 9: clean safely
 
 Preview cleanup first:
