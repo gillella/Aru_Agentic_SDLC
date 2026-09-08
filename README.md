@@ -67,7 +67,7 @@ The source of truth stays deliberately small:
 | Isolation | One Git worktree per issue |
 | Verification | `aru-governed-pr` on the exact PR head, using only the repository's one assigned runner profile |
 | Review | None for Tier 0-1; one distinct current-head authority for Tier 2-3 |
-| Governed merge or merge-queue submission | `scripts/merge_pr.py` |
+| Governed direct merge and confirmed-merge recovery | `scripts/merge_pr.py` |
 | Deployment and production | The consumer repository and its operators |
 
 ## Is it usable for another project?
@@ -289,9 +289,12 @@ authority. For Tier 2-3, a push invalidates earlier review; self-review,
 unresolved findings, no-op provider results, and stale or conflicting
 attestations block merge.
 
-If the repository uses GitHub's merge queue, helper submission is not a merged
-result. Keep the issue In Review until GitHub confirms that exact head merged;
-only then complete Done and cleanup.
+Merge queues and pending auto-merge requests are unsupported in the v2 source
+candidate: the helper refuses them before submission. The workflow verifies
+same-repository PR heads only. `--finalize` recovers a confirmed direct merge;
+historical queue work is refused because a PR-head check does not prove the
+combined queue revision. Keep the issue In Review until merge and close-out
+are confirmed; only then clean up.
 
 ## The seven-document map
 

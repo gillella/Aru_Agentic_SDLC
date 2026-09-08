@@ -166,6 +166,12 @@ def traverse(monkeypatch, number: int) -> dict:
         state["pr"]["mergeCommit"] = {"oid": "c" * 40}
 
     monkeypatch.setattr(merge_pr, "run", merge_command)
+    monkeypatch.setattr(merge_state, "repo_slug", lambda: "owner/disposable")
+    monkeypatch.setattr(merge_state, "gh_json", lambda *_a, **_kw: {"data": {"repository": {
+        "pullRequest": {**copy.deepcopy(state["pr"]), "timelineItems": {
+            "nodes": [], "pageInfo": {"hasNextPage": False},
+        }},
+    }}})
 
     def close_out(numbers, _changed_paths):
         assert numbers == [number]

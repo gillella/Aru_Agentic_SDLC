@@ -164,3 +164,45 @@ def test_final_coding_binding_and_attestation(monkeypatch, family, mutation):
         assert commands == []
         if mutation == 'request-changes':
             assert str(exc.value) == family + ' exact-head authoritative review requested changes'
+
+
+@pytest.mark.parametrize("missing", ["mergeQueue", "mergeQueueEntry", "autoMergeRequest"])
+def test_missing_queue_field_is_not_proof_of_direct_merge(monkeypatch, missing):
+    record = dict(number=10, headRefOid=HEAD, baseRefOid="b" * 40,
+                  mergeQueue=None, mergeQueueEntry=None, autoMergeRequest=None)
+    monkeypatch.setattr(merge_state, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(merge_state, "gh_json", lambda *_a, **_k: {
+        "data": {"repository": {"pullRequest": record}},
+    })
+    assert merge_state.merge_queue_snapshot(10, HEAD)["configured"] is False
+    del record[missing]
+    with pytest.raises(merge_state.KernelError, match="incomplete or stale"):
+        merge_state.merge_queue_snapshot(10, HEAD)
+
+
+@pytest.mark.parametrize("mutation", ["head", "merge", "state", "missing", "bool", "wrong-node", "errors"])
+def test_finalize_rejects_unproven_queue_history(monkeypatch, mutation):
+    record = dict(number=10, headRefOid=HEAD, state="MERGED", mergeCommit={"oid": "c" * 40},
+                  timelineItems={"nodes": [], "pageInfo": {"hasNextPage": False}})
+    data = {"data": {"repository": {"pullRequest": record}}}
+    if mutation == "head":
+        record["headRefOid"] = "d" * 40
+    elif mutation == "merge":
+        record["mergeCommit"] = {"oid": "d" * 40}
+    elif mutation == "state":
+        record["state"] = "OPEN"
+    elif mutation == "errors":
+        data["errors"] = [{"message": "partial response"}]
+    else:
+        record["timelineItems"] = {
+            "nodes": [{"__typename": "UnrelatedEvent"}] if mutation == "wrong-node" else [],
+            "pageInfo": None if mutation == "missing" else {"hasNextPage": 0 if mutation == "bool" else False},
+        }
+    monkeypatch.setattr(merge_state, "repo_slug", lambda: "owner/repo")
+    def query(argv, **kwargs):
+        assert "ADDED_TO_MERGE_QUEUE_EVENT" in argv[3] and "first:1" in argv[3]
+        assert kwargs["auth"] == merge_state.REPOSITORY_AUTH
+        return data
+    monkeypatch.setattr(merge_state, "gh_json", query)
+    with pytest.raises(merge_state.KernelError, match="incomplete or stale|history is incomplete"):
+        merge_state.require_direct_merge_history(10, HEAD, "c" * 40)

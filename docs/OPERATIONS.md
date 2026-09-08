@@ -499,8 +499,11 @@ head GitHub Actions dispatches to the repository's assigned runner profile,
 runs the repository's `.aru/verify.sh` there, and checks the linked issue's
 `touches:` boundary against the actual diff. That exact-head server result is
 merge authority. Running the same commands outside Actions is useful preflight
-or audit evidence, but it is optional. The workflow also handles `merge_group`
-so a GitHub merge queue reruns `.aru/verify.sh` on the combined queue revision.
+or audit evidence, but it is optional. The workflow accepts only verified
+same-repository `pull_request` events. Merge-group verification is unsupported;
+configured merge queues and pending queue/auto-merge requests are refused by
+the merge helper. This capability correction is part of the unreleased v2
+migration; do not enable a queue for this workflow.
 
 Required Kernel jobs never fall back across profiles. A `self-hosted-mac`
 repository whose pool is offline leaves the check queued and merge blocked; it
@@ -856,14 +859,19 @@ python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" \
 
 The merge helper re-reads the PR, exact head, exact-head governed server check,
 authoritative verdict, unresolved threads, base state, linked issue state, and
-acceptance criteria immediately before submission. Without a merge queue it
-confirms merge and marks the linked issue Done. With a configured GitHub merge
-queue it verifies the exact-head queue or auto-merge entry and returns a queued
-result without closing the issue; a later bounded activation must confirm the
-actual merge before close-out.
+acceptance criteria immediately before submission. It requires explicit valid
+queue-state evidence and refuses configured queues or pending queue/auto-merge
+requests without changing them. A successful direct merge is confirmed before
+the linked issue is marked Done. Missing or changed state blocks submission.
 
-When a later activation finds that queued PR merged, finalize the same exact
-head instead of submitting it again:
+If a direct merge completed but close-out was interrupted, recover the same
+exact head instead of submitting it again. Finalization checks the merged head
+and merge commit against a bounded queue-history read. Any historical queue
+entry or unreadable history refuses close-out: PR-head CI alone cannot prove a
+combined queue revision. Existing queued work needs operator reconciliation;
+this helper neither cancels it nor marks it Done.
+
+For confirmed direct-merge recovery:
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" \
@@ -931,7 +939,7 @@ create a scheduler, autonomous loop, or second work queue.
 | `create_pr.py` | Open the governed PR | Requires published exact head and appends `Closes #N` |
 | `check_ci.py` | Read exact-head governed verification state | Fails closed on a missing, stale, or failing required server check |
 | `fetch_pr_feedback.py` | Read unresolved review findings | Rejects truncated review-thread inventory |
-| `merge_pr.py` | Evaluate and perform, queue, or finalize the governed merge | Requires expected head, exact-head server verification, any risk-required review, and clean threads; queued is not merged |
+| `merge_pr.py` | Evaluate, perform, or recover a confirmed direct merge | Requires expected head, exact-head server verification, risk-required review, clean threads, and complete queue-state evidence; queue admission and historical queue close-out are refused |
 | `cleanup_worktrees.py` | Remove eligible Factory worktrees | Retains dirty, open, and ambiguous worktrees |
 | `revert_merge.py` | Create governed reverse gear | Requires a separate approved revert issue |
 
@@ -1092,7 +1100,7 @@ Use it for history and recovery evidence, not as a second active kernel.
 | Coding review is rejected | Identity, actor, payload, head, verdict, or findings are invalid | Obtain one fresh formal attestation from the assigned non-author reviewer |
 | Review thread inventory is truncated | GitHub did not return complete evidence | Stop and retry when complete data is available |
 | Merge expected-head mismatch | PR changed after the SHA was captured | Re-read, re-check, obtain any risk-required review, and use the new SHA |
-| Merge helper reports queued or auto-merge | GitHub accepted submission but has not merged | Keep In Review; after GitHub merges, rerun with `--finalize` for the same exact head before cleanup |
+| Merge helper refuses unsupported queue or pending auto-merge | Workflow verifies PR heads only | Keep In Review; reconcile queue policy outside this source task. Do not enable a queue, bypass provenance, or close historical queue work from PR-head CI |
 | Cleanup retains a worktree | It is dirty, open, unregistered, or ambiguous | Inspect it; never force-delete unknown work |
 | GraphQL rate limit is exhausted | Board and review authority cannot be read | Enter degraded mode and wait for reset |
 
@@ -1209,8 +1217,8 @@ true.
       Tier 2-3 pilot received exactly one distinct authoritative review.
 - [ ] Exact-head `aru-governed-pr` verification and any risk-required review
       completed.
-- [ ] `merge_pr.py --expected-head` performed the real merge, or a queued
-      result was kept In Review until GitHub confirmed the exact head merged.
+- [ ] `merge_pr.py --expected-head` performed the real direct merge, with
+      `--finalize` used only for confirmed direct-merge recovery.
 - [ ] The issue reached Done and cleanup retained nothing unsafe.
 
 Once this checklist passes, the project is ready for routine issue-to-safe-merge
