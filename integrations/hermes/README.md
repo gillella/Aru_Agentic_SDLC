@@ -19,6 +19,52 @@ requirements to consume a subscription.
 The adapter inherits the configured Hermes model. Installing it does not choose
 or change that model. Operational receipts are not another issue board.
 
+## Independent review execution
+
+An assigned coding reviewer must be a configured lane with the same identity
+and family as the kernel's current assignment and a registered GitHub actor
+distinct from the author. Reconcile uses the existing supervised worker and
+capacity lock with a detached exact-head review worktree. The read-only review
+prompt requires issue acceptance, scope, substantive diff/surrounding-code
+inspection, focused verification and the kernel's formal attestation. It
+forbids source edits, claims, assignment changes and merging. Assignment alone
+is not progress: the result names a queued/running receipt or an owned blocker.
+
+The existing completion wake returns to the Driver. Fresh kernel verdict
+evidence routes approval to existing CI/merge/finalization and defects to the
+author. Exit or a lost reservation without a verdict requests governed reviewer
+recovery; the same assignment is never blindly relaunched. The configured
+Hermes supervisor owns the single recovery helper call and subsequent bounded
+reconcile. Missing permissions retain an explicit operator next action; Stop
+and unavailable capacity do not activate another launcher.
+
+Callback examples before this repair:
+
+```text
+Handle returned actions using the installed hermes-project-driver skill.
+[Skill] Otherwise use the verified existing Hermes provider dispatch path ...
+[Skill] The shared installed aru-code-factory skill may supply native provider execution details ...
+```
+
+Those instructions left worker creation to another expanded instruction set.
+The #583 incident records callbacks containing 113k–141k expanded characters;
+that observation does not prove prompt size caused the elapsed delay.
+The revised callback names the operation and its current evidence:
+
+```text
+Reconcile owns review launch; use its worker receipt or name the blocked owner/reason/next step.
+Load only the named PR/head/assignment and issue acceptance/scope;
+load historical incident context only if needed for a blocker.
+A stopped Driver stays stopped.
+```
+
+The worker receives one review-only prompt with repo, PR, full head, assignment,
+actor, author, detached worktree and current contract location. It loads the
+live issue rather than copying incident history or obsolete factory rules.
+These are source examples, not measured post-installation callback sizes.
+Isolated tests establish source behavior; #557 separately owns authorized
+installed-runtime, restart/Stop and completion-to-next-dispatch acceptance.
+
 ## Configuration and explicit authorization
 
 Copy [config.example.json](config.example.json) to an operator-owned absolute

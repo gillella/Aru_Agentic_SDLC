@@ -29,12 +29,8 @@ project binding is missing, ask for it before starting workers.
 Read the target repository's current `AGENTS.md`, the configured canonical
 `kernel_root/docs/KERNEL-CONTRACT.md`, and the applicable versioned workflow
 files under `kernel_root/skills/`. Those current files control lifecycle,
-picker, review, and helper behavior. The shared installed `aru-code-factory`
-skill may supply native provider execution details only where consistent with
-them; its older batch-picker limits or reviewer policies are not authority.
-This integration does not depend on silently refreshing that unversioned
-skill. If no verified native provider execution path is available, report the
-specific integration blocker instead of improvising a launcher.
+picker, review, and helper behavior. `reconcile` owns configured worker launch;
+do not expand historical factory instructions or arrange a second launcher.
 
 Repository Setup/Create uses the canonical bootstrap path; Update refreshes
 approved integration source without starting the Loop. Installing this
@@ -84,24 +80,32 @@ The action is a request to inspect and converge, not evidence that a gate has
 passed. A PR closed without merging authorizes no merge finalization or
 capacity refill by itself. Do not invent helper switches from old examples.
 
-For `await-authoritative-review`, distinguish the assigned authority. An
-external provider already owns its review; stay quiet while its verified
-deadline continuation is pending. An assigned coding fallback needs Hermes
-to arrange or check exactly one independent review worker. First reread the
-live head, sole authority, reviewer family and GitHub actor binding, author
-actor, existing worker/process ownership, and actual subscription availability.
-Reuse the existing worker for that PR/head if present. Otherwise use the
-verified existing Hermes provider dispatch path and the canonical formal
-review workflow to start only the assigned reviewer, with tracked completion.
-Never self-review, duplicate a worker, select a different authority yourself,
-or create a parallel review queue. The review must inspect the substantive
-change and submit the canonical full-current-head formal attestation.
+For `await-authoritative-review`, an external provider owns its review while
+its verified deadline continuation is pending. `reconcile` launches an assigned
+coding reviewer through the existing supervisor, in a detached exact-head
+review worktree. It returns `execution:queued` with a worker receipt, or an
+explicit `execution:blocked` owner, reason and next step. The supervisor records
+running and exited states; its existing completion event wakes this Driver.
+No separate generic reviewer or author worker may substitute for the assignment.
 
-If the assigned coding review cannot run or loses capacity, report that
-evidence through the canonical reviewer-refresh/unavailability helper path
-after rereading authority; only the helper may change the assignment. Missing
-actor separation or a missing provider execution path is a concrete blocker,
-not permission to launch a generic reviewer or silently update a skill.
+For a due `refresh-reviewer` action, reread PR/head/sole authority and, when
+provided, every field of `review_binding`. Cancel a stale action. Invoke the
+canonical `create_pr.py --refresh-reviewer N` once; include
+`--coding-reviewer-unavailable REASON` only for the returned observed failure.
+Only that helper selects authority: CodeRabbit first when usable, otherwise
+an available distinct coding reviewer; retired providers are never candidates.
+Then run one fresh reconcile immediately so a new coding assignment executes.
+Do not overlap refresh commands or retry an exhausted assignment yourself.
+If recovery fails, report its precise blocker with this Driver as next owner.
+Capacity/identity/permission blockers retain the heartbeat or explicit operator
+action as their next step. If this callback cannot execute an authorized
+action, explicitly name the required operator and action; a stopped Driver
+stays stopped. A denied launch never authorizes activation or another launcher.
+
+Worker exit is not approval. Reconcile reads the kernel's current-head verdict;
+valid approval returns to normal CI/merge/finalization, substantive defects to
+the implementation owner, and an exit/lost reservation without a verdict to
+governed reviewer recovery. A reviewer must never edit the code and approve it.
 
 The adapter may refill multiple verified free lanes in one activation,
 rechecking capacity and reservations between assignments. Promote only
