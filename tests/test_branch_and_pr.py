@@ -106,6 +106,8 @@ def install_refresh(
 
     def json_response(argv, **_kwargs):
         if argv[0] == "api":
+            if "statuses?" in argv[-1]:
+                return [[]] if "--slurp" in argv else []
             records = provider_checks(pr) if checks is None else checks
             page = {"total_count": len(records), "check_runs": records}
             return [page] if "--slurp" in argv else page
@@ -492,7 +494,8 @@ def test_refresh_with_supplied_policy_does_not_reload_labels_while_pending(monke
     assert outcome["reason"] == "external-pending"
 
 
-def test_refresh_assigns_first_authority_when_current_diff_fails_up(monkeypatch):
+@pytest.mark.parametrize("coderabbit,timeout,retry", [(create_pr.AVAILABLE, 900, "02"), (create_pr.PENDING, 900, "02"), (create_pr.PENDING, 60, "01")])
+def test_refresh_assigns_first_authority_when_current_diff_fails_up(monkeypatch, coderabbit, timeout, retry):
     observed = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
     pr = assignment_pr(created_at=observed)
     pr["labels"] = [
@@ -519,13 +522,14 @@ def test_refresh_assigns_first_authority_when_current_diff_fails_up(monkeypatch)
         lambda *_args, **_kwargs: mutations.append("assigned"),
     )
 
-    outcome = create_pr.refresh_assignment(42, now=observed)
+    policy = review_policy.review_policy_from_labels(("reviewer-registered:coderabbit", f"review-policy:timeout={timeout}"))
+    outcome = create_pr.refresh_assignment(42, now=observed, policy=policy, external_states=external_states(coderabbit=coderabbit))
 
     assert mutations == ["assigned"]
     assert outcome["action"] == "assigned"
     assert outcome["authority"] == "coderabbit"
     assert outcome["risk_tier"] == 2
-    assert outcome["retry_at"] == "2026-08-27T12:15:00+00:00"
+    assert outcome["retry_at"] == f"2026-08-27T12:{retry}:00+00:00"
 
 
 def test_no_external_or_coding_reviewer_fails_closed(monkeypatch):
@@ -746,22 +750,8 @@ def test_local_changed_paths_include_both_rename_sides(monkeypatch):
 
 def test_create_pr_revalidates_ownership_after_reviewer_selection(monkeypatch):
     records = iter(
-        [
-            {
-                "number": 6,
-                "labels": [
-                    {"name": "status:in-progress"},
-                    {"name": "agent:codex-1"},
-                ],
-            },
-            {
-                "number": 6,
-                "labels": [
-                    {"name": "status:in-progress"},
-                    {"name": "agent:another-agent"},
-                ],
-            },
-        ]
+        {"number": 6, "labels": [{"name": "status:in-progress"}, {"name": f"agent:{owner}"}]}
+        for owner in ("codex-1", "another-agent")
     )
     monkeypatch.setattr(create_pr, "issue", lambda _number: next(records))
     monkeypatch.setattr(create_pr, "current_branch", lambda: "feat/issue-6-small-change")
