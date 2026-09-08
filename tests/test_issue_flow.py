@@ -9,9 +9,9 @@ import claim_issue
 import triage_backlog
 
 
-def backlog_issue(*labels: str) -> dict[str, Any]:
+def backlog_issue(*labels: str, number: int = 3) -> dict[str, Any]:
     return {
-        "number": 3, "title": "ready", "state": "OPEN",
+        "number": number, "title": "ready", "state": "OPEN",
         "body": "## Acceptance Criteria\n\n- [ ] Complete the fix.\n\ntouches: scripts/example.py",
         "labels": [{"name": label} for label in labels],
     }
@@ -83,14 +83,9 @@ def _mock_claim_context(monkeypatch, snapshots, status="Ready"):
 
 @pytest.mark.parametrize("race", [False, True])
 def test_claim_settlement_and_race_rollback(monkeypatch, race):
-    snapshots = [
-        {"number": 7, "labels": [], "state": "OPEN"},
-        {"number": 7, "labels": [{"name": "agent:codex-1"}] + ([{"name": "agent:codex-2"}] if race else []), "state": "OPEN"},
-        ({"number": 7, "labels": [{"name": "agent:codex-1"}, {"name": "agent:codex-2"}], "state": "OPEN"}
-         if race else {"number": 7, "labels": [{"name": "agent:codex-1"}], "state": "OPEN"}),
-        ({"number": 7, "labels": [{"name": "agent:codex-2"}], "state": "OPEN"}
-         if race else {"number": 7, "labels": [{"name": "agent:codex-1"}], "state": "OPEN"}),
-    ]
+    owners = ["agent:codex-1"] + (["agent:codex-2"] if race else [])
+    owned = backlog_issue(*owners, number=7)
+    snapshots = [backlog_issue(number=7), owned, owned, backlog_issue("agent:codex-2" if race else "agent:codex-1", number=7)]
     statuses_live = ["Ready", "Ready"] if race else ["Ready", "Ready", "In Progress"]
     _mock_claim_context(monkeypatch, snapshots, status=statuses_live)
     commands, statuses = [], []
@@ -162,10 +157,13 @@ def test_app_claim_failure_retries_and_release_preserves_human_assignees(monkeyp
     def command(argv):
         assert "--add-assignee" not in argv and "--remove-assignee" not in argv
         adding = "--add-label" in argv
-        fail = adding and failure.pop() if failure else False
+        fail = adding and bool(failure) and failure.pop()
         label = {"name": "agent:codex-1"}
         if not fail or partial:
-            record["labels"].append(label) if adding else record["labels"].remove(label)
+            if adding:
+                record["labels"].append(label)
+            else:
+                record["labels"].remove(label)
         if fail:
             raise claim_issue.KernelError("App edit failed")
 
@@ -194,9 +192,8 @@ def test_app_claim_failure_retries_and_release_preserves_human_assignees(monkeyp
 
 
 def test_release_requires_in_progress_and_no_linked_open_pr(monkeypatch):
-    record = backlog_issue("agent:codex-1", "status:in-progress")
+    record = backlog_issue("agent:codex-1", "status:in-progress", number=7)
     monkeypatch.setattr(claim_issue, "issue", lambda _number: record)
-    monkeypatch.setattr(claim_issue, "status_of", lambda _record: "In Progress")
     monkeypatch.setattr(claim_issue, "linked_open_prs", lambda _number: [44])
     monkeypatch.setattr(
         claim_issue,
@@ -224,10 +221,9 @@ def test_closed_stale_active_claim_blocks_a_second_claim(monkeypatch):
 
 
 def test_release_rolls_back_status_when_claim_removal_fails(monkeypatch):
-    record = backlog_issue("agent:codex-1", "status:in-progress")
+    record = backlog_issue("agent:codex-1", "status:in-progress", number=7)
     statuses = []
     monkeypatch.setattr(claim_issue, "issue", lambda _number: record)
-    monkeypatch.setattr(claim_issue, "status_of", lambda _record: "In Progress")
     monkeypatch.setattr(claim_issue, "linked_open_prs", lambda _number: [])
     monkeypatch.setattr(
         claim_issue,
