@@ -110,3 +110,50 @@ scope after checking current evidence; repeated Loop must not create a second
 heartbeat or reuse an occupied account. A test of Stop with no live worker
 cannot establish that an active worker was preserved. Record the observed case
 and leave any untested live acceptance criteria open.
+
+### Live evidence: recovery heartbeat honesty (2026-09-08)
+
+Two incidents on the operator's Mac Mini established that a degraded Driver is
+reported as degraded and that the ten-minute recovery heartbeat is honest.
+
+- **[#574](https://github.com/gillella/Aru_Agentic_SDLC/issues/574), fixed by
+  [PR #575](https://github.com/gillella/Aru_Agentic_SDLC/pull/575).** JMC
+  heartbeat `c14ac8ff8830` ran under launchd's minimal `PATH`; the kernel bridge
+  failed with `[Errno 2] No such file or directory: 'gh'`. The Driver recorded that
+  `last_error`, but the native scheduler recorded `last_status: ok` because the
+  wrapper exited zero. After the fix the wrapper resolves `gh` deterministically,
+  exits non-zero on a degraded precheck, and a cooling-down tick still reports the
+  recorded failure instead of laundering it to healthy.
+- **[#579](https://github.com/gillella/Aru_Agentic_SDLC/issues/579), fixed by
+  [PR #580](https://github.com/gillella/Aru_Agentic_SDLC/pull/580).** At
+  18:29Z on 2026-09-08 Hermes self-updated to 0.21.1 (`main @ b2aa855b62`) and
+  moved `_parse_wake_gate` to `cron/scheduler_prompt.py`. From 18:34Z every
+  Driver `start` and `stop` for both projects returned:
+  `{"wakeAgent": false, "status": "error", "reason": "Installed Hermes lacks
+  script wake gates; upgrade before enabling the Driver"}`. `stop` disables
+  Driver state before the scheduler call, so both projects were left disabled
+  with heartbeats still enabled and ticks answering `project stopped`. The probe
+  now recognizes the gate by AST in any `cron/*.py` module; `start` succeeded at
+  18:53Z after the fix was installed.
+- **Identifiers.** `c14ac8ff8830` is the JMC ten-minute heartbeat,
+  `5810faaa7409` the Aru_Agentic_SDLC heartbeat, `d55a8c131a03` the one-shot
+  immediate wake scheduled by the JMC `start` at 17:52Z.
+- **Recovery sequence.** `d55a8c131a03` ran the agent, which reconciled at
+  17:53:36Z and cleared `last_error`. `c14ac8ff8830` then fired at 18:03:00Z
+  under the scheduler's own environment with `wakeAgent=false`, exit 0 and
+  `last_error: null`; after the #579 restart `5810faaa7409` did the same at
+  18:05Z.
+
+What this proves: a missing routing prerequisite (the `gh` executable, the
+wake-gate probe) produces an explicit degraded or error state, the recovery
+heartbeat cannot report `ok` over a Driver that could not observe GitHub, and
+quiet idle checks stay quiet. It records no capacity observation or probe
+result; the capacity veto is tracked separately under
+[#572](https://github.com/gillella/Aru_Agentic_SDLC/issues/572). It does not
+prove completion-to-next-dispatch refill, or Stop and restart with an active
+worker.
+Those remain open on
+[#557](https://github.com/gillella/Aru_Agentic_SDLC/issues/557); the full
+sequence with exact outputs is recorded in
+[this comment](https://github.com/gillella/Aru_Agentic_SDLC/issues/557#issuecomment-5589865436).
+

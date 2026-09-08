@@ -1351,6 +1351,24 @@ successful typed return must not be reported as closing that live acceptance
 gap. Restoring dispatch requires resolving the recorded blocker within explicit
 operator authorization and repeating the missing live test.
 
+### Live validation record: 2026-09-08
+
+Both Mac Mini projects were reinstalled from kernel `3384e99` after
+[#574](https://github.com/gillella/Aru_Agentic_SDLC/issues/574) and
+[#579](https://github.com/gillella/Aru_Agentic_SDLC/issues/579); the evidence and
+its limits are recorded in
+[DEGRADED-MODE.md](DEGRADED-MODE.md#live-evidence-recovery-heartbeat-honesty-2026-09-08).
+Read the two health fields together from now on: the native job's `last_status`
+says whether the last wrapper run exited zero, and the Driver's `last_error` says
+whether the last observation of GitHub succeeded. Since PR #575 they agree: a
+degraded precheck exits non-zero, so `ok` beside a non-null `last_error` can no
+longer occur. A quiet or cooling-down tick preserves a recorded `last_error`;
+only a successful reconcile clears it. So when a non-null `last_error` was seen
+earlier, a later `ok` beside `last_error: null` means that reconcile ran; on a
+project with no prior error the same pair is simply a healthy run. Refill and
+active-worker Stop/restart remain unproven; see the issues decomposed from #557
+for the scripted canary and its approved live run.
+
 ### Reviewer-policy migration to v2 source
 
 Use the verified merged source revision before updating installed integrations.
