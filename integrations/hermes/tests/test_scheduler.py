@@ -279,3 +279,30 @@ def test_malformed_review_events_raise_catchable_error_before_native_access(setu
     with pytest.raises(scheduler.SchedulerError):
         scheduler.sync_review_wakes(home, project, config, driver, [{**event, **updates}], cron_api=api)
     assert not home.exists() and not api.jobs
+
+
+@pytest.mark.parametrize(
+    ("files", "ok"),
+    [
+        # Definition and call site both in scheduler.py (Hermes <= 0.21.0).
+        ({"scheduler.py": "def _parse_wake_gate(o):\n    return True\n_parse_wake_gate('')\n"}, True),
+        # Hermes 0.21.1: call site stays in scheduler.py, definition moved to scheduler_prompt.py.
+        ({"scheduler.py": "from cron.scheduler_prompt import _parse_wake_gate\n_parse_wake_gate('')\n",
+          "scheduler_prompt.py": "def _parse_wake_gate(o):\n    return True\n"}, True),
+        # No gate at all, a definition the scheduler never calls, or no scheduler module.
+        ({"scheduler.py": "def _run_job_script(p):\n    return True\n"}, False),
+        ({"scheduler.py": "pass\n", "scheduler_prompt.py": "def _parse_wake_gate(o):\n    return True\n"}, False),
+        ({"scheduler_prompt.py": "def _parse_wake_gate(o):\n    return True\n"}, False),
+    ],
+)
+def test_wake_gate_probe_accepts_the_definition_in_any_cron_module(tmp_path, files, ok):
+    cron = tmp_path / "cron"
+    cron.mkdir()
+    for name, body in files.items():
+        (cron / name).write_text(body)
+    if ok:
+        scheduler._require_wake_gate(tmp_path)
+    else:
+        with pytest.raises(scheduler.SchedulerError, match="lacks script wake gates"):
+            scheduler._require_wake_gate(tmp_path)
+

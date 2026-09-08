@@ -39,6 +39,22 @@ def _namespace(project: str) -> str:
     return "aru-driver:" + hashlib.sha256(project.lower().encode()).hexdigest()[:20] + ":"
 
 
+def _require_wake_gate(runtime: Path) -> None:
+    """Refuse a Hermes runtime whose cron scheduler cannot honor ``{"wakeAgent": false}``.
+
+    The scheduler must still call ``_parse_wake_gate`` at its pre-run script gate,
+    but the definition may live in any ``cron/*.py`` module: Hermes 0.21.1 moved it
+    from ``scheduler.py`` to ``scheduler_prompt.py`` without changing behavior.
+    """
+    message = "Installed Hermes lacks script wake gates; upgrade before enabling the Driver"
+    scheduler_source = runtime / "cron" / "scheduler.py"
+    if not scheduler_source.is_file() or "_parse_wake_gate(" not in scheduler_source.read_text():
+        raise SchedulerError(message)
+    modules = sorted(path for path in (runtime / "cron").glob("*.py") if path.is_file())
+    if not any("def _parse_wake_gate(" in path.read_text() for path in modules):
+        raise SchedulerError(message)
+
+
 def _load_api(hermes_home: Path, hermes_repo: Path | None, cron_api: Any):
     if cron_api is not None:
         api = cron_api
@@ -47,9 +63,7 @@ def _load_api(hermes_home: Path, hermes_repo: Path | None, cron_api: Any):
         if current_home != hermes_home:
             raise SchedulerError("Run under the configured Hermes home; refusing another profile's jobs")
         runtime = Path(hermes_repo or hermes_home / "hermes-agent").expanduser().resolve()
-        scheduler_source = runtime / "cron" / "scheduler.py"
-        if not scheduler_source.is_file() or "def _parse_wake_gate(" not in scheduler_source.read_text():
-            raise SchedulerError("Installed Hermes lacks script wake gates; upgrade before enabling the Driver")
+        _require_wake_gate(runtime)
         # Native job functions perform deferred Hermes imports too. Keep the
         # selected runtime available for this short-lived adapter process.
         if str(runtime) not in sys.path:
