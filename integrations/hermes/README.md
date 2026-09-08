@@ -168,12 +168,19 @@ Worker command permissions remain the installed CLI's normal sandbox policy.
 
 ## Capacity observations and probes
 
-The supplied `capacity.py --family openai-codex` observer conservatively checks
-local process names. Supported families are `openai-codex`, `claude-code`,
+The supplied `capacity.py --family openai-codex` observer reports local agent
+processes as diagnostics. Supported families are `openai-codex`, `claude-code`,
 `xai-cursor`, and `google-antigravity`; Claude can additionally use
-`--claude-profile PROFILE`. Matching live processes or uncertain profile
-ownership are unavailable. This observer does not measure subscription quota
-or inspect remote hosts.
+`--claude-profile PROFILE`. Process presence is not exhaustion: a desktop
+session, a process without an observable `CLAUDE_CONFIG_DIR`, or a process on
+another profile is counted in the reason and leaves the lane available. The only
+process-based veto is a live Claude process on exactly the lane's own profile.
+Quota is established solely by the bounded exact-model probe and provider
+responses; managed workers are protected by the Driver's reservation lock, not
+by process names. An observer that fails, hangs or cannot reach an optional
+remote host blocks only that observation (`observer unavailable`), never the
+lane permanently. This observer does not measure subscription quota or inspect
+remote hosts.
 
 For account-wide quota or remote-host observations, replace `capacity_command`
 with your own bounded, read-only executable. This is a configuration hook,
