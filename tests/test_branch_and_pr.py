@@ -494,7 +494,7 @@ def test_refresh_with_supplied_policy_does_not_reload_labels_while_pending(monke
     assert outcome["reason"] == "external-pending"
 
 
-@pytest.mark.parametrize("coderabbit,timeout,retry", [(create_pr.AVAILABLE, 900, "15"), (create_pr.PENDING, 900, "02"), (create_pr.PENDING, 60, "01")])
+@pytest.mark.parametrize("coderabbit,timeout,retry", [(create_pr.AVAILABLE, 900, "02"), (create_pr.PENDING, 900, "02"), (create_pr.PENDING, 60, "01")])
 def test_refresh_assigns_first_authority_when_current_diff_fails_up(monkeypatch, coderabbit, timeout, retry):
     observed = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
     pr = assignment_pr(created_at=observed)

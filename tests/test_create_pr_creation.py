@@ -68,7 +68,7 @@ def test_create_pr_binds_head_and_exactly_one_reviewer(monkeypatch, coderabbit):
     assert outcome["head"] == "a" * 40
     assert statuses == [(6, "In Review", "In Progress")]
     assert outcome["next_action"] == "refresh-reviewer"
-    assert outcome["retry_at"] == ("2026-09-01T12:15:00+00:00" if coderabbit == create_pr.AVAILABLE else "2026-09-01T12:02:00+00:00")
+    assert outcome["retry_at"] == "2026-09-01T12:02:00+00:00"
     body = commands[0][commands[0].index("--body") + 1]
     assert body.count("Closes #6") == 1
     assert "aru-local-verification" not in body

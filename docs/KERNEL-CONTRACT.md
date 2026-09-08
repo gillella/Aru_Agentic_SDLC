@@ -193,9 +193,11 @@ the review label, a stale run or a future timestamp is unavailability. No
 activity yet keeps CodeRabbit eligible for initial assignment, because it cannot
 run before that label, but an assignment with no authentic activity inside a
 120-second window falls back to coding review instead of waiting the deadline.
-Initial and repaired unproven assignments emit their first refresh within that
-window (or the shorter configured timeout); later observations do not reset the
-assignment's completion deadline. Malformed status inventories fail closed,
+Every initial or repaired assignment emits its first refresh within that window
+(or the shorter configured timeout). Only activity from the current assignment
+or a valid current-PR verdict establishes acceptance; prior same-head activity
+proves access only. Later observations do not reset the assignment's completion
+deadline. Malformed status inventories fail closed,
 including mixed valid and malformed records, rather than becoming empty activity.
 
 ## Risk-proportional consumer policy

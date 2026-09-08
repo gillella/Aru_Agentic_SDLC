@@ -352,7 +352,7 @@ def assign_missing_authority(
     if _one_authority(updated) != authority:
         raise KernelError("newly required review authority was not confirmed")
     external = authority in EXTERNAL_REVIEWERS
-    delay = effective.timeout_seconds if states.get(authority) == AVAILABLE else min(effective.timeout_seconds, ACTIVITY_GRACE_SECONDS)
+    delay = min(effective.timeout_seconds, ACTIVITY_GRACE_SECONDS)
     return {
         "pr": number, "authority": authority, "reviewer": identity,
         "action": "assigned", "reason": "risk-tier-requires-review",
@@ -670,7 +670,7 @@ def create(  # noqa: C901, PLR0912, PLR0915 -- one fail-closed creation transact
         "retry_at": None,
     }
     if authority in EXTERNAL_REVIEWERS:
-        delay = policy.timeout_seconds if external_states.get(authority) == AVAILABLE else min(policy.timeout_seconds, ACTIVITY_GRACE_SECONDS)
+        delay = min(policy.timeout_seconds, ACTIVITY_GRACE_SECONDS)
         continuation = {
             "next_action": "refresh-reviewer",
             "retry_at": (

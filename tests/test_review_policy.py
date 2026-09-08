@@ -203,6 +203,10 @@ def test_configured_timeout_is_used_by_external_decision(monkeypatch):
     assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=121), timeout_seconds=600) == ("external-unavailable", None)
     def with_status(status):
         monkeypatch.setattr(review_policy, "gh_json", lambda argv: [[status]] if "statuses" in argv[-1] else [{"total_count": 0, "check_runs": []}])
+    for state, description in (("pending", "Review in progress"), ("success", "Review completed")):
+        with_status(cr_status(state, description, (observed - timedelta(seconds=60)).isoformat()))
+        assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=60), timeout_seconds=600) == ("external-pending", 60)
+        assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=121), timeout_seconds=600) == ("external-unavailable", None)
     with_status(cr_status("success", "Review skipped: excluded by label configuration", "2026-09-01T00:00:30Z"))
     assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=60), timeout_seconds=600) == ("external-unavailable", None)
     with_status(cr_status("pending", "Review in progress", "2026-09-01T00:01:00Z"))  # running: full deadline applies
@@ -315,6 +319,8 @@ SINCE = datetime(2026, 9, 8, 9, 0, tzinfo=timezone.utc)
     ([cr_status("pending", "Review queued")], [], None, ("pending", "review-queued")),
     ([cr_status("pending", "Review in progress")], [], None, ("available", "current-head-review-running")),
     ([cr_status("success", "Review completed")], [], None, ("available", "current-head-review-completed")),
+    ([cr_status("pending", "Review in progress")], [], datetime(2026, 9, 8, 10, 1, tzinfo=timezone.utc), ("pending", "awaiting-current-assignment-activity")),
+    ([], [cr_check("COMPLETED", "SUCCESS")], datetime(2026, 9, 8, 10, 1, tzinfo=timezone.utc), ("pending", "awaiting-current-assignment-activity")),
     ([cr_status("success", "No review result here")], [], None, ("pending", "unrecognized-success")),
     ([cr_status("pending", "Review in progress", "2026-09-08T09:00:00Z")], [], None, ("unavailable", "review-stalled")),
     ([cr_status("success", "Review completed", "2020-01-01T00:00:00Z")], [], None, ("unavailable", "completed-without-current-verdict")),

@@ -330,6 +330,8 @@ def coderabbit_capability_state(
         return {"state": PENDING, "reason": "unrecognized-success"}
     fresh_state, fresh_reason, stale_reason = _FRESHNESS[signal]
     if age < timeout_seconds:
+        if fresh_state == AVAILABLE and since is not None and seen_at < since:
+            return {"state": PENDING, "reason": "awaiting-current-assignment-activity"}
         return {"state": fresh_state, "reason": fresh_reason}
     return {"state": UNAVAILABLE, "reason": stale_reason}
 
