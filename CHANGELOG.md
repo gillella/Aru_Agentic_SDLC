@@ -1,7 +1,13 @@
 # Changelog
 
-## Unreleased v2.0.0 — Reviewer-policy migration
+## Unreleased v2.0.0 — Reviewer-policy and verification migration
 
+- Withdraw the previously declared merge-queue capability: verification is
+  PR-only, and configured queues or pending queue/auto-merge requests are refused
+  before submission. Missing queue evidence is not absence. Confirmed direct
+  merges retain `--finalize` recovery; historical queue work is refused instead
+  of being closed from PR-head checks. This compatibility change belongs to
+  the unreleased v2 migration and does not activate or reconfigure a live queue.
 - Retire Sourcery and CodeAnt while retaining historical evidence.
 - Prefer CodeRabbit with bounded current-head App capability; otherwise select
   independent coding fallback immediately. Completed generic green checks are

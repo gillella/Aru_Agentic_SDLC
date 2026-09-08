@@ -38,7 +38,7 @@ def install_low_risk_gate(monkeypatch, *, paths=None):
     monkeypatch.setattr(
         merge_pr,
         "issue_gate",
-        lambda _issues, _paths: [{"issue": 7, "criteria": 1}],
+        lambda _issues, _paths, **_kw: [{"issue": 7, "criteria": 1}],
     )
     monkeypatch.setattr(
         merge_pr,
@@ -88,19 +88,17 @@ def test_non_clean_merge_state_is_not_used_to_avoid_base_refresh(monkeypatch):
         merge_pr.evaluate(10, HEAD)
 
 
-def test_behind_head_is_allowed_only_when_merge_queue_rechecks_integration(monkeypatch):
+@pytest.mark.parametrize("state", ["CLEAN", "BEHIND"])
+@pytest.mark.parametrize("mode", ["configured", "entry", "auto_merge"])
+def test_unsupported_merge_mode_is_refused_before_ci(monkeypatch, state, mode):
     install_low_risk_gate(monkeypatch)
-    monkeypatch.setattr(
-        merge_pr,
-        "pull_request",
-        lambda _number: ready_pr(mergeStateStatus="BEHIND"),
-    )
-    monkeypatch.setattr(
-        merge_pr,
-        "merge_queue_snapshot",
-        lambda *_args: {"configured": True, "entry": None, "auto_merge": None},
-    )
-    assert merge_pr.evaluate(10, HEAD)["merge_queue"] is True
+    queue = {"configured": False, "entry": None, "auto_merge": None}
+    queue[mode] = True if mode == "configured" else {"id": "pending"}
+    monkeypatch.setattr(merge_pr, "pull_request", lambda _n: ready_pr(mergeStateStatus=state))
+    monkeypatch.setattr(merge_pr, "merge_queue_snapshot", lambda *_a: queue)
+    monkeypatch.setattr(merge_pr, "ci_verdict", lambda _n: pytest.fail("unsupported admission"))
+    with pytest.raises(merge_pr.KernelError, match="unsupported; no merge submitted"):
+        merge_pr.merge(10, HEAD)
 
 
 def issue_record(touches: str):
@@ -207,49 +205,6 @@ def test_merge_queue_snapshot_is_bound_to_exact_head(monkeypatch):
     assert seen["argv"][:2] == ["api", "graphql"]
 
 
-def test_merge_submits_to_configured_queue_without_merge_strategy(monkeypatch):
-    install_low_risk_gate(monkeypatch)
-    monkeypatch.setattr(
-        merge_pr,
-        "evaluate",
-        lambda *_args: {
-            "head": HEAD,
-            "base_sha": BASE,
-            "base": "main",
-            "changed_paths": ["src/example.py"],
-            "risk_tier": 1,
-            "issues": [{"issue": 7, "criteria": 1}],
-            "merge_queue": True,
-            "queue_entry": None,
-            "auto_merge": None,
-        },
-    )
-    monkeypatch.setattr(merge_pr, "pull_request", lambda _number: ready_pr())
-    monkeypatch.setattr(
-        merge_pr,
-        "merge_queue_snapshot",
-        lambda *_args: {
-            "configured": True,
-            "entry": {"id": "entry", "state": "QUEUED"} if calls else None,
-            "auto_merge": None,
-        },
-    )
-    calls = []
-    monkeypatch.setattr(merge_pr, "run", lambda argv: calls.append(argv))
-    monkeypatch.setattr(
-        merge_pr,
-        "close_out",
-        lambda _issues: pytest.fail("queued PR is not closed out before merge"),
-    )
-
-    result = merge_pr.merge(10, HEAD)
-
-    assert result["merged"] is False
-    assert result["queued"] is True
-    assert "--merge" not in calls[0]
-    assert calls[0][-2:] == ["--match-head-commit", HEAD]
-
-
 def test_merge_stops_when_base_changes_after_evaluation(monkeypatch):
     snapshots = iter(
         [
@@ -281,30 +236,15 @@ def test_merge_stops_when_base_changes_after_evaluation(monkeypatch):
         merge_pr.merge(10, HEAD)
 
 
-def test_finalize_merged_pr_revalidates_evidence_before_close_out(monkeypatch):
+@pytest.mark.parametrize("queued_history", [0, 1])
+def test_finalize_merged_pr_revalidates_evidence_before_close_out(monkeypatch, queued_history):
     merged = ready_pr(
         state="MERGED",
         mergedAt="2026-09-01T12:00:00Z",
         mergeCommit={"oid": "c" * 40},
     )
+    install_low_risk_gate(monkeypatch, paths=["src/app.py"])
     monkeypatch.setattr(merge_pr, "pull_request", lambda _number: merged)
-    monkeypatch.setattr(merge_pr, "pull_changed_paths", lambda _number: ["src/app.py"])
-    monkeypatch.setattr(merge_pr, "review_risk_tier", lambda _paths: 1)
-    monkeypatch.setattr(
-        merge_pr,
-        "issue_gate",
-        lambda *_args, **_kwargs: [{"issue": 7, "criteria": 1}],
-    )
-    monkeypatch.setattr(
-        merge_pr,
-        "ci_verdict",
-        lambda _number: {
-            "head": HEAD,
-            "state": "success",
-            "checks": ["aru-governed-pr"],
-        },
-    )
-    monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _number: [])
     closed = []
     monkeypatch.setattr(
         merge_pr,
@@ -314,6 +254,18 @@ def test_finalize_merged_pr_revalidates_evidence_before_close_out(monkeypatch):
         ],
     )
 
+    monkeypatch.setattr(merge_state, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(merge_state, "gh_json", lambda *_a, **_kw: {"data": {"repository": {
+        "pullRequest": {**merged, "timelineItems": {
+            "totalCount": 14, "nodes": [{"__typename": "AddedToMergeQueueEvent"}] * queued_history,
+            "pageInfo": {"hasNextPage": False},
+        }},
+    }}})
+    if queued_history:
+        with pytest.raises(merge_pr.KernelError, match="historical merge-queue work"):
+            merge_pr.finalize_queued(10, HEAD)
+        assert closed == []
+        return
     result = merge_pr.finalize_queued(10, HEAD)
 
     assert result["finalized"] is True
@@ -328,22 +280,8 @@ def test_finalize_merged_pr_leaves_issue_open_on_post_merge_feedback(monkeypatch
         mergedAt="2026-09-01T12:00:00Z",
         mergeCommit={"oid": "c" * 40},
     )
+    install_low_risk_gate(monkeypatch, paths=["src/app.py"])
     monkeypatch.setattr(merge_pr, "pull_request", lambda _number: merged)
-    monkeypatch.setattr(merge_pr, "pull_changed_paths", lambda _number: ["src/app.py"])
-    monkeypatch.setattr(
-        merge_pr,
-        "issue_gate",
-        lambda *_args, **_kwargs: [{"issue": 7, "criteria": 1}],
-    )
-    monkeypatch.setattr(
-        merge_pr,
-        "ci_verdict",
-        lambda _number: {
-            "head": HEAD,
-            "state": "success",
-            "checks": ["aru-governed-pr"],
-        },
-    )
     monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _number: [{"id": 1}])
     monkeypatch.setattr(
         merge_pr,
@@ -351,7 +289,7 @@ def test_finalize_merged_pr_leaves_issue_open_on_post_merge_feedback(monkeypatch
         lambda _numbers: pytest.fail("post-merge feedback must block close-out"),
     )
 
-    with pytest.raises(merge_pr.KernelError, match="post-queue review thread"):
+    with pytest.raises(merge_pr.KernelError, match="post-merge review thread"):
         merge_pr.finalize_queued(10, HEAD)
 
 
@@ -505,14 +443,11 @@ def test_semantic_drift_never_reaches_merge_command(
         assert events == ["pr", "queue", "issue", "ci"] * 2 + ["pr", "issue", "queue", "pr"]
 
 
-@pytest.mark.parametrize("configured,mutation", [
-    (True, "entry"), (True, "auto"), (False, "auto"),
-    (False, "configuration"), (True, "configuration"),
-    (True, "unreadable"), (True, "malformed"),
-    (True, "head"), (True, "base"),
-    (False, "stable"), (True, "stable"),
+@pytest.mark.parametrize("mutation", [
+    "entry", "auto", "configuration", "unreadable", "malformed", "missing", "head", "base", "stable",
 ])
-def test_final_pending_request_reread(monkeypatch, configured, mutation):
+def test_final_pending_request_reread(monkeypatch, mutation):
+    configured = False
     import subprocess
     from copy import deepcopy
 
@@ -556,6 +491,8 @@ def test_final_pending_request_reread(monkeypatch, configured, mutation):
                 queue["autoMergeRequest"] = {"enabledAt": "2026-09-05T12:00:00Z"}
             elif mutation == "configuration":
                 queue["mergeQueue"] = None if configured else {"id": "queue"}
+            elif mutation == "missing":
+                del queue["mergeQueue"]
             elif mutation in {"head", "base"}:
                 queue["headRefOid" if mutation == "head" else "baseRefOid"] = "c" * 40
         return {"head": HEAD, "state": "success", "checks": ["aru-governed-pr"]}
