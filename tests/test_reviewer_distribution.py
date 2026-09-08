@@ -250,7 +250,7 @@ def test_skipped_provider_is_immediately_fallback_eligible(monkeypatch):
     monkeypatch.setattr(
         review_policy,
         "gh_json",
-        lambda _argv: [{"total_count": 0, "check_runs": []}],
+        lambda argv: [[]] if "statuses?" in argv[-1] else [{"total_count": 0, "check_runs": []}],
     )
     assert create_pr._external_decision(
         42, pr, "coderabbit", created + timedelta(seconds=1)
