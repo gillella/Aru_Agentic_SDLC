@@ -72,7 +72,7 @@ def test_stable_review_evidence_order_and_nullable_decision(monkeypatch, form, d
 @pytest.mark.parametrize('tier', [0, 1, 2, 3])
 @pytest.mark.parametrize('mutation', ['stable', 'new-thread', 'reopened-thread'])
 def test_final_threads_preserve_risk_tier_semantics(monkeypatch, tier, mutation):
-    world = review_world('sourcery/check')
+    world = review_world('coderabbit/check')
     if mutation == 'reopened-thread':
         change_review(world, 'new-thread')
         world['threads'][0]['isResolved'] = True
@@ -93,8 +93,8 @@ def test_final_threads_preserve_risk_tier_semantics(monkeypatch, tier, mutation)
 
 
 @pytest.mark.parametrize('form,mutation', [
-    ('sourcery/approval', 'dismissed'), ('sourcery/check', 'revoked'),
-    ('sourcery/check', 'new-thread'), ('claude-code/attestation', 'coding-body'),
+    ('coderabbit/approval', 'dismissed'), ('coderabbit/check', 'revoked'),
+    ('coderabbit/check', 'new-thread'), ('claude-code/attestation', 'coding-body'),
 ])
 def test_earlier_review_withdrawal_control(monkeypatch, form, mutation):
     world = review_world(form)
@@ -109,14 +109,14 @@ def test_earlier_review_withdrawal_control(monkeypatch, form, mutation):
 @pytest.mark.parametrize('mutation', ['unavailable-comment', 'ambiguous-summary',
                                     'malformed-review', 'missing-authority', 'external-actor'])
 def test_additional_final_external_evidence_refusals(monkeypatch, mutation):
-    world = review_world('sourcery/check')
+    world = review_world('coderabbit/check')
 
     def mutate(w):
         if mutation == 'unavailable-comment':
             w['comments'].append(dict(id=9, user=w['reviews'][0]['user'],
                                       body='rate limit exceeded', updated_at='2026-09-05T09:00:00Z'))
         elif mutation == 'ambiguous-summary':
-            w['pr']['statusCheckRollup'] *= 2
+            w['checks'] *= 2
         elif mutation == 'malformed-review':
             w['reviews'].append(None)
         elif mutation == 'missing-authority':

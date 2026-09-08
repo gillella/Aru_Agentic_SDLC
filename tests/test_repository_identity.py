@@ -261,7 +261,7 @@ def test_pr_helpers_use_the_installation_of_the_checkout_repository(
 
     states = create_pr.registered_external_states()
 
-    assert states["coderabbit"] == create_pr.AVAILABLE
+    assert states["coderabbit"] == create_pr.UNAVAILABLE  # registration is not a capability probe
     assert _recorded(record)[:4] == ["--repo", slug, "--", "gh"]
     assert config.read_text(encoding="utf-8") == str(tmp_path / "operator-gh")
 

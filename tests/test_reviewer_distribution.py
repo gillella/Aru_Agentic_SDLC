@@ -32,7 +32,7 @@ def external_states(**overrides):
     return states
 
 
-def test_initial_assignment_rotates_equal_registered_external_pool(monkeypatch):
+def test_initial_assignment_never_rotates_to_retired_provider(monkeypatch):
     monkeypatch.setenv(
         "ARU_CODING_REVIEWERS",
         "claude-code:m1@1,openai-codex:mo",
@@ -59,9 +59,9 @@ def test_initial_assignment_rotates_equal_registered_external_pool(monkeypatch):
 
     assert assignments == [
         ("coderabbit", None, None),
-        ("sourcery", None, None),
         ("coderabbit", None, None),
-        ("sourcery", None, None),
+        ("coderabbit", None, None),
+        ("coderabbit", None, None),
     ]
 
 

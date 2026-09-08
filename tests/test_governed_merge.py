@@ -606,7 +606,7 @@ def review_world(form):
                  assignments=[dict(event='labeled', label={'name': 'review:' + service},
                                    created_at=t0)])
     if form.endswith('/check'):
-        review['state'] = 'COMMENTED'
+        review['state'] = 'APPROVED' if service == 'coderabbit' else 'COMMENTED'
         check = dict(id=2, name={'sourcery': 'Sourcery review', 'codeant': 'CodeAnt',
                                'coderabbit': 'CodeRabbit'}[service], head_sha=HEAD,
                      status='completed', conclusion='success', completed_at=t1,
@@ -696,6 +696,8 @@ def change_review(world, mutation):
         world['reviews'].clear()
     elif mutation in {'revoked', 'pending', 'ambiguous', 'check-body', 'stale-head'}:
         check = world['checks'][0]
+        if mutation in {'revoked', 'pending', 'stale-head'}:
+            world['reviews'].clear()
         if mutation == 'ambiguous':
             world['checks'].append(dict(check, id=99))
         else:
@@ -715,7 +717,7 @@ def change_review(world, mutation):
     elif mutation in {'authority', 'multiple-authorities', 'actor', 'author', 'author-identity'}:
         labels = world['pr']['labels']
         if mutation == 'authority':
-            labels[0]['name'] = 'review:coderabbit'
+            labels[0]['name'] = 'review:sourcery'
         elif mutation == 'multiple-authorities':
             labels.append({'name': 'review:coderabbit'})
         elif mutation == 'actor':
@@ -736,19 +738,16 @@ def change_review(world, mutation):
             world['threads'].append(thread)
 
 
-REVIEW_FORMS = ['sourcery/approval', 'coderabbit/approval', 'codeant/approval',
-                'sourcery/check', 'coderabbit/check', 'codeant/check',
-                'codeant/status', 'claude-code/attestation']
+REVIEW_FORMS = ['coderabbit/approval', 'coderabbit/check', 'claude-code/attestation']
 
 
 @pytest.mark.parametrize('form,mutation', [
     *((form, 'stable') for form in REVIEW_FORMS),
-    *(('sourcery/approval', m) for m in ['dismissed', 'missing', 'review-body',
+    *(('coderabbit/approval', m) for m in ['dismissed', 'missing', 'review-body',
        'assignment-reset', 'assignment-malformed', 'authority', 'multiple-authorities',
        'changes-requested', 'unreadable-reviews', 'unreadable-comments', 'unreadable-assignments']),
-    *(('sourcery/check', m) for m in ['revoked', 'pending', 'ambiguous', 'check-body',
+    *(('coderabbit/check', m) for m in ['revoked', 'pending', 'ambiguous', 'check-body',
        'stale-head', 'unreadable-checks', 'new-thread', 'reopened-thread', 'unreadable-threads']),
-    ('codeant/status', 'status-body'),
     *(('claude-code/attestation', m) for m in ['coding-body', 'malformed-body', 'actor',
        'author', 'author-identity', 'dismissed', 'missing']),
 ])
@@ -782,3 +781,12 @@ def test_final_review_authorization(monkeypatch, form, mutation, boundary):
     assert events.count('ci') == 2
     assert events.count('pr') == 3
     assert events.count('issue') == events.count('queue') == 3
+
+
+@pytest.mark.parametrize('form', ['sourcery/approval', 'codeant/approval', 'codeant/status'])
+def test_retired_provider_evidence_cannot_authorize_new_merge(monkeypatch, form):
+    world = review_world(form)
+    _, commands = install_review_boundary(monkeypatch, world, lambda _w: None)
+    with pytest.raises(merge_pr.KernelError, match='retired review authority'):
+        merge_pr.merge(10, HEAD)
+    assert commands == []

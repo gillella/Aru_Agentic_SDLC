@@ -79,15 +79,18 @@ provider fleet, or repository-owned runtime in this project.
 
 ## Review policy
 
-For Tier 2-3, every `reviewer-registered:<service>` external provider belongs to
-one equal pool. The issue number rotates the initial assignment; unavailable
-services are not retried on the same head, and coding families are borrowed only
-after the registered external pool is exhausted. The optional
-`review-policy:timeout=<seconds>` label defaults to 120 seconds. Ranked
-`review-policy:primary` and `review-policy:fallback-N` declarations are invalid.
-Use `create_pr.py --reviewer-status --json` for read-only discovery. Remove an
-external service's registration label only when access ends; coding
-subscriptions remain machine-local.
+For Tier 2-3, CodeRabbit is the sole preferred external provider. Sourcery and
+CodeAnt are retired: registration and historical evidence never make them
+eligible for new assignments. Use one bounded authenticated check for usable
+CodeRabbit access to the current repository/head. If access is denied, errored,
+rate-limited, unavailable or unproven, immediately select an available distinct
+coding reviewer; never wait through retired providers. Generic green checks,
+cached installation inventory and empty/skipped reviews are not approval.
+The optional `review-policy:timeout=<seconds>` is a completion deadline only
+for an accepted review (default 900 seconds, informed by the observed 11-minute
+CodeRabbit review). Explicit unavailability bypasses it. Ranked declarations
+remain invalid. Use `create_pr.py --refresh-reviewer <PR>` to migrate a retired
+assignment; do not hand-edit authority or erase prior findings/history.
 
 The v0.2 feature freeze lasts through 2026-09-26. During it, accept only
 security and correctness fixes.

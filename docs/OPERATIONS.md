@@ -218,25 +218,20 @@ Register each installed provider explicitly:
 
 ```text
 reviewer-registered:coderabbit
-reviewer-registered:sourcery
-reviewer-registered:codeant
 ```
 
-The bootstrap `review:*` authority labels do not register providers. Registration
-places every installed external provider in the equal specialized-review pool.
-The only optional repository policy setting is:
-
-```text
-review-policy:timeout=120
-```
-
-The issue number rotates initial assignments across registered external
-services. Unavailable services are not retried on the same head; coding families
-are borrowed only after that pool is exhausted. Ranked primary/fallback labels
-are unsupported and fail closed. Remove a registration explicitly when access
-ends, for example `gh label delete "reviewer-registered:sourcery" --yes`. The
-author identity and GitHub actor are never eligible, and coding probes establish
-liveness only.
+For Tier 2-3, CodeRabbit is the sole preferred external provider. Sourcery and
+CodeAnt are retired: registration and historical evidence never make them
+eligible for new assignments. Use one bounded authenticated check for usable
+CodeRabbit access to the current repository/head. If access is denied, errored,
+rate-limited, unavailable or unproven, immediately select an available distinct
+coding reviewer; never wait through retired providers. Generic green checks,
+cached installation inventory and empty/skipped reviews are not approval.
+The optional `review-policy:timeout=<seconds>` is a completion deadline only
+for an accepted review (default 900 seconds, informed by the observed 11-minute
+CodeRabbit review). Explicit unavailability bypasses it. Ranked declarations
+remain invalid. Use `create_pr.py --refresh-reviewer <PR>` to migrate a retired
+assignment; do not hand-edit authority or erase prior findings/history.
 
 Only locally configured identities are probed. If local coding-reviewer
 configuration is absent, registered external providers remain eligible; an
@@ -907,8 +902,8 @@ python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" --help
 ### One authority and one continuation
 
 Tier 0-1 changes do not wait for review. For Tier 2-3, `create_pr.py` assigns
-the current-head authority from the equal registered-external pool and borrows
-a coding identity only after that pool is exhausted. `merge_pr.py` validates
+CodeRabbit only after current-head usable capability is established and otherwise
+immediately selects an available independent coding identity. `merge_pr.py` validates
 the resulting evidence. Do not duplicate that policy in consumer rules.
 
 No-op, paused, quota-limited, rate-limited, unsupported, unavailable, or errored
@@ -1128,9 +1123,9 @@ true.
 - [ ] Governed issues are automatically or explicitly added to the Project.
 - [ ] Required lifecycle, type, priority, and reviewer labels exist; the helpers
       can create issue-specific agent and author labels.
-- [ ] Each installed external provider has exactly one corresponding
-      `reviewer-registered:<service>` label; uninstalled providers do not.
-- [ ] Registration labels expose the expected equal external pool; the optional
+- [ ] Only CodeRabbit remains registered externally; Sourcery and CodeAnt are retired.
+- [ ] Registration is not availability; a bounded authenticated probe must establish
+      usable access or immediately select a coding fallback. The optional
       `review-policy:timeout` is 60-86400 seconds; reviewer status reports the
       expected sources and no configuration errors.
 - [ ] Each coding reviewer identity has one
@@ -1296,3 +1291,23 @@ worker completion and refill remain unproven. These documentation merges and a
 successful typed return must not be reported as closing that live acceptance
 gap. Restoring dispatch requires resolving the recorded blocker within explicit
 operator authorization and repeating the missing live test.
+
+### Reviewer-policy migration to v2 source
+
+Use the verified merged source revision before updating installed integrations.
+Remove the retired `reviewer-registered:sourcery` and `reviewer-registered:codeant`
+label definitions. Preserve historical `review:*` labels, findings and audit
+records; refresh each affected live PR through `create_pr.py --refresh-reviewer`.
+A retired assignment is immediately ineligible even before registrations are
+cleaned up. CodeRabbit registration alone is not a probe. The bounded GitHub
+Checks API observation requires the expected head, trusted CodeRabbit App and
+a recent running review; no such evidence immediately uses coding fallback.
+The public CodeRabbit inventory API is deliberately not treated as health: its
+`is_installed` field is cached and does not prove a usable review worker.
+
+Status schema `aru.reviewer-status/v3` identifies `coderabbit-first` selection,
+retired providers, configuration sources and an optional capability observation.
+An assigned coding identity is pending execution, not a completed review.
+Rollback requires the prior source revision and preserved configuration records,
+not rewriting review history. Consumer installation and live Driver validation
+remain explicit operations after source verification.

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased v2.0.0 — Reviewer-policy migration
+
+- Retire Sourcery and CodeAnt while retaining historical evidence.
+- Prefer CodeRabbit with bounded current-head App capability; otherwise select
+  independent coding fallback immediately. Completed generic green checks are
+  not capability or approval. Accepted reviews use a configurable 900-second
+  default completion deadline; explicit failure bypasses it.
+- Reviewer discovery uses `aru.reviewer-status/v3`. Reconcile consumers from
+  the merged source; this entry is not a release or installed rollout claim.
+
 ## v1.0.1 - Self-Hosted Trust and Verification Hardening - 2026-09-01
 
 ### Included changes

@@ -59,7 +59,7 @@ def test_external_review_paths_preserve_authenticated_provider_evidence(monkeypa
             "app": {"slug": "coderabbitai"},
         }],
     )
-    assert merge_pr.exact_head_review(coderabbit, 10, "coderabbit") is True
+    assert merge_pr.exact_head_review(coderabbit, 10, "coderabbit") is False
 
     sourcery = review_pr("sourcery")
     sourcery_approval = review(service="sourcery")

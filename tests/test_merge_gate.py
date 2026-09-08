@@ -278,14 +278,9 @@ def test_codeant_clean_status_reproducing_jmc_pr_146(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    gates = merge_pr.evaluate(146, head)
-    assert gates["reviewer"] == "codeant"
-    assert gates["head"] == head
-    assert gates["feedback"] == 0
-
-    dry_run = merge_pr.merge(146, head, dry_run=True)
-    assert dry_run["merged"] is False
-    assert dry_run["gates"]["reviewer"] == "codeant"
+    assert merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
+    with pytest.raises(merge_pr.KernelError, match="retired review authority"):
+        merge_pr.merge(146, head, dry_run=True)
 
 
 def test_codeant_current_head_incremental_without_full_review_fails_closed(monkeypatch):
@@ -303,8 +298,7 @@ def test_codeant_current_head_incremental_without_full_review_fails_closed(monke
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_stale_head_fails_closed(monkeypatch):
@@ -319,8 +313,7 @@ def test_codeant_stale_head_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_abbreviated_head_fails_closed(monkeypatch):
@@ -334,8 +327,7 @@ def test_codeant_abbreviated_head_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_unfinished_record_fails_closed(monkeypatch):
@@ -349,8 +341,7 @@ def test_codeant_unfinished_record_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_missing_finished_timestamp_fails_closed(monkeypatch):
@@ -364,8 +355,7 @@ def test_codeant_missing_finished_timestamp_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_invalid_timestamp_fails_closed(monkeypatch):
@@ -379,8 +369,7 @@ def test_codeant_invalid_timestamp_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_missing_record_keys_fails_closed(monkeypatch):
@@ -394,8 +383,7 @@ def test_codeant_missing_record_keys_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_extra_record_keys_fails_closed(monkeypatch):
@@ -409,8 +397,7 @@ def test_codeant_extra_record_keys_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_empty_label_fails_closed(monkeypatch):
@@ -424,8 +411,7 @@ def test_codeant_empty_label_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_malformed_marker_json_fails_closed(monkeypatch):
@@ -438,8 +424,7 @@ def test_codeant_malformed_marker_json_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_non_list_marker_payload_fails_closed(monkeypatch):
@@ -452,8 +437,7 @@ def test_codeant_non_list_marker_payload_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_multiple_markers_in_one_comment_fails_closed(monkeypatch):
@@ -469,8 +453,7 @@ def test_codeant_multiple_markers_in_one_comment_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_duplicate_full_records_for_head_fails_closed(monkeypatch):
@@ -488,8 +471,7 @@ def test_codeant_duplicate_full_records_for_head_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_duplicate_trusted_comments_fails_closed(monkeypatch):
@@ -504,8 +486,7 @@ def test_codeant_duplicate_trusted_comments_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [c1, c2])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_copied_human_marker_fails_closed(monkeypatch):
@@ -519,8 +500,7 @@ def test_codeant_copied_human_marker_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [human_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_spoofed_bot_login_with_user_type_fails_closed(monkeypatch):
@@ -534,8 +514,7 @@ def test_codeant_spoofed_bot_login_with_user_type_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [spoofed_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_trusted_review_history_allows_status_without_exact_head_review(monkeypatch):
@@ -549,8 +528,7 @@ def test_codeant_trusted_review_history_allows_status_without_exact_head_review(
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [old_review])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    gates = merge_pr.evaluate(146, head)
-    assert gates["reviewer"] == "codeant"
+    assert merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_status_without_trusted_review_history_fails_closed(monkeypatch):
@@ -563,8 +541,7 @@ def test_codeant_status_without_trusted_review_history_fails_closed(monkeypatch)
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_canonical_github_app_author_cannot_satisfy_coding_review_submission():
@@ -648,8 +625,7 @@ def test_codeant_invalid_status_history_fails_closed(monkeypatch, record):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_unfinished_incremental_record_fails_closed(monkeypatch):
@@ -670,8 +646,7 @@ def test_codeant_unfinished_incremental_record_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_malformed_marker_beside_valid_comment_fails_closed(monkeypatch):
@@ -686,8 +661,7 @@ def test_codeant_malformed_marker_beside_valid_comment_fails_closed(monkeypatch)
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [valid_comment, malformed_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_valid_marker_beside_trusted_prose_comment_passes(monkeypatch):
@@ -706,9 +680,7 @@ def test_codeant_valid_marker_beside_trusted_prose_comment_passes(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [valid_comment, prose_comment])
 
-    gates = merge_pr.evaluate(146, head)
-    assert gates["reviewer"] == "codeant"
-    assert gates["head"] == head
+    assert merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_changes_requested_review_blocks_merge(monkeypatch):
@@ -722,8 +694,7 @@ def test_codeant_changes_requested_review_blocks_merge(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [blocking_review])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_conflicting_approved_and_changes_requested_blocks_merge(monkeypatch):
@@ -738,14 +709,12 @@ def test_codeant_conflicting_approved_and_changes_requested_blocks_merge(monkeyp
     # Test APPROVED before CHANGES_REQUESTED
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [approved_review, blocking_review])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
     # Test CHANGES_REQUESTED before APPROVED
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [blocking_review, approved_review])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [status_comment])
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_check_cannot_override_exact_head_changes_requested(monkeypatch):
@@ -756,8 +725,7 @@ def test_codeant_check_cannot_override_exact_head_changes_requested(monkeypatch)
     blocking_review = make_review(commit_id=head, state="CHANGES_REQUESTED")
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [blocking_review])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_plain_prose_without_marker_fails_closed(monkeypatch):
@@ -774,8 +742,7 @@ def test_codeant_plain_prose_without_marker_fails_closed(monkeypatch):
     monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [review_obj])
     monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [prose_comment])
 
-    with pytest.raises(merge_pr.KernelError, match="codeant has no successful exact-head verdict"):
-        merge_pr.evaluate(146, head)
+    assert not merge_pr.exact_head_review(merge_pr.pull_request(146), 146, "codeant")
 
 
 def test_codeant_blocks_on_unresolved_feedback(monkeypatch):

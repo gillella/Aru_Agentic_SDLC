@@ -40,15 +40,8 @@ def external_states(**overrides):
     states.update(overrides)
     return states
 
-def verification_body(*commands: str) -> str:
-    return (
-        "## Summary\n\nSummary\n\n"
-        "## Verification\n\n"
-        + "\n".join(f"- `{command}`" for command in commands)
-    )
-
 def assignment_pr(*, created_at: datetime, state="pending"):
-    check = []
+    check = [{"name": "CodeRabbit", "status": "IN_PROGRESS", "startedAt": created_at.isoformat()}]
     if state == "unavailable":
         check = [
             {
@@ -111,10 +104,11 @@ def install_refresh(
     if updated_labels is not None:
         responses.append({"number": 42, "labels": updated_labels})
 
-    def json_response(argv):
+    def json_response(argv, **_kwargs):
         if argv[0] == "api":
             records = provider_checks(pr) if checks is None else checks
-            return [{"total_count": len(records), "check_runs": records}]
+            page = {"total_count": len(records), "check_runs": records}
+            return [page] if "--slurp" in argv else page
         return responses.pop(0)
 
     monkeypatch.setattr(create_pr, "gh_json", json_response)
@@ -135,7 +129,7 @@ def test_external_registration_reads_beyond_first_hundred_labels(monkeypatch):
 
     monkeypatch.setattr(review_policy, "gh_json", labels)
     states = create_pr.registered_external_states()
-    assert states["sourcery"] == create_pr.AVAILABLE
+    assert states["sourcery"] == create_pr.UNAVAILABLE
     assert commands[0][commands[0].index("--limit") + 1] == "1000"
 
 def test_authority_labels_alone_do_not_register_external_providers(monkeypatch):
@@ -167,7 +161,7 @@ def test_author_family_is_deprioritized_and_author_identity_excluded(monkeypatch
     assert calls[0][0] == "/bin/codex"
 
 
-def test_pending_external_under_two_minutes_does_not_fallback(monkeypatch):
+def test_healthy_external_receives_completion_deadline(monkeypatch):
     created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
     pr = assignment_pr(created_at=created)
     install_refresh(monkeypatch, pr)
@@ -180,20 +174,23 @@ def test_pending_external_under_two_minutes_does_not_fallback(monkeypatch):
     assert outcome["authority"] == "coderabbit"
     assert outcome["action"] == "retained"
     assert outcome["reason"] == "external-pending"
-    assert outcome["remaining_seconds"] == 1
-    assert outcome["retry_at"] == "2026-08-27T12:02:00+00:00"
+    assert outcome["remaining_seconds"] == 781
+    assert outcome["retry_at"] == "2026-08-27T12:15:00+00:00"
     assert outcome["next_action"] == "refresh-reviewer"
 
 
-def test_pending_external_at_two_minutes_falls_back(monkeypatch):
+def test_pending_external_at_completion_deadline_uses_coding(monkeypatch):
     created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
     pr = assignment_pr(created_at=created)
     updated = [
-        {"name": "review:sourcery"},
+        {"name": "review:xai-cursor"},
+        {"name": "reviewer:mx"},
+        {"name": "reviewer-actor:cursor-reviewer"},
         {"name": "author:codex-author"},
         {"name": "author-family:openai-codex"},
     ]
     install_refresh(monkeypatch, pr, updated_labels=updated)
+    monkeypatch.setattr(create_pr, "probe_coding_reviewer", lambda **_kwargs: ("xai-cursor", "mx", "cursor-reviewer"))
     events = []
     monkeypatch.setattr(create_pr, "run", lambda _argv: events.append("audit"))
     monkeypatch.setattr(
@@ -203,7 +200,7 @@ def test_pending_external_at_two_minutes_falls_back(monkeypatch):
     )
     outcome = create_pr.refresh_assignment(
         42,
-        now=created + timedelta(minutes=2),
+        now=created + timedelta(minutes=15),
         policy=review_policy.default_review_policy(("coderabbit", "sourcery")),
         external_states=external_states(
             coderabbit=create_pr.AVAILABLE,
@@ -212,7 +209,8 @@ def test_pending_external_at_two_minutes_falls_back(monkeypatch):
     )
     assert outcome == {
         "pr": 42,
-        "authority": "sourcery",
+        "authority": "xai-cursor",
+        "reviewer": "mx",
         "action": "fallback",
         "reason": "external-pending-timeout",
     }
@@ -405,6 +403,7 @@ def test_latest_external_evidence_wins_after_provider_recovery():
         "user": {"login": "coderabbitai[bot]", "type": "Bot"},
         "body": "Substantive review complete",
         "state": "APPROVED",
+        "commit_id": pr["headRefOid"],
         "submitted_at": (created + timedelta(minutes=2)).isoformat(),
     }
     assert (
@@ -438,6 +437,7 @@ def test_recovered_external_gets_full_timeout_from_assignment(monkeypatch):
     created = datetime(2026, 8, 27, 12, 0, tzinfo=timezone.utc)
     assigned = created + timedelta(hours=1)
     pr = assignment_pr(created_at=created)
+    pr["statusCheckRollup"][0]["startedAt"] = assigned.isoformat()
     event = {
         "event": "labeled",
         "label": {"name": "review:coderabbit"},
@@ -456,8 +456,8 @@ def test_recovered_external_gets_full_timeout_from_assignment(monkeypatch):
         now=assigned + timedelta(minutes=1, seconds=59),
     )
     assert outcome["reason"] == "external-pending"
-    assert outcome["remaining_seconds"] == 1
-    assert outcome["retry_at"] == "2026-08-27T13:02:00+00:00"
+    assert outcome["remaining_seconds"] == 781
+    assert outcome["retry_at"] == "2026-08-27T13:15:00+00:00"
     assert outcome["next_action"] == "refresh-reviewer"
 
 
@@ -525,7 +525,7 @@ def test_refresh_assigns_first_authority_when_current_diff_fails_up(monkeypatch)
     assert outcome["action"] == "assigned"
     assert outcome["authority"] == "coderabbit"
     assert outcome["risk_tier"] == 2
-    assert outcome["retry_at"] == "2026-08-27T12:02:00+00:00"
+    assert outcome["retry_at"] == "2026-08-27T12:15:00+00:00"
 
 
 def test_no_external_or_coding_reviewer_fails_closed(monkeypatch):
@@ -700,7 +700,7 @@ def test_explicit_coding_reviewer_unavailability_recovers_to_registered_external
     updated = {
         "number": 42,
         "labels": [
-            {"name": "review:codeant"},
+            {"name": "review:coderabbit"},
             {"name": "author:codex-author"},
             {"name": "author-family:openai-codex"},
         ],
@@ -714,12 +714,12 @@ def test_explicit_coding_reviewer_unavailability_recovers_to_registered_external
         42,
         now=created + timedelta(minutes=3),
         coding_unavailable_reason="full review aborted without a verdict",
-        policy=review_policy.default_review_policy(("codeant",)),
-        external_states=external_states(codeant=create_pr.AVAILABLE),
+        policy=review_policy.default_review_policy(("coderabbit",)),
+        external_states=external_states(coderabbit=create_pr.AVAILABLE),
     )
     assert outcome == {
         "pr": 42,
-        "authority": "codeant",
+        "authority": "coderabbit",
         "action": "fallback",
         "reason": "coding-reviewer-unavailable",
     }
@@ -777,7 +777,7 @@ def test_create_pr_revalidates_ownership_after_reviewer_selection(monkeypatch):
         create_pr.create(
             6,
             "feat: small",
-            verification_body("python3 -m pytest tests/test_branch_and_pr.py -q"),
+            "## Summary\n\nChange\n\n## Verification\n\nFocused checks passed.",
             "codex-1",
             external_states=external_states(coderabbit=create_pr.AVAILABLE),
             reviewer_actors={},

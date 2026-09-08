@@ -21,3 +21,8 @@ description: Repair a failing exact-head aru-governed-pr server check on an auth
 
 Never dismiss a failing check, weaken `touches:`, or replace a risk-relevant
 consumer check merely to obtain green status.
+
+Retire Sourcery and CodeAnt. Prefer usable authenticated current-head CodeRabbit;
+otherwise immediately select an available independent coding reviewer through
+the governed refresh helper. A failed availability check does not wait for the
+completion timer. Preserve Tier 0–1 without authoritative-review waits.

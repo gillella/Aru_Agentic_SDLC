@@ -29,9 +29,10 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
    against the actual diff. Ad hoc local runs remain preflight evidence.
    For Tier 2-3, do not hand-pick or hand-edit authority. The external Driver
    owns the one continuation event in `docs/KERNEL-CONTRACT.md`;
-   `create_pr.py --refresh-reviewer <PR>` alone follows the equal registered
-   external pool, exact-head attempt history, and configured timeout (120
-   seconds by default) to decide whether authority changes. If substantive
+   `create_pr.py --refresh-reviewer <PR>` immediately retires Sourcery/CodeAnt
+   and selects available independent coding fallback when CodeRabbit capability
+   is unavailable or unproven. Only an accepted review uses the configured
+   timeout (900 seconds by default); exact-head attempt history prevents retries. If substantive
    coding review aborts or
    loses capacity, pass the
    truthful reason through
