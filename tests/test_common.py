@@ -496,7 +496,8 @@ def test_project_item_status_returns_none_without_a_status_value(monkeypatch):
         ({"data": {"issueNode": {"projectItems": {"nodes": [{"id": "PVTI_7", "project": {"id": "PVT_1"}, "fieldValueByName": {"name": "Done"}}], "pageInfo": {"hasNextPage": False}}}, "projectNode": {"field": None}}}, "ambiguous"),
     ],
 )
-def test_project_item_status_fails_closed_on_incomplete_evidence(monkeypatch, payload, message):
+@pytest.mark.parametrize("same_status", [False, True])
+def test_project_item_status_fails_closed_on_incomplete_evidence(monkeypatch, payload, message, same_status):
     monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
     monkeypatch.setattr(common, "linked_project", lambda cwd=None: {"id": "PVT_1", "number": 5, "title": "Delivery"})
     monkeypatch.setattr(
@@ -506,8 +507,13 @@ def test_project_item_status_fails_closed_on_incomplete_evidence(monkeypatch, pa
         if args[:2] == ["api", "repos/owner/repo/issues/7"]
         else payload,
     )
+    monkeypatch.setattr(common, "issue", lambda *a, **kw: record("", ["status:done"]))
+    monkeypatch.setattr(common, "run", lambda *a, **kw: pytest.fail("unexpected mutation"))
     with pytest.raises(common.KernelError, match=message):
-        common.project_item_status(7)
+        if same_status:
+            common.set_status(7, "Done")
+        else:
+            common.project_item_status(7)
 
 
 def test_project_status_rejects_duplicate_options_on_item_status_and_board_edit(monkeypatch):
