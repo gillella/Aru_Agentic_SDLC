@@ -1330,13 +1330,17 @@ label definitions. Preserve historical `review:*` labels, findings and audit
 records; refresh each affected live PR through `create_pr.py --refresh-reviewer`.
 A retired assignment is immediately ineligible even before registrations are
 cleaned up. CodeRabbit registration alone is not a probe. The bounded
-observation reads CodeRabbit's authenticated commit statuses on the expected
-head (`/commits/<head>/statuses`, context `CodeRabbit`, creator
-`coderabbitai[bot]`): a recent `pending` or a `success` run is usable access; a
-denial, error, rate limit, stalled run or a skip posted after the review label
-is unavailability and selects coding fallback at once; no status yet leaves
-CodeRabbit eligible, since it only runs once `review:coderabbit` is applied.
-Check runs are not consulted because CodeRabbit does not create them here.
+observation reads CodeRabbit's authenticated activity on the expected head on
+both supported surfaces: App check runs (`review_progress`, CodeRabbit's
+default) and legacy commit statuses (`commit_status`, context `CodeRabbit`,
+creator `coderabbitai[bot]`, what this repository receives today). "In
+progress" or "Review completed" within the deadline is usable access; "queued"
+or a generic success is not yet proof; a denial, error, rate limit, stale run,
+future timestamp or a skip posted after the review label is unavailability and
+selects coding fallback at once. No activity yet leaves CodeRabbit eligible for
+initial assignment, since it only runs once `review:coderabbit` is applied; if
+no authentic activity appears within 120 seconds of assignment the refresh
+falls back to coding review rather than waiting out the completion deadline.
 The public CodeRabbit inventory API is deliberately not treated as health: its
 `is_installed` field is cached and does not prove a usable review worker.
 

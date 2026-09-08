@@ -198,11 +198,15 @@ def test_configured_timeout_is_used_by_external_decision(monkeypatch):
     monkeypatch.setattr(review_policy, "repo_slug", lambda: "owner/repo")
     monkeypatch.setattr(review_policy, "gh_paginated", lambda _endpoint: [])
     assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=600), timeout_seconds=600) == ("external-pending-timeout", None)
-    # Inside the deadline with no status yet: keep waiting; a post-assignment skip ends it.
-    assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=1), timeout_seconds=600) == ("external-pending", 599)
-    skipped = [[cr_status("success", "Review skipped: excluded by label configuration", "2026-09-01T00:00:30Z")]]
-    monkeypatch.setattr(review_policy, "gh_json", lambda argv: skipped if "statuses" in argv[-1] else [{"total_count": 0, "check_runs": []}])
+    # No activity yet: wait only through the 120 s activity window, then fall back; a skip ends it at once.
+    assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=1), timeout_seconds=600) == ("external-pending", 119)
+    assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=121), timeout_seconds=600) == ("external-unavailable", None)
+    def with_status(status):
+        monkeypatch.setattr(review_policy, "gh_json", lambda argv: [[status]] if "statuses" in argv[-1] else [{"total_count": 0, "check_runs": []}])
+    with_status(cr_status("success", "Review skipped: excluded by label configuration", "2026-09-01T00:00:30Z"))
     assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=60), timeout_seconds=600) == ("external-unavailable", None)
+    with_status(cr_status("pending", "Review in progress", "2026-09-01T00:01:00Z"))  # running: full deadline applies
+    assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=300), timeout_seconds=600) == ("external-pending", 300)
 
 
 def test_check_run_pagination_accepts_repeated_overall_total(monkeypatch):
@@ -276,46 +280,20 @@ def test_policy_label_names_fit_github_limit():
     assert all(len(name) <= 50 for name in configured_policy_labels())
 
 
-def test_reviewer_status_cli_is_read_only_and_forwards_probe_exclusions(
-    monkeypatch, capsys
-):
+def test_reviewer_status_cli_is_read_only_and_forwards_probe_exclusions(monkeypatch, capsys):
     observed = {}
-    payload = {
-        "schema": "aru.reviewer-status/v3",
-        "valid": True,
-        "policy": {
-            "selection": "coderabbit-first",
-            "external_reviewers": ["coderabbit"],
-            "coding_fallbacks": ["claude-code"],
-            "timeout_seconds": 900,
-        },
-    }
+    payload = {"schema": "aru.reviewer-status/v3", "valid": True, "policy": {
+        "selection": "coderabbit-first", "external_reviewers": ["coderabbit"], "coding_fallbacks": ["claude-code"], "timeout_seconds": 900}}
 
     def status(**kwargs):
         observed.update(kwargs)
         return payload
 
     monkeypatch.setattr(create_pr, "reviewer_status", status)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "create_pr.py",
-            "--reviewer-status",
-            "--probe-reviewers",
-            "--agent",
-            "codex-author",
-            "--author-github-login",
-            "author-login",
-            "--json",
-        ],
-    )
+    monkeypatch.setattr(sys, "argv", ["create_pr.py", "--reviewer-status", "--probe-reviewers", "--agent", "codex-author",
+                                      "--author-github-login", "author-login", "--json"])
     assert create_pr.main() == 0
-    assert observed == {
-        "probe": True,
-        "author_identity": "codex-author",
-        "author_actor": "author-login",
-    }
+    assert observed == {"probe": True, "author_identity": "codex-author", "author_actor": "author-login"}
     assert '"schema": "aru.reviewer-status/v3"' in capsys.readouterr().out
 
 
@@ -323,25 +301,47 @@ def cr_status(state, description, at="2026-09-08T10:00:00Z", creator={"login": "
     return {"context": "CodeRabbit", "state": state, "description": description, "creator": creator, "created_at": at}  # real Status API shape
 
 
-@pytest.mark.parametrize("statuses,since,expected", [
-    ([], None, ("pending", "no-coderabbit-status-yet")),
-    ([cr_status("pending", "Review in progress")], None, ("available", "current-head-review-running")),
-    ([cr_status("pending", "Review queued", "2026-09-08T09:00:00Z")], None, ("unavailable", "review-stalled")),
-    ([cr_status("success", "Review completed")], None, ("available", "current-head-review-completed")),
+def cr_check(status, conclusion=None, at="2026-09-08T10:00:00Z", app="coderabbitai", head="a" * 40, **output):
+    return {"name": "CodeRabbit", "app": {"slug": app}, "head_sha": head, "status": status, "conclusion": conclusion,
+            "started_at": at, "output": output}
+
+
+SINCE = datetime(2026, 9, 8, 9, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("statuses,checks,since,expected", [
+    ([], [], None, ("pending", "no-coderabbit-evidence-yet")),
+    # Legacy commit-status surface: queued is not proof, in-progress and completed are.
+    ([cr_status("pending", "Review queued")], [], None, ("pending", "review-queued")),
+    ([cr_status("pending", "Review in progress")], [], None, ("available", "current-head-review-running")),
+    ([cr_status("success", "Review completed")], [], None, ("available", "current-head-review-completed")),
+    ([cr_status("success", "No review result here")], [], None, ("pending", "unrecognized-success")),
+    ([cr_status("pending", "Review in progress", "2026-09-08T09:00:00Z")], [], None, ("unavailable", "review-stalled")),
+    ([cr_status("success", "Review completed", "2020-01-01T00:00:00Z")], [], None, ("unavailable", "completed-without-current-verdict")),
+    ([cr_status("success", "Review completed", "2099-01-01T00:00:00Z")], [], None, ("unavailable", "future-timestamp")),
+    ([cr_status("error", "Internal error")], [], None, ("unavailable", "provider-error")),
+    ([cr_status("success", "Review rate limited")], [], None, ("unavailable", "provider-denied")),
     # Label-gated skip before assignment keeps CodeRabbit eligible; after assignment it is a refusal.
-    ([cr_status("success", "Review skipped: excluded by label configuration")], None, ("pending", "awaiting-review-label")),
-    ([cr_status("success", "Review skipped: excluded by label configuration")],
-     datetime(2026, 9, 8, 9, 0, tzinfo=timezone.utc), ("unavailable", "skipped-after-assignment")),
-    ([cr_status("error", "Internal error")], None, ("unavailable", "provider-error")),
-    ([cr_status("success", "Review rate limited")], None, ("unavailable", "provider-unavailable")),
-    # Spoofed statuses never count in either direction; the newest trusted one wins.
-    ([cr_status("success", "Review completed", creator={"login": "human", "type": "User"})], None, ("pending", "no-coderabbit-status-yet")),
-    ([cr_status("pending", "Review queued", "2026-09-08T09:59:00Z"), cr_status("success", "Review completed")], None, ("available", "current-head-review-completed")),
+    ([cr_status("success", "Review skipped: excluded by label configuration")], [], None, ("pending", "awaiting-review-label")),
+    ([cr_status("success", "Review skipped: excluded by label configuration")], [], SINCE, ("unavailable", "skipped-after-assignment")),
+    # App check-run surface (review_progress) is equally authentic; foreign apps and heads are ignored.
+    ([], [cr_check("QUEUED")], None, ("pending", "review-queued")),
+    ([], [cr_check("IN_PROGRESS")], None, ("available", "current-head-review-running")),
+    ([], [cr_check("COMPLETED", "SUCCESS")], None, ("available", "current-head-review-completed")),
+    ([], [cr_check("COMPLETED", "CANCELLED")], None, ("unavailable", "provider-error")),
+    ([], [cr_check("COMPLETED", "SUCCESS", summary="Review skipped: excluded by label configuration")], SINCE, ("unavailable", "skipped-after-assignment")),
+    ([], [cr_check("IN_PROGRESS", app="untrusted"), cr_check("IN_PROGRESS", head="b" * 40)], None, ("pending", "no-coderabbit-evidence-yet")),
+    # Spoofed statuses never count; the newest trusted signal wins across surfaces.
+    ([cr_status("success", "Review completed", creator={"login": "human", "type": "User"})], [], None, ("pending", "no-coderabbit-evidence-yet")),
+    ([cr_status("pending", "Review queued", "2026-09-08T09:59:00Z")], [cr_check("COMPLETED", "SUCCESS")], None, ("available", "current-head-review-completed")),
+    # Same-second disagreement fails closed; same-second agreement across surfaces does not.
+    ([cr_status("pending", "Review in progress"), cr_status("error", "Internal error")], [], None, ("unavailable", "conflicting-evidence")),
+    ([cr_status("pending", "Review in progress")], [cr_check("IN_PROGRESS")], None, ("available", "current-head-review-running")),
 ])
-def test_capability_reads_authenticated_coderabbit_commit_statuses(statuses, since, expected):
-    from review_evidence import coderabbit_status_capability
+def test_capability_reads_authenticated_coderabbit_activity_on_either_surface(statuses, checks, since, expected):
+    from review_evidence import coderabbit_capability_state
     now = datetime(2026, 9, 8, 10, 10, tzinfo=timezone.utc)
-    result = coderabbit_status_capability(statuses, now, since=since, timeout_seconds=900)
+    result = coderabbit_capability_state(statuses, checks, head="a" * 40, observed_at=now, since=since, timeout_seconds=900)
     assert (result["state"], result["reason"]) == expected
 
 
@@ -355,6 +355,11 @@ def test_capability_transport_is_bounded_and_falls_back_on_unreadable(monkeypatc
     assert review_policy.coderabbit_capability("a" * 40)["state"] == "unavailable"
     monkeypatch.setattr(review_policy, "gh_json", lambda argv, *, timeout: {"message": "Not Found"})
     assert review_policy.coderabbit_capability("a" * 40)["state"] == "unavailable"  # not a status list
+    # Both surfaces read and empty: eligible but unproven. A non-status payload is unreadable, not "empty".
+    monkeypatch.setattr(review_policy, "gh_json", lambda argv, *, timeout: [] if "statuses" in argv[1] else {"total_count": 0, "check_runs": []})
+    assert review_policy.coderabbit_capability("a" * 40)["reason"] == "no-coderabbit-evidence-yet"
+    monkeypatch.setattr(review_policy, "gh_json", lambda argv, *, timeout: [{"total_count": 0, "check_runs": []}])
+    assert review_policy.coderabbit_capability("a" * 40)["state"] == "unavailable"
 
 
 @pytest.mark.parametrize("retired", ["sourcery", "codeant"])

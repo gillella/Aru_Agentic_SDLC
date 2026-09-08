@@ -223,56 +223,119 @@ def external_state(
 
 
 LABEL_GATED_SKIP_RE = re.compile(r"review skipped.{0,40}label", re.IGNORECASE)
+RUNNING_RE = re.compile(r"in progress|running|reviewing", re.IGNORECASE)
+COMPLETED_RE = re.compile(r"review (?:completed|complete|finished)", re.IGNORECASE)
+# signal -> (state while fresh, reason while fresh, reason once older than the deadline)
+_FRESHNESS = {
+    "running": (AVAILABLE, "current-head-review-running", "review-stalled"),
+    "completed": (AVAILABLE, "current-head-review-completed", "completed-without-current-verdict"),
+    "queued": (PENDING, "review-queued", "review-stalled"),
+}
 
 
-def coderabbit_status_capability(
+def _status_signal(record: dict[str, Any]) -> str:
+    """Classify one trusted commit status (CodeRabbit's legacy `commit_status` mirror)."""
+    description = str(record.get("description") or "")
+    state = str(record.get("state") or "").lower()
+    if LABEL_GATED_SKIP_RE.search(description):
+        return "label-skip"
+    if review_evidence_unavailable(record):
+        return "denied"
+    if state == "pending":
+        return "running" if RUNNING_RE.search(description) else "queued"
+    if state == "success":
+        return "completed" if COMPLETED_RE.search(description) else "generic"
+    return "error"
+
+
+def _check_signal(record: dict[str, Any]) -> str:
+    """Classify one trusted check run (CodeRabbit's default `review_progress` surface)."""
+    output = record.get("output") if isinstance(record.get("output"), dict) else {}
+    text = " ".join(str(v or "") for v in (record.get("name"), output.get("title"), output.get("summary")))
+    if LABEL_GATED_SKIP_RE.search(text):
+        return "label-skip"
+    if review_evidence_unavailable(record):
+        return "denied"
+    status = str(record.get("status") or "").upper()
+    conclusion = str(record.get("conclusion") or "").upper()
+    if status in {"QUEUED", "PENDING", "WAITING", "REQUESTED"}:
+        return "queued"
+    if status == "IN_PROGRESS":
+        return "running"
+    if status == "COMPLETED" and conclusion == "SUCCESS":
+        return "completed"
+    if status == "COMPLETED" and conclusion == "NEUTRAL":
+        return "generic"
+    return "error"
+
+
+def _capability_signals(
+    statuses: list[dict[str, Any]], checks: list[dict[str, Any]], head: str | None
+) -> list[tuple[datetime, str]]:
+    signals: list[tuple[datetime, str]] = []
+    for record in statuses:
+        if not isinstance(record, dict):
+            raise KernelError("commit status inventory is malformed")
+        if _trusted_status(record, "coderabbit"):
+            signals.append((evidence_time(record, subject="capability status"), _status_signal(record)))
+    for record in checks:
+        if not isinstance(record, dict):
+            raise KernelError("capability check inventory is malformed")
+        if head is not None and _trusted_check(record, "coderabbit", head):
+            signals.append((evidence_time(record, subject="capability check"), _check_signal(record)))
+    return signals
+
+
+def coderabbit_capability_state(
     statuses: list[dict[str, Any]],
-    observed_at: datetime,
+    checks: list[dict[str, Any]] = (),
     *,
+    head: str | None = None,
+    observed_at: datetime,
     since: datetime | None = None,
     timeout_seconds: int = 900,
 ) -> dict[str, str]:
-    """Judge usable CodeRabbit access from its authenticated commit statuses on the head.
+    """Judge usable CodeRabbit access from its authenticated activity on one head.
 
-    Returns one of three states. ``available``: a review is running (recent
-    ``pending``) or completed on this head. ``pending``: nothing observed yet, or
-    only the label-gated skip that CodeRabbit posts before ``review:coderabbit``
-    is applied; CodeRabbit stays eligible because it cannot run before
-    assignment. ``unavailable``: explicit denial, error, rate limit, a skip after
-    assignment, or a stalled run. Untrusted creators are ignored, so a spoofed
-    status can neither grant nor revoke capability.
+    Both supported surfaces count: commit statuses created by `coderabbitai[bot]`
+    and check runs owned by the CodeRabbit App for this head. The newest trusted
+    signal decides. ``available``: a review is running or completed within the
+    deadline. ``pending``: nothing observed yet, a queued run, a generic success,
+    or the label-gated skip posted before assignment; CodeRabbit cannot run
+    before `review:coderabbit` exists, so it stays eligible and the caller bounds
+    the wait. ``unavailable``: denial, error, rate limit, a skip after
+    assignment, a stalled or stale run, or a timestamp in the future. Untrusted
+    creators and apps are ignored, so spoofed evidence changes nothing.
     """
-    trusted = []
-    for status in statuses:
-        if not isinstance(status, dict):
-            raise KernelError("commit status inventory is malformed")
-        if _trusted_status(status, "coderabbit"):
-            trusted.append((evidence_time(status, subject="capability status"), status))
-    if not trusted:
-        return {"state": PENDING, "reason": "no-coderabbit-status-yet"}
-    seen_at, latest = max(trusted, key=lambda item: item[0])
-    description = str(latest.get("description") or "")
-    if LABEL_GATED_SKIP_RE.search(description):
+    signals = _capability_signals(statuses, checks, head)
+    if not signals:
+        return {"state": PENDING, "reason": "no-coderabbit-evidence-yet"}
+    seen_at = max(observed_at for observed_at, _signal in signals)
+    newest = {signal for observed_at, signal in signals if observed_at == seen_at}
+    if len(newest) != 1:
+        # Two authentic signals in the same second that disagree (e.g. pending and
+        # error) must not be settled by API response order: fail closed.
+        return {"state": UNAVAILABLE, "reason": "conflicting-evidence"}
+    signal = newest.pop()
+    age = (observed_at - seen_at).total_seconds()
+    if age < 0:
+        return {"state": UNAVAILABLE, "reason": "future-timestamp"}
+    if signal == "label-skip":
         if since is None or seen_at < since:
             return {"state": PENDING, "reason": "awaiting-review-label"}
         return {"state": UNAVAILABLE, "reason": "skipped-after-assignment"}
-    if review_evidence_unavailable(latest):
-        return {"state": UNAVAILABLE, "reason": "provider-unavailable"}
-    state = str(latest.get("state") or "").lower()
-    if state in {"error", "failure"}:
-        return {"state": UNAVAILABLE, "reason": "provider-error"}
-    if state == "pending":
-        age = (observed_at - seen_at).total_seconds()
-        if 0 <= age < timeout_seconds:
-            return {"state": AVAILABLE, "reason": "current-head-review-running"}
-        return {"state": UNAVAILABLE, "reason": "review-stalled"}
-    if state == "success":
-        return {"state": AVAILABLE, "reason": "current-head-review-completed"}
-    return {"state": UNAVAILABLE, "reason": "unrecognized-status"}
+    if signal in {"denied", "error"}:
+        return {"state": UNAVAILABLE, "reason": f"provider-{signal}"}
+    if signal not in _FRESHNESS:
+        return {"state": PENDING, "reason": "unrecognized-success"}
+    fresh_state, fresh_reason, stale_reason = _FRESHNESS[signal]
+    if age < timeout_seconds:
+        return {"state": fresh_state, "reason": fresh_reason}
+    return {"state": UNAVAILABLE, "reason": stale_reason}
 
 
 __all__ = [
     "AVAILABLE", "EXTERNAL_ACTORS", "EXTERNAL_APP_SLUGS", "PENDING",
-    "UNAVAILABLE", "check_service", "coderabbit_status_capability",
+    "UNAVAILABLE", "check_service", "coderabbit_capability_state",
     "authority_assigned_at", "evidence_time", "external_state", "parse_time",
 ]

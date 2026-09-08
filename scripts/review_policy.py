@@ -35,7 +35,7 @@ from review_evidence import (
     PENDING,
     UNAVAILABLE,
     authority_assigned_at,
-    coderabbit_status_capability,
+    coderabbit_capability_state,
     external_state,
 )
 from reviewer_probe import (
@@ -49,6 +49,9 @@ TIMEOUT_PREFIX = "review-policy:timeout="
 POLICY_PREFIX = "review-policy:"
 DEFAULT_TIMEOUT_SECONDS = 15 * 60
 CAPABILITY_TIMEOUT_SECONDS = 8
+# After assignment CodeRabbit posts queued/in-progress within seconds; no authentic
+# activity inside this window means the assignment is unproven and falls back.
+ACTIVITY_GRACE_SECONDS = 120
 MIN_TIMEOUT_SECONDS = 60
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 ASSIGNMENT_AUDIT_PREFIXES = (
@@ -108,28 +111,42 @@ def registration_states(names: Iterable[str]) -> dict[str, str]:
     }
 
 
-def _statuses(pages: Any) -> list[dict[str, Any]]:
+def _statuses(pages: Any, *, strict: bool = False) -> list[dict[str, Any]]:
     """Flatten paginated commit-status pages down to status-shaped records.
 
-    Anything that is not a list is a transport or API failure and is refused.
-    Records without ``context``/``state`` are not statuses and are dropped; the
-    creator check downstream decides trust, so nothing here can grant capability.
+    Anything that is not a list is a transport or API failure and is refused. In
+    strict mode (the bounded capability probe) a non-empty payload with no
+    status-shaped record is also refused, so an unexpected API shape reads as
+    unreadable rather than as "no activity yet".
     """
     if isinstance(pages, list) and all(isinstance(page, list) for page in pages):
         pages = [record for page in pages for record in page]
     if not isinstance(pages, list):
         raise KernelError("commit status inventory is malformed")
-    return [
+    statuses = [
         record for record in pages
         if isinstance(record, dict) and "context" in record and "state" in record
     ]
+    if strict and pages and not statuses:
+        raise KernelError("commit status inventory is malformed")
+    return statuses
+
+
+def _check_runs(data: Any) -> list[dict[str, Any]]:
+    if not isinstance(data, dict) or not isinstance(data.get("check_runs"), list):
+        raise KernelError("capability check inventory is malformed")
+    checks = data["check_runs"]
+    if data.get("total_count") != len(checks) or any(not isinstance(c, dict) for c in checks):
+        raise KernelError("capability check inventory is incomplete")
+    return checks
 
 
 def coderabbit_capability(head: str | None = None) -> dict[str, str]:
-    """Bounded observation of CodeRabbit's authenticated commit statuses on one head.
+    """Bounded observation of CodeRabbit's authenticated activity on one head.
 
-    CodeRabbit never creates check runs here; registration, cached inventory and
-    a generic green rollup prove nothing. An unreadable or timed-out read is
+    Reads both supported surfaces: legacy commit statuses (`commit_status`) and
+    App check runs (`review_progress`). Registration, cached inventory and a
+    generic green rollup prove nothing. An unreadable or timed-out read is
     reported as unavailable so the caller falls back instead of guessing.
     """
     try:
@@ -137,10 +154,15 @@ def coderabbit_capability(head: str | None = None) -> dict[str, str]:
         if not re.fullmatch(r"[0-9a-f]{40}", head):
             raise KernelError("invalid capability head")
         slug = repo_slug()
-        pages = gh_json([
+        statuses = _statuses(gh_json([
             "api", f"repos/{slug}/commits/{head}/statuses?per_page=100",
-        ], timeout=CAPABILITY_TIMEOUT_SECONDS)
-        return coderabbit_status_capability(_statuses(pages), datetime.now(timezone.utc))
+        ], timeout=CAPABILITY_TIMEOUT_SECONDS), strict=True)
+        checks = _check_runs(gh_json([
+            "api", f"repos/{slug}/commits/{head}/check-runs?per_page=100&filter=latest",
+        ], timeout=CAPABILITY_TIMEOUT_SECONDS))
+        return coderabbit_capability_state(
+            statuses, checks, head=head, observed_at=datetime.now(timezone.utc),
+        )
     except KernelError:
         return {"state": UNAVAILABLE, "reason": "capability-unreadable-or-timed-out"}
 
@@ -204,15 +226,21 @@ def external_decision(
     if state == AVAILABLE:
         return "external-available", None
     if state == PENDING and age < timeout_seconds:
-        # Still inside the completion deadline: only an explicit denial, error,
-        # post-assignment skip or stalled run ends the wait early. No status yet
-        # is normal right after the review label is applied.
-        capability = coderabbit_status_capability(
-            statuses, observed_at, since=assigned_at, timeout_seconds=timeout_seconds,
+        # Inside the completion deadline. A running or completed review keeps the
+        # full deadline; denial, error, post-assignment skip or a stale run ends it
+        # now; no activity (or only "queued") is tolerated for one bounded window
+        # after assignment, then the unproven assignment falls back.
+        capability = coderabbit_capability_state(
+            statuses, checks, head=str(pr["headRefOid"]), observed_at=observed_at,
+            since=assigned_at, timeout_seconds=timeout_seconds,
         )
         if capability["state"] == UNAVAILABLE:
             return "external-unavailable", None
-        return "external-pending", timeout_seconds - int(age)
+        if capability["state"] == AVAILABLE:
+            return "external-pending", timeout_seconds - int(age)
+        if age >= ACTIVITY_GRACE_SECONDS:
+            return "external-unavailable", None
+        return "external-pending", min(timeout_seconds, ACTIVITY_GRACE_SECONDS) - int(age)
     reason = "external-unavailable" if state == UNAVAILABLE else "external-pending-timeout"
     return reason, None
 
