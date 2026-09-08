@@ -4,8 +4,6 @@ name: Aru governed pull request
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  merge_group:
-    types: [checks_requested]
 
 permissions:
   contents: read
@@ -13,13 +11,13 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: aru-governed-pr-${{ github.event.pull_request.number || github.ref }}
+  group: aru-governed-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   governed-pr:
     name: aru-governed-pr
-    if: ${{ github.event_name == 'merge_group' || !github.event.pull_request.draft }}
+    if: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}
     runs-on: __ARU_RUNS_ON__
     timeout-minutes: 20
     steps:
@@ -41,7 +39,7 @@ jobs:
       - name: Check out the exact pull-request head
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
 

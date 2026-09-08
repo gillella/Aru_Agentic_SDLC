@@ -21,8 +21,9 @@ agent-global instructions.
    code do not wait for authoritative review; Tier 2 sensitive/contract and
    Tier 3 production/destructive changes require exactly one current-head
    authoritative reviewer distinct from the author.
-7. Submit only through `merge_pr.py --expected-head`. A merge-queue submission
-   is still in flight; verify GitHub actually merged before Done and cleanup.
+7. Submit only through `merge_pr.py --expected-head`. Configured merge queues
+   and pending queue/auto-merge requests are unsupported and refused. Verify
+   GitHub actually merged before Done and cleanup.
 
 Any missing, stale, partial, contradictory, or unreadable authority blocks the
 transition. Never push directly to `main` or `master`, review your own PR,

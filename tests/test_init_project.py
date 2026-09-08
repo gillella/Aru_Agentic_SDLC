@@ -80,11 +80,11 @@ def test_kernel_workflow_is_read_only_exact_head_and_immutable():
     assert "ARU_HEAD_REPOSITORY" in preflight["env"]
     assert "command -v python3" in preflight["run"] and "command -v gh" in preflight["run"]
     checkout = job["steps"][1]
-    assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
     assert checkout["uses"].startswith("actions/checkout@") and len(checkout["uses"].split("@", 1)[1]) == 40
     assert checkout["with"]["persist-credentials"] is False
     raw = path.read_text(encoding="utf-8")
-    assert "merge_group:" in raw and "github.event_name == 'pull_request'" in raw
+    assert "merge_group:" not in raw and "github.event_name == 'pull_request'" in raw
     for absent in ("pull_request_target", "ubuntu-latest", "actions/upload-artifact", "actions/setup-python", "cache:"):
         assert absent not in raw
 
@@ -227,6 +227,11 @@ def test_github_setup_marks_project_graphql_authority(monkeypatch, tmp_path):
 @pytest.mark.parametrize("source", WORKFLOW_SOURCES)
 def test_governed_pr_workflow_provenance_and_python3(source):
     raw = profiled_workflows()[source]
+    workflow = yaml.safe_load(raw)
+    assert set(workflow.get("on", workflow.get(True))) == {"pull_request"}
+    job = workflow["jobs"]["governed-pr"]
+    assert job["if"] == "${{ github.event_name == 'pull_request' && !github.event.pull_request.draft }}"
+    assert job["steps"][1]["with"]["ref"] == "${{ github.event.pull_request.head.sha }}"
     assert "ARU_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}" in raw
     assert "|| github.repository" not in raw
     assert (

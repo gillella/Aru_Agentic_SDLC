@@ -95,6 +95,8 @@ def merge_queue_snapshot(
     pr = repository.get("pullRequest") if isinstance(repository, dict) else None
     if (
         not isinstance(pr, dict)
+        or bool(data.get("errors"))
+        or not {"mergeQueue", "mergeQueueEntry", "autoMergeRequest"}.issubset(pr)
         or pr.get("number") != number
         or pr.get("headRefOid") != expected_head
         or (expected_base is not None and pr.get("baseRefOid") != expected_base)
@@ -119,6 +121,37 @@ def merge_queue_snapshot(
     ):
         raise KernelError("auto-merge state is malformed")
     return {"configured": queue is not None, "entry": entry, "auto_merge": auto_merge}
+
+
+def require_direct_merge_history(number: int, expected_head: str, expected_merge: str) -> None:
+    """Never close historical queue work using only the PR-head check."""
+    owner, name = repo_slug().split("/", 1)
+    query = """query($owner:String!,$name:String!,$number:Int!){
+      repository(owner:$owner,name:$name){pullRequest(number:$number){
+        number state headRefOid mergeCommit{oid}
+        timelineItems(first:1,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT]){nodes{__typename} pageInfo{hasNextPage}}
+      }}
+    }"""
+    data = gh_json([
+        "api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}",
+        "-F", f"name={name}", "-F", f"number={number}",
+    ], auth=REPOSITORY_AUTH)
+    repository = (data.get("data") or {}).get("repository") if isinstance(data, dict) else None
+    pr = repository.get("pullRequest") if isinstance(repository, dict) else None
+    if (not isinstance(pr, dict) or data.get("errors") or pr.get("number") != number
+            or pr.get("state") != "MERGED" or pr.get("headRefOid") != expected_head
+            or pr.get("mergeCommit") != {"oid": expected_merge}):
+        raise KernelError("merged PR provenance is incomplete or stale")
+    history = pr.get("timelineItems")
+    nodes = history.get("nodes") if isinstance(history, dict) else None
+    page = history.get("pageInfo") if isinstance(history, dict) else None
+    if (not isinstance(nodes, list) or not isinstance(page, dict)
+            or type(page.get("hasNextPage")) is not bool
+            or any(node != {"__typename": "AddedToMergeQueueEvent"} for node in nodes)):
+        raise KernelError("merge queue history is incomplete")
+    # totalCount includes unrelated timeline events despite itemTypes filtering.
+    if nodes or page["hasNextPage"]:
+        raise KernelError("historical merge-queue work is unsupported; issue close-out refused")
 
 
 def base_snapshot(pr: dict[str, Any]) -> str:

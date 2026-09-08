@@ -17,9 +17,11 @@ compute. It runs this repository's `.aru/verify.sh` and validates `touches:`
 against the actual diff. __ARU_RUNNER_RULE__ `.aru/verify.sh` refuses a workflow
 whose declared profile and `runs-on:` disagree.
 
-A `merge_pr.py` merge-queue or auto-merge result is still in flight. Keep the
-issue In Review until GitHub confirms the exact head merged; only then mark Done
-and clean the worktree.
+Configured merge queues and pending queue/auto-merge requests are unsupported
+and refused before submission. Verification accepts same-repository PR heads
+only. Keep the issue In Review until GitHub confirms the exact head merged;
+`--finalize` recovers direct merges but refuses historical queue work. Only then
+mark Done and clean the worktree.
 
 Review is risk-tiered from the actual changed paths: Tier 0 documentation and
 Tier 1 ordinary code do not wait for authoritative review; Tier 2

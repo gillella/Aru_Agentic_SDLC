@@ -20,7 +20,7 @@ from common import (
 from fetch_pr_feedback import fetch_feedback
 from merge_state import (
     base_snapshot, close_out, issue_gate, linked_issues, merge_queue_snapshot,
-    pull_changed_paths, pull_request,
+    pull_changed_paths, pull_request, require_direct_merge_history,
 )
 from review_evidence import (
     UNAVAILABLE, authority_assigned_at, evidence_time, external_state,
@@ -573,13 +573,12 @@ def exact_head_review(
 
 
 def require_mergeable(pr: dict[str, Any], queue: dict[str, object]) -> None:
-    submitted = queue["entry"] is not None or queue["auto_merge"] is not None
+    if queue["configured"] or queue["entry"] is not None or queue["auto_merge"] is not None:
+        raise KernelError("merge queues and pending auto-merge are unsupported; no merge submitted")
     merge_state = pr.get("mergeStateStatus")
-    if not submitted and pr.get("mergeable") != "MERGEABLE":
+    if pr.get("mergeable") != "MERGEABLE":
         raise KernelError("PR is not currently mergeable")
-    allowed = merge_state in {"CLEAN", "UNSTABLE"}
-    queued_behind = merge_state == "BEHIND" and bool(queue["configured"])
-    if not allowed and not queued_behind and not submitted:
+    if merge_state not in {"CLEAN", "UNSTABLE"}:
         raise KernelError(f"PR merge state is {merge_state}")
 
 
@@ -664,23 +663,10 @@ def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str
     if dry_run:
         return {"merged": False, "gates": gates}
     issue_numbers = [int(item["issue"]) for item in gates["issues"]]
-    if gates["queue_entry"] is not None or gates["auto_merge"] is not None:
-        return {
-            "merged": False,
-            "queued": gates["queue_entry"] is not None,
-            "auto_merge": gates["auto_merge"] is not None,
-            "pr": number,
-            "head": expected_head,
-            "issues": issue_numbers,
-            "next_action": "finalize-queued-merge",
-        }
     live_gates = evaluate(number, expected_head)
     if live_gates != gates:
         raise KernelError("merge authority changed during final gate evaluation")
-    command = ["gh", "pr", "merge", str(number)]
-    if not gates["merge_queue"]:
-        command.append("--merge")
-    command.extend(["--match-head-commit", expected_head])
+    command = ["gh", "pr", "merge", str(number), "--merge", "--match-head-commit", expected_head]
     # One bounded semantic reread after CI/review reads, immediately before
     # submission. Separate GitHub metadata reads and merge remain non-atomic.
     final_pr = pull_request(number)
@@ -706,27 +692,14 @@ def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str
     if merged.get("headRefOid") != expected_head:
         raise KernelError("PR head changed during merge submission")
     if not merged.get("mergedAt"):
-        if not gates["merge_queue"]:
-            raise KernelError("GitHub did not confirm the expected-head merge")
-        queued = merge_queue_snapshot(number, expected_head, str(gates["base_sha"]))
-        if queued["entry"] is None and queued["auto_merge"] is None:
-            raise KernelError("GitHub did not confirm merge-queue or auto-merge submission")
-        return {
-            "merged": False,
-            "queued": queued["entry"] is not None,
-            "auto_merge": queued["auto_merge"] is not None,
-            "pr": number,
-            "head": expected_head,
-            "issues": issue_numbers,
-            "next_action": "finalize-queued-merge",
-        }
+        raise KernelError("GitHub did not confirm the expected-head merge; no issue closed")
     return finalize_queued(number, expected_head)
 
 
 def finalize_queued(number: int, expected_head: str) -> dict[str, object]:
     pr = pull_request(number)
     if pr.get("state") != "MERGED" or not pr.get("mergedAt"):
-        raise KernelError("queued PR has not merged yet")
+        raise KernelError("PR has not merged yet")
     if pr.get("headRefOid") != expected_head:
         raise KernelError("expected head does not match the merged PR head")
     merge_commit = (pr.get("mergeCommit") or {}).get("oid")
@@ -742,9 +715,9 @@ def finalize_queued(number: int, expected_head: str) -> dict[str, object]:
         raise KernelError("exact-head required GitHub checks are not successful")
     feedback = fetch_feedback(number)
     if feedback:
-        raise KernelError(f"{len(feedback)} unresolved post-queue review thread(s)")
+        raise KernelError(f"{len(feedback)} unresolved post-merge review thread(s)")
     if pr.get("reviewDecision") == "CHANGES_REQUESTED":
-        raise KernelError("a submitted post-queue review requests changes")
+        raise KernelError("a submitted post-merge review requests changes")
     risk_tier = review_risk_tier(changed_paths)
     service: str | None = None
     if risk_tier >= 2:
@@ -752,9 +725,10 @@ def finalize_queued(number: int, expected_head: str) -> dict[str, object]:
         if service in CODING_REVIEWERS:
             verdict = coding_review_verdict(pr, pull_reviews(number), service, numbers)
             if verdict != "APPROVE":
-                raise KernelError(f"{service} post-queue exact-head review is not approved")
+                raise KernelError(f"{service} post-merge exact-head review is not approved")
         elif not exact_head_review(pr, number, service, numbers):
-            raise KernelError(f"{service} post-queue exact-head review is not approved")
+            raise KernelError(f"{service} post-merge exact-head review is not approved")
+    require_direct_merge_history(number, expected_head, merge_commit)
     evidence = close_out(numbers, changed_paths)
     return {
         "merged": True,
