@@ -207,6 +207,30 @@ launch and are retried after a cooldown. A successful probe establishes immediat
 not remaining quota or a guarantee the complete task will fit. Healthy idle
 ticks do not run these model probes.
 
+## Bounded refill canary
+
+`canary.py` is the scripted form of the live acceptance exercise in
+[Aru #557](https://github.com/gillella/Aru_Agentic_SDLC/issues/557). It drives
+only the installed Driver entrypoints (`start`, `status`, `event`, `stop`) and
+`gh`, never edits labels or authority by hand, and writes one JSON evidence file
+(`aru.canary/v1`) with a timestamp, exact identifiers and a pass/failed/unproven
+verdict per step: fixture creation, first dispatch, completion and PR, automatic
+refill of the next fixture, duplicate delivery suppression, Stop with a live
+worker preserved, and restart without a duplicate heartbeat or claim. A step that
+is not observed within `--bound-seconds` (default 900) is `unproven`, never pass,
+and the canary always leaves the project stopped.
+
+```sh
+/absolute/path/hermes-python /absolute/path/Aru_Agentic_SDLC/integrations/hermes/canary.py \
+  --config /absolute/path/driver-config.json --project owner/repo \
+  --evidence /absolute/path/canary-evidence.json --dry-run
+```
+
+`--dry-run` substitutes a deterministic fake Driver and `gh`, so the sequence is
+testable offline. Running without `--dry-run` creates real fixture issues and
+dispatches real workers; do that only under the operator-approved scope recorded
+in the dependent live-run issue.
+
 ## Install separately; activate deliberately
 
 Prerequisites are a supported Python runtime, an installed Hermes runtime with
