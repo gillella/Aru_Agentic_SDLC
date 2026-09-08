@@ -44,7 +44,13 @@ A coding agent may review another agent's code. Never authoritatively review
 your own PR. A coding-agent review must read the issue and acceptance criteria,
 inspect the exact diff and surrounding code, run focused verification, and
 submit a substantive full-current-head `APPROVE` or `REQUEST_CHANGES`
-attestation with severity and `file:line` findings.
+attestation with severity, concrete consequence, evidence and `file:line`
+findings. The writer owns remediation; a reviewer who authors a fix must be
+replaced through the governed helper and cannot supply independent approval.
+Use the feedback skill's fix, evidence-backed disagreement, advisory-only and
+accepted-follow-up dispositions. Inspect existing relevant regression coverage
+before requesting new tests. One valid independent current-head verdict is
+sufficient; no extra brands or ceremonial approval rounds are required.
 
 Stop after one claimed issue in this worktree. Another operator may invoke the
 same single-agent picker independently, but do not start a scheduler, fleet,
