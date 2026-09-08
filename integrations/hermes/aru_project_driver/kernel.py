@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -28,6 +29,58 @@ ACTIVE = {"In Progress", "In Review"}
 
 class KernelAdapterError(RuntimeError):
     """An observation or transition could not be safely established."""
+
+
+# Explicit override for the GitHub CLI used by every Driver subprocess.
+GH_ENV = "ARU_DRIVER_GH"
+# Fixed discovery order for scheduler environments (launchd/cron) that start
+# jobs without a login-shell PATH. Only these locations and an explicit
+# override are trusted; shell startup files are never sourced.
+GH_LOCATIONS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/home/linuxbrew/.linuxbrew/bin")
+SYSTEM_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+
+def _executable(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def resolve_gh(hint: str | None = None) -> Path:
+    """Return one validated `gh` executable without depending on an interactive shell.
+
+    Precedence: explicit hint, the ARU_DRIVER_GH environment variable, the
+    current PATH, then the fixed well-known locations. The result is not
+    symlink-resolved so a Homebrew upgrade cannot invalidate a baked path.
+    Anything else fails closed with a KernelAdapterError.
+    """
+    explicit = hint if hint is not None else os.environ.get(GH_ENV)
+    if explicit is not None:
+        candidate = Path(explicit).expanduser()
+        if not candidate.is_absolute() or not _executable(candidate):
+            raise KernelAdapterError(f"configured GitHub CLI is not an executable file: {explicit}")
+        return candidate
+    found = shutil.which("gh")
+    candidates = [Path(found).absolute()] if found else []
+    candidates.extend(Path(directory) / "gh" for directory in GH_LOCATIONS)
+    for candidate in candidates:
+        if _executable(candidate):
+            return candidate
+    raise KernelAdapterError(
+        "GitHub CLI 'gh' is not executable in the Driver environment; "
+        f"set {GH_ENV} to its absolute path or install gh in a well-known location"
+    )
+
+
+def bounded_environment(gh: Path, base: dict[str, str] | None = None) -> dict[str, str]:
+    """Copy of the environment whose PATH resolves the validated `gh` first, deterministically.
+
+    The validated directory and the fixed system directories lead; inherited
+    entries follow (deduplicated) so nothing that worked before stops working.
+    """
+    environment = dict(os.environ if base is None else base)
+    ordered = [str(gh.parent), *SYSTEM_PATH, *environment.get("PATH", "").split(os.pathsep)]
+    environment["PATH"] = os.pathsep.join(dict.fromkeys(entry for entry in ordered if entry))
+    environment[GH_ENV] = str(gh)
+    return environment
 
 
 def _overlap(left: list[str], right: list[str]) -> bool:
@@ -88,6 +141,9 @@ class KernelAdapter:
         self.repo = repo
 
     def _invoke(self, operation: str, **payload: Any) -> Any:
+        # Fail closed before spawning: a bridge that cannot execute `gh` is a
+        # degraded observation, never a healthy empty one.
+        gh = resolve_gh()
         command = [
             sys.executable, str(Path(__file__).resolve()), "--kernel-bridge",
             str(self.kernel_root), str(self.repo_dir), self.repo, operation,
@@ -96,7 +152,7 @@ class KernelAdapter:
             # Fixed interpreter/bridge entrypoint; untrusted payload is JSON stdin.
             result = subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
                 command, input=json.dumps(payload), text=True, capture_output=True,
-                check=False, timeout=180, shell=False,
+                check=False, timeout=180, shell=False, env=bounded_environment(gh),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise KernelAdapterError(

@@ -74,6 +74,22 @@ def status(config: Config, repo: str) -> dict:
             )}
 
 
+def _honest_health(config: Config, repo: str, result: dict) -> dict:
+    """Never let a quiet or cooling-down precheck launder a recorded Driver failure.
+
+    The native scheduler marks a job `ok` whenever its script exits zero, so a
+    heartbeat that skips work while `last_error` is still recorded would
+    overwrite the previous degraded run in operator status. Reconcile clears
+    `last_error` on success, which restores healthy reporting.
+    """
+    if not isinstance(result, dict) or result.get("status"):
+        return result
+    data = State(config.state_dir).project(repo)
+    if data.get("enabled") and data.get("last_error"):
+        return {**result, "status": "degraded", "last_error": data["last_error"]}
+    return result
+
+
 def parser() -> argparse.ArgumentParser:
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("--config", required=True, type=Path)
@@ -112,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
                       else controller.handoff(args.project, args.source_issue))
         elif args.operation in {"tick", "reconcile"}:
             result = getattr(controller, args.operation)(args.project)
+            if args.operation == "tick":
+                result = _honest_health(config, args.project, result)
         else:
             result = {"start": start, "stop": stop, "status": status}[args.operation](config, args.project)
         print(json.dumps(result, sort_keys=True))

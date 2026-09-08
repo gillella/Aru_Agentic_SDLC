@@ -15,6 +15,19 @@ import sys
 import tempfile
 from typing import Any
 
+try:
+    from . import kernel
+except ImportError:
+    # install.py loads this file standalone (no package) to plan webhooks;
+    # resolve the sibling kernel module the same way so gh discovery is shared.
+    import importlib.util
+
+    _spec = importlib.util.spec_from_file_location(
+        "aru_project_driver_kernel", Path(__file__).with_name("kernel.py"),
+    )
+    kernel = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(kernel)
+
 
 class SchedulerError(RuntimeError):
     """The installed Hermes scheduler cannot safely fulfill the operation."""
@@ -93,6 +106,35 @@ def _must(result, operation: str):
     return result
 
 
+def _executable_environment() -> tuple[list[str], Path | None]:
+    """Resolve `gh` once, at job-generation time, for a deterministic job PATH.
+
+    Native schedulers (launchd/cron) start jobs without a login-shell PATH.
+    When discovery fails here the job still receives the fixed well-known
+    locations and the Driver precheck fails closed as degraded at run time
+    instead of failing to spawn `gh`.
+    """
+    try:
+        gh: Path | None = kernel.resolve_gh()
+    except kernel.KernelAdapterError:
+        gh = None
+    entries = [str(gh.parent)] if gh else []
+    entries += [*kernel.GH_LOCATIONS, *kernel.SYSTEM_PATH]
+    return entries, gh
+
+
+def _environment_source(entries: list[str], gh: Path | None) -> list[str]:
+    """Python lines building `env` for a generated job; brace-free for native templates."""
+    lines = [
+        "env = dict(os.environ)",
+        f"entries = [*{entries!r}, *env.get('PATH', '').split(os.pathsep)]",
+        "env['PATH'] = os.pathsep.join(dict.fromkeys(e for e in entries if e))",
+    ]
+    if gh is not None:
+        lines.append(f"env[{kernel.GH_ENV!r}] = {str(gh)!r}")
+    return lines
+
+
 def _wrapper(hermes_home: Path, project: str, config_path: Path, driver_path: Path) -> str:
     config_path = Path(config_path).expanduser().resolve()
     driver_path = Path(driver_path).expanduser().resolve()
@@ -108,12 +150,26 @@ def _wrapper(hermes_home: Path, project: str, config_path: Path, driver_path: Pa
     name = hashlib.sha256(project.lower().encode()).hexdigest()[:20] + ".py"
     destination = directory / name
     argv = [str(driver_path), "--config", str(config_path), "tick", "--project", project]
-    contents = (
-        "#!/usr/bin/env python3\n"
-        '"""Generated fixed-argument Aru Project Driver precheck."""\n'
-        "import os\nimport sys\n"
-        f"os.execv(sys.executable, [sys.executable, *{argv!r}])\n"
-    )
+    entries, gh = _executable_environment()
+    contents = "\n".join([
+        "#!/usr/bin/env python3",
+        '"""Generated fixed-argument Aru Project Driver precheck."""',
+        "import json, os, subprocess, sys",
+        *_environment_source(entries, gh),
+        f"receipt = subprocess.run([sys.executable, *{argv!r}], env=env, capture_output=True, text=True)",
+        "sys.stdout.write(receipt.stdout)",
+        "sys.stderr.write(receipt.stderr)",
+        # The native scheduler records `ok` for any zero exit. A degraded precheck
+        # must fail the job so operator status never shows a healthy heartbeat
+        # over a Driver that could not observe GitHub.
+        "lines = [line for line in receipt.stdout.splitlines() if line.strip()]",
+        "try:",
+        "    gate = json.loads(lines[-1]) if lines else None",
+        "except ValueError:",
+        "    gate = None",
+        "degraded = isinstance(gate, dict) and gate.get('status') in ('degraded', 'error')",
+        "raise SystemExit(receipt.returncode or (1 if degraded else 0))",
+    ]) + "\n"
     fd, temp = tempfile.mkstemp(prefix=".driver-", dir=directory)
     try:
         with os.fdopen(fd, "w") as handle:
@@ -156,8 +212,12 @@ def webhook_prompt(project: str, config_path: Path, driver_path: Path, route: st
         if "{" in str(path) or "}" in str(path):
             raise ValueError("webhook paths cannot contain native template delimiters")
     base = [str(driver_path), "--config", str(config_path)]
+    entries, gh = _executable_environment()
+    if any("{" in value or "}" in value for value in (*entries, str(gh or ""))):
+        raise ValueError("executable paths cannot contain native template delimiters")
     code = "\n".join([
         "import json, os, re, subprocess, sys",
+        *_environment_source(entries, gh),
         "platform = os.environ.get('HERMES_SESSION_PLATFORM', '')",
         "delivery = os.environ.get('HERMES_SESSION_MESSAGE_ID', '')",
         "chat = os.environ.get('HERMES_SESSION_CHAT_ID', '')",
@@ -172,11 +232,11 @@ def webhook_prompt(project: str, config_path: Path, driver_path: Path, route: st
         "    raise SystemExit('Invalid native delivery identifier')",
         f"base = [sys.executable, *{base!r}]",
         f"event = base + {['event', '--project', project, '--inline', '--event-id']!r} + [delivery, '--reason', 'event']",
-        "receipt = subprocess.run(event, capture_output=True, text=True, check=True)",
+        "receipt = subprocess.run(event, env=env, capture_output=True, text=True, check=True)",
         "print(receipt.stdout, end='')",
         "result = json.loads(receipt.stdout)",
         "if result.get('wakeAgent') is True:",
-        f"    subprocess.run(base + {['reconcile', '--project', project]!r}, check=True)",
+        f"    subprocess.run(base + {['reconcile', '--project', project]!r}, env=env, check=True)",
     ])
     return (
         "ARU_PROJECT_DRIVER_AUTHENTICATED_EVENT_V1\n"
