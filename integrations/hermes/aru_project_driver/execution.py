@@ -58,7 +58,12 @@ def availability(config: Config, repo: str, identity: str, state: State) -> dict
     cooldown = read_json(state.root / "cooldowns" / f"{key(lane['capacity_key'])}.json", {"until": 0})
     if cooldown.get("until", 0) > time.time():
         return {"available": False, "reason": "provider cooldown", "reset_at": cooldown["until"]}
-    result = run_bounded(lane["capacity_command"], Path(config.project(repo)["repo_dir"]))
+    try:
+        result = run_bounded(lane["capacity_command"], Path(config.project(repo)["repo_dir"]))
+    except DriverError as exc:
+        # A missing, hung or unreachable observer (including an optional remote
+        # host) blocks only this observation; it is not a veto that outlives it.
+        return {"available": False, "reason": f"observer unavailable: {exc}"}
     try:
         observation = json.loads(result.stdout)
     except ValueError as exc:
