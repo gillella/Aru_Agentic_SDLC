@@ -47,11 +47,23 @@ receipts help diagnose a stop; GitHub still owns every lifecycle transition.
 
 ### Account availability and worker permissions
 
-A live account with unknown ownership is unavailable. Include every host using
-that subscription in the operator-owned capacity observation; do not infer
-which account a process uses from its display name, inspect credentials, or
-reuse an account merely because a local lock is free. Preserve active workers
-and their account reservations until their exit is verified.
+Process presence is diagnostic, not exhaustion. Since #602 the canonical
+observer counts desktop sessions, processes without an observable
+`CLAUDE_CONFIG_DIR` and processes on other profiles in its reason and leaves the
+lane available; only a live process on exactly the lane's own profile vetoes.
+Never infer which account a process uses from its display name, inspect
+credentials, or reuse an account merely because a local lock is free. Preserve
+active workers and their account reservations until their exit is verified.
+
+Three "no capacity" reasons need different actions. A managed reservation
+(`every managed session slot on the shared subscription is reserved`) clears
+when a worker exits; raise `max_sessions` only through the rollout runbook. A
+provider cooldown (`provider cooldown`, with `reset_at`) is a recorded rate
+limit or failed probe; wait for it, never delete the cooldown file. An observer
+failure (`observer unavailable`) blocks only that observation; repair the
+configured command, and remove any wrapper that vetoes on another host's
+process list. Employer-account isolation is independent of all three: an
+excluded subscription is never selected however idle it looks.
 
 Process liveness is not remaining quota. Before launch, the Driver needs both
 a successful availability observation and a bounded probe using the worker's

@@ -188,8 +188,10 @@ remote host blocks only that observation (`observer unavailable`), never the
 lane permanently. This observer does not measure subscription quota or inspect
 remote hosts.
 
-For account-wide quota or remote-host observations, replace `capacity_command`
-with your own bounded, read-only executable. This is a configuration hook,
+For account-wide quota observations, replace `capacity_command` with your own
+bounded, read-only executable that reports quota, not process presence; the
+operations runbook's migration section explains how to retire a wrapper that
+vetoes on another host's process list. This is a configuration hook,
 not a bundled `capacity_observer` CLI. It must exit successfully and print one
 JSON object to standard output, for example:
 
