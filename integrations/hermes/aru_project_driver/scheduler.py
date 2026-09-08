@@ -120,7 +120,9 @@ def _executable_environment() -> tuple[list[str], Path | None]:
         gh = None
     entries = [str(gh.parent)] if gh else []
     entries += [*kernel.GH_LOCATIONS, *kernel.SYSTEM_PATH]
-    return entries, gh
+    # Bake each directory once; the discovered gh directory stays first even when
+    # it is also a well-known location.
+    return list(dict.fromkeys(entries)), gh
 
 
 def _environment_source(entries: list[str], gh: Path | None) -> list[str]:

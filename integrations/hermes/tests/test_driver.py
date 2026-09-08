@@ -300,3 +300,20 @@ def test_stopped_or_healthy_prechecks_are_not_marked_degraded(config):
     data["last_error"] = None
     state.save("owner/repo", data)
     assert driver._honest_health(config, "owner/repo", quiet) == quiet
+
+
+def test_generated_environment_bakes_each_directory_once(fake_gh, tmp_path, monkeypatch):
+    # Discovered directory that is also a well-known location appears once, first.
+    monkeypatch.setattr(kernel, "GH_LOCATIONS", (str(fake_gh.parent), "/usr/local/bin", "/usr/bin"))
+    monkeypatch.setenv(kernel.GH_ENV, str(fake_gh))
+    entries, gh = scheduler._executable_environment()
+    assert gh == fake_gh and entries[0] == str(fake_gh.parent)
+    assert len(entries) == len(set(entries)) and entries.count("/usr/bin") == 1
+    assert "".join(scheduler._environment_source(entries, gh)).count(str(fake_gh.parent)) == 1
+    # Without discovery the fixed lists are still deduplicated.
+    monkeypatch.delenv(kernel.GH_ENV)
+    monkeypatch.setenv("PATH", str(tmp_path / "nothing"))
+    monkeypatch.setattr(kernel, "GH_LOCATIONS", ("/usr/bin", "/usr/local/bin"))
+    entries, gh = scheduler._executable_environment()
+    assert gh is None and entries == ["/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin"]
+
