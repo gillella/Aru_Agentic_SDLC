@@ -854,7 +854,14 @@ python3 "$ARU_SDLC_HOME/scripts/merge_pr.py" \
 
 The merge command does not delete local branches: an issue worktree may still
 have its branch checked out. Cleanup below is a separate step after confirmed
-merge and close-out. If an older helper reports a local checkout/deletion error
+merge and close-out. The merge command also leaves the remote head branch;
+`cleanup_worktrees.py` removes only local worktrees and branches. A repository
+owner who wants automatic remote cleanup can enable GitHub's **Automatically
+delete head branches** setting. Without it, remote branches remain until an
+operator separately removes them after checking the merged head and peer use.
+This optional housekeeping setting is not a merge gate or a branch-protection
+change. Never delete a remote branch merely because local cleanup succeeded.
+If an older helper reports a local checkout/deletion error
 after submission, first read the PR's actual merged state and exact head. Use
 `--finalize` only for the confirmed merged head; never interpret a command error
 or an unavailable GitHub response as successful merge.
