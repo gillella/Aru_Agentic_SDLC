@@ -16,7 +16,35 @@ if [[ "${hooks_dir}" != "${canonical_hooks_dir}" ]]; then
   exit 1
 fi
 mkdir -p "${hooks_dir}"
-legacy_marker="Aru_Agentic_SDLC pre-push hook"
+
+is_managed_hook() {
+  local ownership
+  ownership="$(python3 - "$1" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+content = pathlib.Path(sys.argv[1]).read_bytes()
+marker = b"# Aru managed pre-push hook; installed by scripts/install_hooks.sh"
+# Exact historical hooks, including versions that predate the stable marker.
+historical = {
+    "e48349eecc28843666dfcc6bd4b00fc2a3d1554b8d7445a73219fa58564bbc86",  # 7a3dc46
+    "9155c01bc3f07c2fb63dc32da88a0acce723c71e360f1d3893fe2cb73a80073f",  # 2b55cfc
+    "c5fb32ec1308c4d96d75af5d6b21cb316d90e0de1c4d4752e4fa32a2ae9cdc82",  # d3a0588
+    "37e230405209654efcc5a9e52b6a76fac7f3635e16dd675d01f4ea1ec3bb0e69",  # 4393d3c
+    "8a48edb4382f41011e9f1227b07f7a7ffe9980030be2a1f462d5ce3f5a20b195",  # 2dfe4ce
+    "289bf4c31078ca5aa0fc994a56a0f914f610e92c598b79aeebefbff71ae35d38",  # a1559da
+}
+managed = content.splitlines()[1:2] == [marker] or hashlib.sha256(content).hexdigest() in historical
+# Custom references to the reserved backup may become self-calls after relocation.
+# Refuse ambiguity; a text match must never authorize deleting a custom hook.
+if not managed and b"pre-push.pre-aru" in content:
+    sys.exit("error: custom hook references reserved backup path; operator review required")
+print("managed" if managed else "custom")
+PY
+)" || { echo "error: cannot safely identify hook ownership: $1" >&2; exit 1; }
+  [[ "${ownership}" == managed ]]
+}
 
 for hook_name in pre-push pre-push.pre-aru enforce_touches.py touches.py; do
   hook_target="${hooks_dir}/${hook_name}"
@@ -30,22 +58,25 @@ for hook_name in pre-push pre-push.pre-aru enforce_touches.py touches.py; do
   fi
 done
 
-if [[ -e "${hooks_dir}/pre-push" ]]; then
-  if ! cmp -s "${hooks_dir}/pre-push" "${source_dir}/pre-push"; then
-    if grep -Fq "${legacy_marker}" "${hooks_dir}/pre-push"; then
-      rm -f "${hooks_dir}/pre-push"
-    elif [[ ! -e "${hooks_dir}/pre-push.pre-aru" ]]; then
-      mv "${hooks_dir}/pre-push" "${hooks_dir}/pre-push.pre-aru"
-    else
-      echo "error: existing pre-push and pre-push.pre-aru both need operator review" >&2
-      exit 1
-    fi
-  fi
+# Classify both paths before modifying either; two custom hooks are ambiguous.
+current_custom=false
+prior_custom=false
+if [[ -f "${hooks_dir}/pre-push" ]] && ! is_managed_hook "${hooks_dir}/pre-push"; then
+  current_custom=true
 fi
-
 if [[ -f "${hooks_dir}/pre-push.pre-aru" ]] &&
-   grep -Fq "${legacy_marker}" "${hooks_dir}/pre-push.pre-aru"; then
+   ! is_managed_hook "${hooks_dir}/pre-push.pre-aru"; then
+  prior_custom=true
+fi
+if ${current_custom} && ${prior_custom}; then
+  echo "error: existing pre-push and pre-push.pre-aru both need operator review" >&2
+  exit 1
+fi
+if ! ${prior_custom}; then
   rm -f "${hooks_dir}/pre-push.pre-aru"
+fi
+if ${current_custom}; then
+  mv "${hooks_dir}/pre-push" "${hooks_dir}/pre-push.pre-aru"
 fi
 
 cp "${source_dir}/pre-push" "${hooks_dir}/pre-push"
