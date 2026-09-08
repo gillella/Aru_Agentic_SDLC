@@ -309,7 +309,8 @@ def test_generated_environment_bakes_each_directory_once(fake_gh, tmp_path, monk
     entries, gh = scheduler._executable_environment()
     assert gh == fake_gh and entries[0] == str(fake_gh.parent)
     assert len(entries) == len(set(entries)) and entries.count("/usr/bin") == 1
-    assert "".join(scheduler._environment_source(entries, gh)).count(str(fake_gh.parent)) == 1
+    entries_line = scheduler._environment_source(entries, gh)[1]
+    assert entries_line.count(str(fake_gh.parent) + "'") == 1  # baked literal names it once
     # Without discovery the fixed lists are still deduplicated.
     monkeypatch.delenv(kernel.GH_ENV)
     monkeypatch.setenv("PATH", str(tmp_path / "nothing"))
