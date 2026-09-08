@@ -89,7 +89,9 @@ def test_installer_refuses_symlinked_global_guidance(tmp_path, relative):
     assert outside.read_text() == "do not overwrite\n" and target.is_symlink()
 
 
-@pytest.mark.parametrize("ending", ["", "<!-- END ARU_SDLC_GOVERNANCE -->\n" * 2])
+@pytest.mark.parametrize("ending", ["", "<!-- END ARU_SDLC_GOVERNANCE -->\n" * 2,
+    "<!-- END ARU_SDLC_GOVERNANCE --> # Personal suffix\n",
+    "<!-- END ARU_SDLC_GOVERNANCE -->" * 2])
 def test_ambiguous_claude_legacy_is_preserved(tmp_path, ending):
     target = tmp_path / ".claude/CLAUDE.md"
     target.parent.mkdir()

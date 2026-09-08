@@ -67,6 +67,18 @@ install_global_guidance() {
     return
   fi
 
+  # Validate exact boundaries before either replacement path can discard text.
+  if grep -Fq "${managed_begin}" "${target}" || grep -Fq "${managed_end}" "${target}"; then
+    python3 - "${target}" <<'PYTHON'
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+markers = ("<!-- BEGIN ARU_SDLC_GOVERNANCE -->", "<!-- END ARU_SDLC_GOVERNANCE -->")
+if any(text.count(m) != 1 or m not in text.splitlines() for m in markers) or text.index(markers[0]) > text.index(markers[1]):
+    raise SystemExit("error: refusing ambiguous Aru managed boundaries")
+PYTHON
+  fi
+
   # The known Claude directive predates the managed block. Replace that Aru
   # section through its closing marker, preserving personal text on both sides.
   if grep -Fxq "# MASTER OPERATING DIRECTIVE: Aru_Agentic_SDLC" "${target}"; then
