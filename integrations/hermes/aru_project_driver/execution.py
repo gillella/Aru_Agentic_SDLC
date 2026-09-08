@@ -53,8 +53,8 @@ def run_bounded(argv: list[str], cwd: Path, timeout: int = 30) -> subprocess.Com
 
 def availability(config: Config, repo: str, identity: str, state: State) -> dict:
     lane = config.lane(repo, identity)
-    if state.capacity_busy(lane["capacity_key"]):
-        return {"available": False, "reason": "shared subscription has a live worker"}
+    if state.capacity_busy(lane["capacity_key"], lane.get("max_sessions", 1)):
+        return {"available": False, "reason": "every managed session slot on the shared subscription is reserved"}
     cooldown = read_json(state.root / "cooldowns" / f"{key(lane['capacity_key'])}.json", {"until": 0})
     if cooldown.get("until", 0) > time.time():
         return {"available": False, "reason": "provider cooldown", "reset_at": cooldown["until"]}
@@ -155,14 +155,23 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
     repository = Path(config.project(repo)["repo_dir"]).resolve()
     if not directory.is_dir() or not directory.is_relative_to(repository / ".worktrees"):
         raise DriverError("worker requires an isolated worktree inside the configured repository")
-    capacity = state.capacity_path(lane["capacity_key"])
-    capacity.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    descriptor = os.open(capacity, os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        os.close(descriptor)
-        raise DriverError("shared subscription was reserved by another worker") from exc
+    # Take the first free session slot on the subscription; each slot is one
+    # exclusive lock inherited by the supervised child. Slot count is bounded by
+    # the lane's max_sessions and shared by every lane on the same capacity_key.
+    descriptor, slot = None, 0
+    for slot in range(lane.get("max_sessions", 1)):
+        capacity = state.capacity_path(lane["capacity_key"], slot)
+        capacity.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        candidate = os.open(capacity, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(candidate)
+            continue
+        descriptor = candidate
+        break
+    if descriptor is None:
+        raise DriverError("shared subscription was reserved by another worker")
     worker_id = uuid.uuid4().hex
     os.ftruncate(descriptor, 0)
     os.write(descriptor, worker_id.encode())
@@ -171,7 +180,7 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
         "id": worker_id, "repo": repo, "agent": identity, "issue": issue,
         "kind": kind, "pr": pr, "head": head, "worktree": str(directory),
         "review": review,
-        "capacity_key": lane["capacity_key"], "started_at": time.time(),
+        "capacity_key": lane["capacity_key"], "capacity_slot": slot, "started_at": time.time(),
         "state": "launching", "pid": None,
         "prompt": prompt_for(repo, issue, identity, config.kernel_root, str(directory),
                              kind, pr, head, review),
@@ -223,7 +232,7 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
         # Invalid inheritance is a supervised failure with the same durable
         # completion/recovery path; it must never leave a launching receipt.
         inherited = os.fstat(descriptor)
-        expected = state.capacity_path(lane["capacity_key"]).stat()
+        expected = state.capacity_path(lane["capacity_key"], record.get("capacity_slot", 0)).stat()
         if (inherited.st_ino, inherited.st_dev) != (expected.st_ino, expected.st_dev):
             raise DriverError("worker capacity reservation is invalid")
         record.update(pid=os.getpid(), state="running")

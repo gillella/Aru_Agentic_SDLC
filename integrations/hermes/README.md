@@ -97,7 +97,13 @@ wake; existing keys still suppress retries. There is no automatic expiry.
 Clear history only when retiring the profile and its event routes. These are
 delivery identities, never issue lifecycle state.
 
-`max_workers` bounds project concurrency. `max_review_backlog` bounds open PRs
+`max_workers` bounds project concurrency. A lane's `max_sessions` (1-8, default
+1) bounds managed sessions on its shared subscription: every lane on one
+`capacity_key` must declare the same value, each session holds its own
+reservation slot, a provider cooldown on the account pauses every slot, and a
+lane is admitted only while the account still has a free slot. Additional
+sessions never create an independent account or reviewer family.
+`max_review_backlog` bounds open PRs
 and, separately, the repository's queued GitHub Actions workflow runs before new
 admission; every queued run counts, not only governed verification. Unknown CI evidence,
 unresolved dependency, `needs-human`, `needs-design`, or overlapping write

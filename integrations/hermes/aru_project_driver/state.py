@@ -181,11 +181,13 @@ class State:
     def worker_path(self, worker_id: str) -> Path:
         return self.root / "workers" / f"{key(worker_id)}.json"
 
-    def capacity_path(self, capacity_key: str) -> Path:
-        return self.root / "capacity" / f"{key(capacity_key)}.lock"
+    def capacity_path(self, capacity_key: str, slot: int = 0) -> Path:
+        # Slot 0 keeps the historical single-lock path so existing reservations,
+        # receipts and installed state stay valid; extra sessions get own slots.
+        suffix = ".lock" if slot == 0 else f".slot{int(slot)}.lock"
+        return self.root / "capacity" / f"{key(capacity_key)}{suffix}"
 
-    def capacity_busy(self, capacity_key: str) -> bool:
-        path = self.capacity_path(capacity_key)
+    def _slot_locked(self, path: Path) -> bool:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with path.open("a+") as stream:
             try:
@@ -195,9 +197,19 @@ class State:
             fcntl.flock(stream, fcntl.LOCK_UN)
         return False
 
-    def capacity_holder(self, capacity_key: str) -> str | None:
+    def capacity_busy(self, capacity_key: str, max_sessions: int = 1) -> bool:
+        """True only when every managed session slot on the subscription is reserved."""
+        return all(self._slot_locked(self.capacity_path(capacity_key, slot))
+                   for slot in range(max(1, int(max_sessions))))
+
+    def capacity_holders(self, capacity_key: str, max_sessions: int = 1) -> set[str]:
+        holders = {self.capacity_holder(capacity_key, slot) for slot in range(max(1, int(max_sessions)))}
+        holders.discard(None)
+        return holders
+
+    def capacity_holder(self, capacity_key: str, slot: int = 0) -> str | None:
         """Identify the current reservation, never infer liveness from an old PID."""
-        path = self.capacity_path(capacity_key)
+        path = self.capacity_path(capacity_key, slot)
         if not path.exists():
             return None
         with path.open("r+") as stream:

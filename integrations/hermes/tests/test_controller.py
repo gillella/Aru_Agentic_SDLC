@@ -195,7 +195,8 @@ class Harness:
         )
 
     def availability(self, config, repo, identity, state):
-        busy = state.capacity_busy(config.lane(repo, identity)["capacity_key"])
+        lane = config.lane(repo, identity)
+        busy = state.capacity_busy(lane["capacity_key"], lane.get("max_sessions", 1))
         return {"available": self.available[identity] and not busy, "reason": "isolated test observation"}
 
     def probe(self, config, repo, identity, state):
@@ -208,15 +209,26 @@ class Harness:
         return {"registered": len(actions)}
 
     def launch(self, config, repo, identity, number, worktree, **kwargs):
-        capacity_key = config.lane(repo, identity)["capacity_key"]
-        capacity = self.state.capacity_path(capacity_key)
-        capacity.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(capacity, os.O_RDWR | os.O_CREAT, 0o600)
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lane = config.lane(repo, identity)
+        capacity_key = lane["capacity_key"]
+        descriptor, slot = None, 0
+        for slot in range(lane.get("max_sessions", 1)):  # first free session slot, like execution.launch
+            capacity = self.state.capacity_path(capacity_key, slot)
+            capacity.parent.mkdir(parents=True, exist_ok=True)
+            candidate = os.open(capacity, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(candidate)
+                continue
+            descriptor = candidate
+            break
+        if descriptor is None:
+            raise DriverError("shared subscription was reserved by another worker")
         self.descriptors.append(descriptor)
         receipt = {
             "id": f"launched-{identity}-{number}", "repo": repo, "agent": identity,
-            "issue": number, "worktree": worktree, "capacity_key": capacity_key,
+            "issue": number, "worktree": worktree, "capacity_key": capacity_key, "capacity_slot": slot,
             "state": "running", "started_at": self.clock, "pid": os.getpid(), **kwargs,
         }
         os.ftruncate(descriptor, 0)
@@ -741,3 +753,20 @@ def test_lost_worker_recovery_runs_once_and_launches_new_bound_reviewer(harness)
     assert result["launched"][0]["agent"] == "codex-review"
     assert len([c for c in harness.kernel.calls if c[0] == "refresh_reviewer"]) == 1
     assert harness.controller.reconcile(REPO)["launched"] == []
+
+
+def test_shared_subscription_with_two_sessions_admits_two_lanes_and_counts_both(harness):
+    shared = harness.config.lanes["codex-one"]["capacity_key"]
+    harness.config.lanes["claude-one"]["capacity_key"] = shared
+    harness.config.lanes["third"] = dict(harness.config.lanes["codex-one"])
+    harness.config.project(REPO)["lanes"].append("third")
+    harness.available["third"] = True
+    for lane in harness.config.lanes.values():
+        lane["max_sessions"] = 2
+    # Two session slots admit two lanes on the shared account; the third is over the bound.
+    ready, blocked = harness.controller._lane_observations(REPO, harness.kernel.snapshot())
+    assert len(ready) == 2 and blocked["third"]["reason"] == "shared account already represented"
+    result = harness.controller.reconcile(REPO)
+    assert len(result["launched"]) == 2 and {item["capacity_key"] for item in harness.launched} == {shared}
+    assert {item["capacity_slot"] for item in harness.launched} == {0, 1}
+    assert harness.controller._worker_count(REPO) == 2  # two live reservations on one account

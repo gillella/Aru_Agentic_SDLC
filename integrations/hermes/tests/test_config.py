@@ -113,3 +113,32 @@ def test_an_unconfigured_repository_has_no_profile(tmp_path):
     config = Config(write_config(tmp_path))
     with pytest.raises(DriverError, match="not configured for this Driver"):
         config.runner_profile("gillella/other")
+
+
+@pytest.mark.parametrize("value,ok", [(1, True), (8, True), (0, False), (9, False), ("2", False), (True, False), (2.0, False)])
+def test_max_sessions_is_a_bounded_integer(tmp_path, value, ok):
+    config_path = write_config(tmp_path, repo="gillella/repo")
+    raw = json.loads(config_path.read_text())
+    for lane in raw["lanes"].values():
+        lane["max_sessions"] = value
+    config_path.write_text(json.dumps(raw))
+    if ok:
+        assert all(lane["max_sessions"] == value for lane in Config(config_path).lanes.values())
+    else:
+        with pytest.raises(DriverError, match="max_sessions must be between 1 and 8"):
+            Config(config_path)
+
+
+def test_lanes_sharing_a_subscription_must_agree_on_max_sessions(tmp_path):
+    config_path = write_config(tmp_path, repo="gillella/repo")
+    raw = json.loads(config_path.read_text())
+    first, second = list(raw["lanes"])[:1] * 2 if len(raw["lanes"]) == 1 else list(raw["lanes"])[:2]
+    if first == second:  # duplicate the single lane onto the same subscription
+        raw["lanes"]["alias"] = dict(raw["lanes"][first])
+        second = "alias"
+        raw["projects"]["gillella/repo"]["lanes"].append("alias")
+    raw["lanes"][second]["capacity_key"] = raw["lanes"][first]["capacity_key"]
+    raw["lanes"][first]["max_sessions"], raw["lanes"][second]["max_sessions"] = 2, 1
+    config_path.write_text(json.dumps(raw))
+    with pytest.raises(DriverError, match="declare different max_sessions"):
+        Config(config_path)
