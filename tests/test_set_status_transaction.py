@@ -136,12 +136,13 @@ def test_set_status_adversarial_board_drift_blocks_before_issue_edit(monkeypatch
     assert commands == []
 
 
-def test_set_status_adversarial_issue_drift_before_mutation_blocks_on_final_reread(monkeypatch):
-    """When issue status drifts to Ready during board_edit, final issue reread blocks with zero mutations."""
+@pytest.mark.parametrize("drifted", ["Ready", "Done"])
+def test_set_status_adversarial_issue_drift_before_mutation_blocks_on_final_reread(monkeypatch, drifted):
+    """Any unexpected label drift, including the target itself, blocks before mutation."""
     commands = []
     issue_reads = [
         {"number": 7, "state": "OPEN", "labels": [{"name": "status:backlog"}]},
-        {"number": 7, "state": "OPEN", "labels": [{"name": "status:ready"}]},
+        {"number": 7, "state": "OPEN", "labels": [{"name": f"status:{drifted.lower()}"}]},
     ]
     monkeypatch.setattr(common, "issue", lambda number, cwd=None: issue_reads.pop(0))
     monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: "Backlog")
@@ -149,7 +150,7 @@ def test_set_status_adversarial_issue_drift_before_mutation_blocks_on_final_rere
     monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: commands.append(["ensure_label", *a]))
     monkeypatch.setattr(common, "run", lambda argv, **kw: commands.append(argv) or subprocess.CompletedProcess(argv, 0, stdout="", stderr=""))
 
-    with pytest.raises(common.StatusPreconditionError, match=r"issue #7 status \('Ready'\) does not equal expected 'Backlog'"):
+    with pytest.raises(common.StatusPreconditionError, match=rf"issue #7 status \({drifted!r}\) does not equal expected 'Backlog'"):
         common.set_status(7, "Done", expected_current="Backlog")
     assert commands == []
 
@@ -171,50 +172,37 @@ def test_set_status_ensure_label_failure_precondition_distinction(monkeypatch):
 
 
 def test_set_status_pre_mutation_check_runs_after_preflight_before_first_mutation(monkeypatch):
-    """The optional pre_mutation_check fires once the transition is authorised but
-    before any issue/card mutation; raising from it leaves zero commands."""
-    commands = []
-    settled = False
-    monkeypatch.setattr(
-        common,
-        "issue",
-        lambda number, cwd=None: {
-            "number": 7,
-            "state": "OPEN",
-            "labels": [{"name": "status:done" if settled else "status:backlog"}],
-        },
-    )
-    monkeypatch.setattr(
-        common,
-        "project_item_status",
-        lambda number, cwd=None: "Done" if settled else "Backlog",
-    )
-    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: None)
+    """An abort precedes every mutation; a retry keeps guard/label/issue/card order."""
+    order = []
+    settled, reject = False, True
+    monkeypatch.setattr(common, "issue", lambda number, cwd=None: {
+        "number": 7, "state": "OPEN",
+        "labels": [{"name": "status:done" if settled else "status:backlog"}],
+    })
+    monkeypatch.setattr(common, "project_item_status", lambda number, cwd=None: "Done" if settled else "Backlog")
+    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: order.append("ensure_label"))
     monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
+
     def command(argv, **kw):
         nonlocal settled
-        commands.append(argv)
+        order.append(argv[1])
         if argv[:3] == ["gh", "project", "item-edit"]:
             settled = True
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
+    def guard():
+        order.append("pre_mutation_check")
+        if reject:
+            raise common.StatusPreconditionError("child evidence drifted before apply")
+
     monkeypatch.setattr(common, "run", command)
-
-    def _raise() -> None:
-        raise common.StatusPreconditionError("child evidence drifted before apply")
-
     with pytest.raises(common.StatusPreconditionError, match="child evidence drifted before apply"):
-        common.set_status(7, "Done", expected_current="Backlog", pre_mutation_check=_raise)
-    assert commands == []
-
-    observed = []
-    common.set_status(
-        7, "Done", expected_current="Backlog",
-        pre_mutation_check=lambda: observed.append(list(commands)),
-    )
-    assert observed == [[]]
-    assert any(cmd[:3] == ["gh", "issue", "edit"] for cmd in commands)
-    assert any(cmd[:3] == ["gh", "project", "item-edit"] for cmd in commands)
+        common.set_status(7, "Done", expected_current="Backlog", pre_mutation_check=guard)
+    assert order == ["pre_mutation_check"]
+    order.clear()
+    reject = False
+    common.set_status(7, "Done", expected_current="Backlog", pre_mutation_check=guard)
+    assert order == ["pre_mutation_check", "ensure_label", "issue", "project"]
 
 
 def test_set_status_drift_callback_raises_before_any_ensure_label_or_mutation(monkeypatch):
@@ -245,44 +233,6 @@ def test_set_status_drift_callback_raises_before_any_ensure_label_or_mutation(mo
     assert not any(cmd[:3] == ["gh", "project", "item-edit"] for cmd in commands)
 
 
-def test_set_status_ensure_label_runs_after_pre_mutation_check_and_before_issue_edit(monkeypatch):
-    """When the drift guard passes, ensure_label executes only after it and
-    immediately before the issue edit."""
-    order: list[str] = []
-    settled = False
-    monkeypatch.setattr(
-        common,
-        "issue",
-        lambda number, cwd=None: {
-            "number": 7,
-            "state": "OPEN",
-            "labels": [{"name": "status:done" if settled else "status:backlog"}],
-        },
-    )
-    monkeypatch.setattr(
-        common,
-        "project_item_status",
-        lambda number, cwd=None: "Done" if settled else "Backlog",
-    )
-    monkeypatch.setattr(common, "board_edit", lambda number, status, *a, **kw: ["project", "item-edit", "--id", "1"])
-    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: order.append("ensure_label"))
-    def command(argv, **kw):
-        nonlocal settled
-        order.append(argv[1] if argv[:1] == ["gh"] else "run")
-        if argv[:3] == ["gh", "project", "item-edit"]:
-            settled = True
-        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-
-    monkeypatch.setattr(common, "run", command)
-
-    common.set_status(
-        7, "Done", expected_current="Backlog",
-        pre_mutation_check=lambda: order.append("pre_mutation_check"),
-    )
-
-    assert order[:3] == ["pre_mutation_check", "ensure_label", "issue"]
-
-
 def test_set_status_rejects_silent_non_settlement(monkeypatch):
     issue_rec = {
         "number": 7,
@@ -311,3 +261,38 @@ def test_set_status_rejects_silent_non_settlement(monkeypatch):
 
     with pytest.raises(common.KernelError, match="did not settle"):
         common.set_status(7, "Done", expected_current="Backlog")
+
+
+@pytest.mark.parametrize(("first", "expected"), [("Done", None), ("Done", "Done"), ("Backlog", None)])
+@pytest.mark.parametrize("card", ["Done", None, "Ready", "Backlog", common.KernelError("Project unreadable")])
+def test_same_status_checks_card_at_initial_and_final_reread(monkeypatch, first, expected, card):
+    issue_states = iter([first, "Done"])
+    current = None
+    reads = []
+
+    def issue_record(number, cwd=None):
+        nonlocal current
+        current = next(issue_states)
+        return {"number": number, "state": "OPEN", "labels": [{"name": f"status:{current.lower()}"}]}
+
+    def snapshot(number, *, cwd=None):
+        value = "Backlog" if current == "Backlog" else card
+        reads.append((current, value))
+        if isinstance(value, Exception):
+            raise value
+        item = {"id": "PVTI_7", "fieldValueByName": None if value is None else {"name": value}}
+        return "PVT_1", item, board_payload()["data"]["projectNode"]["field"]
+
+    monkeypatch.setattr(common, "issue", issue_record)
+    monkeypatch.setattr(common, "_project_card_snapshot", snapshot)
+    monkeypatch.setattr(common, "ensure_label", lambda *a, **kw: pytest.fail("unexpected label mutation"))
+    monkeypatch.setattr(common, "run", lambda *a, **kw: pytest.fail("unexpected mutation"))
+    def guard():
+        pytest.fail("a verified no-op has no mutation guard")
+    if card == "Done":
+        common.set_status(7, "Done", expected_current=expected, pre_mutation_check=guard)
+    else:
+        with pytest.raises(common.KernelError, match="Project card|Project unreadable"):
+            common.set_status(7, "Done", expected_current=expected, pre_mutation_check=guard)
+    assert reads[-1] == ("Done", card)
+    assert any(label == "Backlog" for label, _value in reads) == (first == "Backlog")
