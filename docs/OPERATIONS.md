@@ -352,15 +352,35 @@ repository.
 python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
   --name example-app \
   --directory /path/to/example-app \
+  --owner gillella \
   --github \
   --private
 ```
 
-With `--github`, the helper creates the GitHub repository, labels, a linked
-Project, the five status choices, and a minimal default-branch ruleset with no
-configured bypass actors that requires `aru-governed-pr` from GitHub Actions.
-The generated workflow targets only repository-level Apple-silicon macOS
-runners labeled `aru-ci`; register at least one before admitting work. Omit
+`--owner` is required unless you pass `--runner-profile`, because the scaffold
+must bind to exactly one runner profile:
+
+| Profile | `runs-on` | Assigned account |
+| --- | --- | --- |
+| `self-hosted-mac` | `[self-hosted, macOS, ARM64, aru-ci]` | `gillella` personal repositories |
+| `github-hosted` | `ubuntu-latest` | `Unum-Inc` repositories |
+
+Account matching is case-insensitive and has no default. An account outside the
+table is refused; use `--runner-profile` to state its profile explicitly.
+Passing both is allowed and asserts agreement — `--owner gillella
+--runner-profile github-hosted` is refused rather than silently moving a
+personal repository off the Macs.
+
+With `--github`, the helper creates the GitHub repository as `OWNER/NAME`
+(`--owner` is mandatory here), labels, a linked Project, the five status
+choices, and a minimal default-branch ruleset with no configured bypass actors
+that requires `aru-governed-pr` from GitHub Actions. It then rereads the created
+repository's actual owner and refuses the remaining provisioning if it differs
+from the requested account or is not assigned the profile already scaffolded
+into the workflow. On `self-hosted-mac` the generated workflow targets only
+repository-level Apple-silicon macOS runners labeled `aru-ci`; register at
+least one before admitting work. On `github-hosted` no runner registration is
+needed, but Actions must be enabled and the governed workflow active. Omit
 `--private` only when the repository should be public.
 
 ### Inspect before declaring adoption complete
@@ -395,17 +415,19 @@ feature, not a migration engine.
 3. Compare each generated file with the project's current governance and
    verification policy.
 4. Merge only the rules and hooks the project can actually support.
-5. Customize `.aru/verify.sh`, enable `aru-governed-pr` in branch rules, and
-   register an `aru-ci` self-hosted runner before validating adoption on a pull
-   request.
+5. Customize `.aru/verify.sh`, enable `aru-governed-pr` in branch rules, and —
+   on `self-hosted-mac` — register an `aru-ci` self-hosted runner before
+   validating adoption on a pull request.
 
-Generate the comparison scaffold:
+Generate the comparison scaffold with the account the repository actually lives
+under, so the staged workflow carries that account's runner profile:
 
 ```bash
 staging_dir="$(mktemp -d)"
 python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
   --name existing-app \
-  --directory "$staging_dir"
+  --directory "$staging_dir" \
+  --owner Unum-Inc
 ```
 
 Reconcile these surfaces deliberately:
@@ -415,7 +437,7 @@ Reconcile these surfaces deliberately:
 | `AGENTS.md` | Preserve stricter local safety and product rules |
 | Issue template | Keep required acceptance criteria and `touches:` input |
 | PR template | Keep `Closes #N`, the server-authority explanation, and surface-change evidence |
-| `.github/workflows/governed-pr.yml` | Keep `[self-hosted, macOS, ARM64, aru-ci]`, exact-head checkout, `.aru/verify.sh`, and actual-diff `touches:` enforcement |
+| `.github/workflows/governed-pr.yml` | Keep the account's `# aru-runner-profile:` marker and matching `runs-on:`, exact-head checkout, `.aru/verify.sh`, and actual-diff `touches:` enforcement |
 | `.aru/verify.sh` | Replace the fail-closed placeholder with risk-appropriate consumer commands |
 | `.aru/lib/touches.py` | Retain the shared parser used by the server and local hook |
 | `.gitignore` | Merge entries; do not overwrite project-specific ignores |
@@ -462,25 +484,33 @@ the update.
 ### Governed verification and risk tiers
 
 Bootstrap installs a consumer-owned `aru-governed-pr` workflow. On every PR
-head GitHub Actions dispatches to `[self-hosted, macOS, ARM64, aru-ci]`, runs
-the repository's `.aru/verify.sh` on the operator-owned Mac, and checks the
-linked issue's `touches:` boundary against the actual diff. That exact-head
-server result is merge authority. Running the same commands outside Actions is
-useful preflight or audit evidence, but it is optional. The workflow also
-handles `merge_group` so a GitHub merge queue reruns `.aru/verify.sh` on the
-combined queue revision.
+head GitHub Actions dispatches to the repository's assigned runner profile,
+runs the repository's `.aru/verify.sh` there, and checks the linked issue's
+`touches:` boundary against the actual diff. That exact-head server result is
+merge authority. Running the same commands outside Actions is useful preflight
+or audit evidence, but it is optional. The workflow also handles `merge_group`
+so a GitHub merge queue reruns `.aru/verify.sh` on the combined queue revision.
 
-Required Kernel jobs never use GitHub-hosted runner labels and never fall back
-when the self-hosted pool is offline. They do not upload artifacts or use
-Actions caches by default. This avoids billed runner minutes and optional
-storage consumption while retaining GitHub's orchestration, audit trail, and
-check identity. The operator owns runner patching, availability, electricity,
-disk capacity, and physical security. Use repository-level runners only for
-trusted governed repositories; keep workflow permissions read-only and never
-use `pull_request_target` for these persistent machines. The first workflow
-step runs before checkout: it rejects cross-repository fork PRs and fails if
-Python 3.11+, pip, or `gh` is unavailable. Do not register an `aru-ci` label on
-a machine that fails this prerequisite.
+Required Kernel jobs never fall back across profiles. A `self-hosted-mac`
+repository whose pool is offline leaves the check queued and merge blocked; it
+never borrows hosted runners. A `github-hosted` repository is rejected by its
+own `.aru/verify.sh` if its workflow names `self-hosted` at all, so hosted
+verification never reaches a personal machine. Under both profiles the jobs do
+not upload artifacts or use Actions caches by default, keep permissions
+read-only, and never use `pull_request_target`. `self-hosted-mac` additionally
+avoids billed runner minutes, and the operator owns runner patching,
+availability, electricity, disk capacity, and physical security; use
+repository-level runners only for trusted governed repositories.
+`github-hosted` trades those billed minutes for GitHub-managed, ephemeral
+compute and no operator-owned hardware. The first workflow step runs before
+checkout under either profile: it rejects cross-repository fork PRs and fails
+if Python 3.11+, pip, or `gh` is unavailable. Do not register an `aru-ci` label
+on a machine that fails this prerequisite.
+
+The profile decides where verification runs. It grants nothing else: neither
+profile carries deployment secrets, `environment:` targets, or production
+access, and merge never implies a release. Deployment stays consumer-owned and
+outside the governed check under both profiles.
 
 Keep `.aru/verify.sh` proportional to consumer risk:
 
@@ -495,6 +525,28 @@ The Kernel derives the highest tier from the actual changed paths and fails
 unrecognized or invalid evidence upward. These are not new lifecycle statuses.
 Consumers may add stricter parallel checks and approvals, but do not rewrite
 the Kernel-derived tier or add serial Kernel review rounds.
+
+### Reconfigure an existing consumer's runner profile
+
+Do this only when the repository actually moves accounts, or was scaffolded
+before runner profiles existed:
+
+1. Restage with `init_project.py --owner <the repository's real account>` into
+   a temporary directory.
+2. Copy the regenerated `.github/workflows/governed-pr.yml`, `AGENTS.md`, and
+   `.aru/verify.sh` onto a normal governed branch, keeping any consumer-added
+   verification commands in `.aru/verify.sh`.
+3. On a move to `self-hosted-mac`, register an `aru-ci` runner before the first
+   PR; on a move to `github-hosted`, confirm Actions is enabled and the
+   governed workflow is active.
+4. If the Driver tracks the repository, update or remove any `runner_profile`
+   key in its project config so the declaration does not contradict the new
+   account.
+
+Move all three files together. `.aru/verify.sh` refuses a workflow whose
+`# aru-runner-profile:` marker and `runs-on:` disagree, so a half-applied
+change fails closed rather than quietly changing where the check runs. Do not
+switch profiles to work around an outage or a red check.
 
 ### Reviewer providers
 
@@ -1090,9 +1142,12 @@ true.
 
 - [ ] `.aru/verify.sh` contains risk-appropriate consumer commands.
 - [ ] `aru-governed-pr` runs on every PR head and is required by branch rules.
-- [ ] At least one repository-level macOS arm64 runner labeled `aru-ci` is
-      online; no required job uses a GitHub-hosted label, artifact upload, or
-      Actions cache.
+- [ ] The workflow's `# aru-runner-profile:` marker matches its `runs-on:` and
+      the repository's account. On `self-hosted-mac`, at least one
+      repository-level macOS arm64 runner labeled `aru-ci` is online and no
+      required job uses a hosted label; on `github-hosted`, Actions is enabled,
+      the governed workflow is active, and no required job names `self-hosted`.
+- [ ] No required job uploads artifacts or uses an Actions cache.
 - [ ] Before Tier 2-3 work is admitted, at least one external reviewer is
       registered or one distinct coding-agent capacity probe succeeds.
 - [ ] The external Driver implements the canonical single-event reviewer

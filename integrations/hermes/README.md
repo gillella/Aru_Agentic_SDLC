@@ -50,13 +50,34 @@ Clear history only when retiring the profile and its event routes. These are
 delivery identities, never issue lifecycle state.
 
 `max_workers` bounds project concurrency. `max_review_backlog` bounds open PRs
-and queued verification work before new admission. An offline eligible
-self-hosted runner, unknown runner/queue evidence, unresolved dependency,
-`needs-human`, `needs-design`, or overlapping write boundary blocks new work.
-Existing work and PR convergence receive attention before new claims.
-An online but busy CI runner can accept later verification through the bounded
-queue. It does not need to be idle before coding starts; the queue and review
-backlog limits prevent unlimited work from accumulating behind it.
+and, separately, the repository's queued GitHub Actions workflow runs before new
+admission; every queued run counts, not only governed verification. Unknown CI evidence,
+unresolved dependency, `needs-human`, `needs-design`, or overlapping write
+boundary blocks new work. Existing work and PR convergence receive attention
+before new claims.
+
+How verification capacity is proven depends on the project's runner profile,
+derived from its account: `gillella` is `self-hosted-mac` and `Unum-Inc` is
+`github-hosted`. A project may also declare `runner_profile` explicitly, but
+only to confirm its account's assignment: an unknown name, a name contradicting
+the assignment, or any declaration for an account outside the table is refused
+when the configuration loads. An unassigned account has no profile, and
+admission stays blocked rather than borrowing another account's runners.
+
+- `self-hosted-mac` reads the repository's self-hosted runner inventory and
+  requires at least one online runner carrying all of `self-hosted`, `macOS`,
+  `ARM64` and `aru-ci`. An offline eligible runner blocks new work, and is
+  never substituted with hosted capacity.
+- `github-hosted` does not read runner inventory at all. GitHub publishes no
+  hosted machine count, so capacity is never fabricated: `online_runners` and
+  `free_runners` stay null, and admission requires exactly one active governed
+  `.github/workflows/governed-pr.yml` workflow plus a readable queue depth.
+
+Under both profiles, unreadable or malformed evidence leaves availability
+unknown, which blocks admission. An online but busy CI runner can accept later
+verification through the bounded queue. It does not need to be idle before
+coding starts; the queue and review backlog limits prevent unlimited work from
+accumulating behind it.
 
 Each lane has an `execution_timeout_seconds` limit (default 3,600; allowed
 1–86,400). On expiry, the supervisor terminates the agent's isolated process

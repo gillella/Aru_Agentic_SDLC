@@ -10,8 +10,10 @@
 | worktree isolation | first implementation edit | `create_branch.py` |
 | closure link | PR creation | `create_pr.py` |
 | policy-ordered current-head review authority plus configured-timeout refresh | Tier 2-3 review authority | `create_pr.py` |
-| exact-head consumer verification | merge | self-hosted `aru-governed-pr`, `.aru/verify.sh`, `check_ci.py`, `merge_pr.py` |
-| zero GitHub-hosted runner minutes | required verification dispatch | workflow/template `[self-hosted, macOS, ARM64, aru-ci]` labels and no fallback |
+| exact-head consumer verification | merge | `aru-governed-pr`, `.aru/verify.sh`, `check_ci.py`, `merge_pr.py` |
+| one account-assigned runner profile | required verification dispatch | `init_project.py` account policy, workflow `# aru-runner-profile:` marker, `.aru/verify.sh` marker/`runs-on:` agreement |
+| no cross-profile runner fallback | required verification dispatch | `.aru/verify.sh` per-profile forbidden patterns: `self-hosted-mac` rejects hosted images, `github-hosted` rejects `self-hosted` |
+| unproven verification capacity | Driver work admission | `aru_project_driver/kernel.py` `_ci()`: self-hosted runner inventory, hosted active-workflow plus queue evidence, unassigned account blocked |
 | changed-path risk tier | whether authoritative review is required | `common.py`, `merge_pr.py` |
 | unresolved findings | merge | `fetch_pr_feedback.py`, `merge_pr.py` |
 | current-head external or coding-agent verdict | Tier 2-3 merge | `merge_pr.py` |

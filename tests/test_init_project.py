@@ -12,6 +12,18 @@ import yaml
 
 import init_project
 
+ROOT = init_project.Path(__file__).resolve().parents[1]
+WORKFLOW_SOURCES = ["live", "self-hosted-mac", "github-hosted"]
+
+
+def profiled_workflows() -> dict[str, str]:
+    """Aru's own live workflow plus the template rendered for every profile."""
+    template = (ROOT / "templates/governed-pr.yml").read_text(encoding="utf-8")
+    return {
+        "live": (ROOT / ".github/workflows/governed-pr.yml").read_text(encoding="utf-8"),
+        **{name: init_project.render_profile(template, name) for name in init_project.RUNNER_PROFILES},
+    }
+
 
 def test_bootstrap_provisions_priority_labels():
     assert {
@@ -59,37 +71,27 @@ def test_ruleset_requires_the_server_exact_head_check_and_no_bypass():
 def test_kernel_workflow_is_read_only_exact_head_and_immutable():
     path = init_project.Path(__file__).resolve().parents[1] / ".github/workflows/governed-pr.yml"
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert workflow["permissions"] == {
-        "contents": "read",
-        "issues": "read",
-        "pull-requests": "read",
-    }
+    assert workflow["permissions"] == {"contents": "read", "issues": "read", "pull-requests": "read"}
     job = workflow["jobs"]["governed-pr"]
     assert job["name"] == "aru-governed-pr"
     assert job["runs-on"] == ["self-hosted", "macOS", "ARM64", "aru-ci"]
     preflight = job["steps"][0]
     assert preflight["name"] == "Validate self-hosted runner trust boundary"
     assert "ARU_HEAD_REPOSITORY" in preflight["env"]
-    assert "command -v python3" in preflight["run"]
-    assert "command -v gh" in preflight["run"]
+    assert "command -v python3" in preflight["run"] and "command -v gh" in preflight["run"]
     checkout = job["steps"][1]
-    assert checkout["with"]["ref"] == ("${{ github.event.pull_request.head.sha || github.sha }}")
-    assert checkout["uses"].startswith("actions/checkout@")
-    assert len(checkout["uses"].split("@", 1)[1]) == 40
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+    assert checkout["uses"].startswith("actions/checkout@") and len(checkout["uses"].split("@", 1)[1]) == 40
     assert checkout["with"]["persist-credentials"] is False
     raw = path.read_text(encoding="utf-8")
-    assert "merge_group:" in raw
-    assert "github.event_name == 'pull_request'" in raw
-    assert "pull_request_target" not in raw
-    assert "ubuntu-latest" not in raw
-    assert "actions/upload-artifact" not in raw
-    assert "actions/setup-python" not in raw
-    assert "cache:" not in raw
+    assert "merge_group:" in raw and "github.event_name == 'pull_request'" in raw
+    for absent in ("pull_request_target", "ubuntu-latest", "actions/upload-artifact", "actions/setup-python", "cache:"):
+        assert absent not in raw
 
 
 def test_scaffold_creates_only_minimal_governance(tmp_path):
     target = tmp_path / "consumer"
-    written = init_project.scaffold("consumer", target)
+    written = init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
     assert set(written) == {
         "AGENTS.md",
         ".github/ISSUE_TEMPLATE/governed-task.yml",
@@ -115,7 +117,7 @@ def test_scaffold_creates_only_minimal_governance(tmp_path):
 
 def test_scaffolded_hook_loads_its_vendored_canonical_parser(tmp_path, monkeypatch):
     target = tmp_path / "consumer"
-    init_project.scaffold("consumer", target)
+    init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
     monkeypatch.delenv("ARU_SDLC_HOME", raising=False)
     hook = target / ".aru/hooks/enforce_touches.py"
     spec = importlib.util.spec_from_file_location("consumer_touches_hook", hook)
@@ -127,7 +129,7 @@ def test_scaffolded_hook_loads_its_vendored_canonical_parser(tmp_path, monkeypat
 
 def test_scaffolded_pr_template_names_the_server_verification_authority(tmp_path):
     target = tmp_path / "consumer"
-    init_project.scaffold("consumer", target)
+    init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
     template = (target / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
     assert "required `aru-governed-pr` server check" in template
     assert "Optional local preflight" in template
@@ -138,7 +140,7 @@ def test_scaffold_refuses_to_overwrite_user_content(tmp_path):
     target.mkdir()
     (target / "AGENTS.md").write_text("mine", encoding="utf-8")
     with pytest.raises(init_project.BootstrapError, match="refusing"):
-        init_project.scaffold("consumer", target)
+        init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
 
 
 @pytest.mark.parametrize("linked_directory", [".aru", ".github"])
@@ -150,7 +152,7 @@ def test_scaffold_refuses_nested_symlink_directory_escape(tmp_path, linked_direc
     (target / linked_directory).symlink_to(outside, target_is_directory=True)
 
     with pytest.raises(init_project.BootstrapError, match="symbolic-link"):
-        init_project.scaffold("consumer", target)
+        init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
 
     assert list(outside.iterdir()) == []
 
@@ -163,7 +165,7 @@ def test_scaffold_refuses_symlink_file_target_escape(tmp_path):
     (target / ".aru" / "verify.sh").symlink_to(outside)
 
     with pytest.raises(init_project.BootstrapError, match="symbolic-link"):
-        init_project.scaffold("consumer", target)
+        init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
 
     assert outside.read_text(encoding="utf-8") == "operator-owned\n"
 
@@ -179,7 +181,7 @@ def test_scaffold_refuses_external_core_hooks_path(tmp_path):
     )
 
     with pytest.raises(init_project.BootstrapError, match="non-canonical"):
-        init_project.scaffold("consumer", target)
+        init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
 
     assert not outside.exists()
 
@@ -191,47 +193,40 @@ def test_project_name_is_contained(name):
 
 
 def test_github_setup_marks_project_graphql_authority(monkeypatch, tmp_path):
-    calls = []
-    rulesets = []
+    calls, rulesets = [], []
+    responses = {
+        ("gh", "repo", "view"): {"nameWithOwner": "gillella/consumer"},
+        ("gh", "project", "create"): {"number": 5, "url": "https://example.test/project/5"},
+        ("gh", "project", "field-list"): {"fields": [{"name": "Status", "id": "PVTSSF_1"}]},
+    }
 
     def fake_command(argv, *, cwd, json_output=False, auth=None):
         calls.append((argv, auth))
-        if argv[:3] == ["gh", "repo", "view"]:
-            return {"nameWithOwner": "owner/consumer"}
-        if argv[:3] == ["gh", "project", "create"]:
-            return {"number": 5, "url": "https://example.test/project/5"}
-        if argv[:3] == ["gh", "project", "field-list"]:
-            return {"fields": [{"name": "Status", "id": "PVTSSF_1"}]}
-        if argv[:3] == ["gh", "api", "repos/owner/consumer/rulesets"]:
+        if argv[:3] == ["gh", "api", "repos/gillella/consumer/rulesets"]:
             input_path = argv[argv.index("--input") + 1]
             rulesets.append(init_project.json.loads(init_project.Path(input_path).read_text()))
             return {"_links": {"html": {"href": "https://example.test/rules/1"}}}
-        return ""
+        return responses.get(tuple(argv[:3]), "")
+
+    def calls_with(*prefix):
+        return [call for call in calls if call[0][: len(prefix)] == list(prefix)]
 
     monkeypatch.setattr(init_project, "command", fake_command)
-
-    result = init_project.github_setup("consumer", tmp_path, private=True)
-
-    graphql_calls = [call for call in calls if call[0][:3] == ["gh", "api", "graphql"]]
-    assert result["repository"] == "owner/consumer"
-    assert len(graphql_calls) == 1
-    assert graphql_calls[0][1] == init_project.PROJECT_AUTH
+    result = init_project.github_setup(
+        "consumer", tmp_path, private=True, owner="gillella", runner_profile="self-hosted-mac"
+    )
+    assert result["repository"] == "gillella/consumer"
+    assert [call[0][3] for call in calls_with("gh", "repo", "create")] == ["gillella/consumer"]
+    assert [auth for _, auth in calls_with("gh", "api", "graphql")] == [init_project.PROJECT_AUTH]
     assert rulesets == [init_project.ruleset_payload()]
-    ruleset_calls = [
-        call for call in calls if call[0][:3] == ["gh", "api", "repos/owner/consumer/rulesets"]
-    ]
-    assert len(ruleset_calls) == 1
-    assert ruleset_calls[0][1] == init_project.REPOSITORY_AUTH
+    ruleset_calls = calls_with("gh", "api", "repos/gillella/consumer/rulesets")
+    assert [auth for _, auth in ruleset_calls] == [init_project.REPOSITORY_AUTH]
     assert result["ruleset"] == "https://example.test/rules/1"
 
 
-@pytest.mark.parametrize(
-    "workflow_rel_path",
-    ["templates/governed-pr.yml", ".github/workflows/governed-pr.yml"],
-)
-def test_governed_pr_workflow_provenance_and_python3(workflow_rel_path):
-    path = init_project.Path(__file__).resolve().parents[1] / workflow_rel_path
-    raw = path.read_text(encoding="utf-8")
+@pytest.mark.parametrize("source", WORKFLOW_SOURCES)
+def test_governed_pr_workflow_provenance_and_python3(source):
+    raw = profiled_workflows()[source]
     assert "ARU_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}" in raw
     assert "|| github.repository" not in raw
     assert (
@@ -242,10 +237,7 @@ def test_governed_pr_workflow_provenance_and_python3(workflow_rel_path):
     assert 'enforce_touches.py --pr "$ARU_PR_NUMBER"' in raw
 
 
-@pytest.mark.parametrize(
-    "workflow_rel_path",
-    ["templates/governed-pr.yml", ".github/workflows/governed-pr.yml"],
-)
+@pytest.mark.parametrize("source", WORKFLOW_SOURCES)
 @pytest.mark.parametrize(
     ("event_name", "head_repo", "repo", "expected_code"),
     [
@@ -259,50 +251,38 @@ def test_governed_pr_workflow_provenance_and_python3(workflow_rel_path):
         ("workflow_dispatch", "owner/repo", "owner/repo", 1),
     ],
 )
-def test_trust_boundary_script_execution(
-    workflow_rel_path, event_name, head_repo, repo, expected_code
-):
-    path = init_project.Path(__file__).resolve().parents[1] / workflow_rel_path
-    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+def test_trust_boundary_script_execution(source, event_name, head_repo, repo, expected_code):
+    workflow = yaml.safe_load(profiled_workflows()[source])
     step = workflow["jobs"]["governed-pr"]["steps"][0]
-    assert step["name"] == "Validate self-hosted runner trust boundary"
+    assert step["name"].startswith("Validate ") and step["name"].endswith("trust boundary")
     assert step["env"]["ARU_HEAD_REPOSITORY"] == "${{ github.event.pull_request.head.repo.full_name }}"
     assert step["env"]["ARU_REPOSITORY"] == "${{ github.repository }}"
     assert step["env"]["ARU_EVENT_NAME"] == "${{ github.event_name }}"
-    env = {
-        **os.environ,
-        "ARU_EVENT_NAME": event_name,
-        "ARU_HEAD_REPOSITORY": head_repo,
-        "ARU_REPOSITORY": repo,
-    }
+    env = {**os.environ, "ARU_EVENT_NAME": event_name,
+           "ARU_HEAD_REPOSITORY": head_repo, "ARU_REPOSITORY": repo}
     result = subprocess.run(
-        ["bash", "-c", step["run"]],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+        ["bash", "-c", step["run"]], env=env, capture_output=True, text=True, check=False
     )
     assert result.returncode == expected_code
     if expected_code == 1:
         assert (
-            "Only verified pull_request events from this repository may execute on persistent self-hosted runners."
+            "::error::Only verified pull_request events from this repository may execute"
             in result.stdout
         )
 
 
 def test_governed_pr_trust_boundary_no_drift():
-    root = init_project.Path(__file__).resolve().parents[1]
-    template_wf = yaml.safe_load((root / "templates/governed-pr.yml").read_text(encoding="utf-8"))
-    live_wf = yaml.safe_load((root / ".github/workflows/governed-pr.yml").read_text(encoding="utf-8"))
-    assert (
-        template_wf["jobs"]["governed-pr"]["steps"][0]
-        == live_wf["jobs"]["governed-pr"]["steps"][0]
-    )
+    """The self-hosted rendering must still reproduce Aru's own live workflow."""
+    workflows = profiled_workflows()
+    rendered = yaml.safe_load(workflows["self-hosted-mac"])["jobs"]["governed-pr"]
+    live = yaml.safe_load(workflows["live"])["jobs"]["governed-pr"]
+    assert rendered["steps"][0] == live["steps"][0]
+    assert rendered["runs-on"] == live["runs-on"] == ["self-hosted", "macOS", "ARM64", "aru-ci"]
 
 
 def test_scaffold_consumer_drift_fixtures_and_permissions(tmp_path):
     target = tmp_path / "consumer"
-    written = init_project.scaffold("consumer", target)
+    written = init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
     framework = init_project.Path(__file__).resolve().parents[1]
 
     expected_sources = {
@@ -315,21 +295,23 @@ def test_scaffold_consumer_drift_fixtures_and_permissions(tmp_path):
         ".aru/hooks/pre-push": framework / "hooks" / "pre-push",
         ".aru/hooks/enforce_touches.py": framework / "hooks" / "enforce_touches.py",
     }
+    # Profile-rendered outputs must match their template rendered for the same
+    # profile; every other scaffolded file stays byte-identical to its source.
+    rendered = {"AGENTS.md", ".github/workflows/governed-pr.yml"}
 
     for relative, source_path in expected_sources.items():
         assert relative in written
         dest_file = target / relative
         assert dest_file.is_file()
-        expected_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        source = source_path.read_text(encoding="utf-8")
+        if relative in rendered:
+            source = init_project.render_profile(source, "self-hosted-mac")
+        expected_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
         actual_hash = hashlib.sha256(dest_file.read_bytes()).hexdigest()
         assert actual_hash == expected_hash, f"Hash mismatch for {relative}"
 
     # Executable permissions binding
-    executable_files = {
-        ".aru/verify.sh",
-        ".aru/hooks/pre-push",
-        ".aru/hooks/enforce_touches.py",
-    }
+    executable_files = {".aru/verify.sh", ".aru/hooks/pre-push", ".aru/hooks/enforce_touches.py"}
     for relative in written:
         dest_file = target / relative
         mode = dest_file.stat().st_mode
@@ -408,7 +390,7 @@ def _init_git_repo(path: init_project.Path) -> None:
 @pytest.mark.parametrize("operation", ["rename", "copy"])
 def test_verify_template_classifies_nul_paths_end_to_end(tmp_path, operation):
     _init_git_repo(tmp_path)
-    init_project.scaffold("consumer", tmp_path)
+    init_project.scaffold("consumer", tmp_path, runner_profile="self-hosted-mac")
     source = ".aru/old\tline\ncafé_🚀.txt"
     destination = "moved/new\tline\ncafé_🚀.txt"
     (tmp_path / source).write_text("governance-adjacent content\n", encoding="utf-8")
@@ -455,7 +437,7 @@ def test_verify_template_classifies_nul_paths_end_to_end(tmp_path, operation):
 )
 def test_verify_template_fails_closed_on_malformed_nul_evidence(tmp_path, evidence):
     _init_git_repo(tmp_path)
-    init_project.scaffold("consumer", tmp_path)
+    init_project.scaffold("consumer", tmp_path, runner_profile="self-hosted-mac")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
@@ -574,7 +556,7 @@ def test_verify_template_secret_scan_catches_runtime_generated_diff_inputs():
 
 def test_verify_template_secret_scan_catches_binary_credentials_end_to_end(tmp_path):
     _init_git_repo(tmp_path)
-    init_project.scaffold("consumer", tmp_path)
+    init_project.scaffold("consumer", tmp_path, runner_profile="self-hosted-mac")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
@@ -605,7 +587,7 @@ def test_verify_template_secret_scan_catches_binary_credentials_end_to_end(tmp_p
 
 def test_verify_template_secret_scan_allows_safe_binary_control_end_to_end(tmp_path):
     _init_git_repo(tmp_path)
-    init_project.scaffold("consumer", tmp_path)
+    init_project.scaffold("consumer", tmp_path, runner_profile="self-hosted-mac")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
@@ -636,7 +618,7 @@ def test_verify_template_secret_scan_allows_safe_binary_control_end_to_end(tmp_p
 
 def test_verify_template_secret_scan_fallback_tree_mode_with_binary_content_end_to_end(tmp_path):
     _init_git_repo(tmp_path)
-    init_project.scaffold("consumer", tmp_path)
+    init_project.scaffold("consumer", tmp_path, runner_profile="self-hosted-mac")
     safe_binary = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256))
     (tmp_path / "image.png").write_bytes(safe_binary)
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
@@ -683,7 +665,7 @@ def test_verify_template_secret_scan_fallback_tree_mode_with_binary_content_end_
 
 def test_verify_template_executable_rejects_indented_write_permission_on_macos(tmp_path):
     _init_git_repo(tmp_path)
-    init_project.scaffold("consumer", tmp_path)
+    init_project.scaffold("consumer", tmp_path, runner_profile="self-hosted-mac")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
 

@@ -1,4 +1,5 @@
 name: Aru governed pull request
+# aru-runner-profile: __ARU_RUNNER_PROFILE__
 
 on:
   pull_request:
@@ -19,17 +20,17 @@ jobs:
   governed-pr:
     name: aru-governed-pr
     if: ${{ github.event_name == 'merge_group' || !github.event.pull_request.draft }}
-    runs-on: [self-hosted, macOS, ARM64, aru-ci]
+    runs-on: __ARU_RUNS_ON__
     timeout-minutes: 20
     steps:
-      - name: Validate self-hosted runner trust boundary
+      - name: __ARU_TRUST_STEP__
         env:
           ARU_EVENT_NAME: ${{ github.event_name }}
           ARU_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           ARU_REPOSITORY: ${{ github.repository }}
         run: |
           if [[ "$ARU_EVENT_NAME" != "pull_request" || -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ]]; then
-            echo "::error::Only verified pull_request events from this repository may execute on persistent self-hosted runners."
+            echo "::error::__ARU_TRUST_MESSAGE__"
             exit 1
           fi
           command -v python3

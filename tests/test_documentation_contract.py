@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import init_project
+
 
 ROOT = Path(__file__).resolve().parents[1]
 OPERATING_GUIDANCE = [
@@ -66,33 +68,52 @@ def test_version_and_layer_truth_are_explicit():
     assert "Tier 0-1 changes do not wait for an authoritative review" in contract
 
 
+def governed_workflows() -> dict[str, str]:
+    """Aru's own live workflow plus the consumer template for every profile."""
+    template = text(ROOT / "templates" / "governed-pr.yml")
+    workflows = {"live": text(ROOT / ".github" / "workflows" / "governed-pr.yml")}
+    for profile in init_project.RUNNER_PROFILES:
+        workflows[profile] = init_project.render_profile(template, profile)
+    return workflows
+
+
 def test_governed_workflows_pin_touches_check_to_event_head():
-    for path in (
-        ROOT / ".github" / "workflows" / "governed-pr.yml",
-        ROOT / "templates" / "governed-pr.yml",
-    ):
-        workflow = text(path)
+    for workflow in governed_workflows().values():
         assert "ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}" in workflow
         assert '--expected-head "$ARU_EXPECTED_HEAD"' in workflow
 
 
-def test_governed_workflows_use_only_budget_free_self_hosted_macs():
-    for path in (
-        ROOT / ".github" / "workflows" / "governed-pr.yml",
-        ROOT / "templates" / "governed-pr.yml",
-    ):
-        workflow = text(path)
-        assert "runs-on: [self-hosted, macOS, ARM64, aru-ci]" in workflow
-        assert "ubuntu-latest" not in workflow
-        assert "macos-latest" not in workflow
-        assert "windows-latest" not in workflow
-        assert "actions/upload-artifact" not in workflow
-        assert "actions/setup-python" not in workflow
-        assert "cache:" not in workflow
-        assert "pull_request_target" not in workflow
-        assert workflow.index("Validate self-hosted runner trust boundary") < workflow.index(
+def test_every_runner_profile_stays_budget_free_and_account_bound():
+    budget_free = ("macos-latest", "windows-latest", "actions/upload-artifact",
+                   "actions/setup-python", "cache:", "pull_request_target")
+    workflows = governed_workflows()
+    for name, workflow in workflows.items():
+        for pattern in budget_free:
+            assert pattern not in workflow, (name, pattern)
+        assert workflow.index("trust boundary") < workflow.index(
             "Check out the exact pull-request head"
-        )
+        ), name
         assert "Only verified pull_request events from this repository may execute" in workflow
-        assert "sys.version_info >= (3, 11)" in workflow
-        assert "command -v gh" in workflow
+        assert "sys.version_info >= (3, 11)" in workflow, name
+        assert "command -v gh" in workflow, name
+    assert init_project.ACCOUNT_RUNNER_PROFILES == {
+        "gillella": "self-hosted-mac", "unum-inc": "github-hosted",
+    }
+    # Aru's own repository is a personal gillella repository, so it keeps the Macs.
+    for name in ("live", "self-hosted-mac"):
+        assert "runs-on: [self-hosted, macOS, ARM64, aru-ci]" in workflows[name], name
+        assert "ubuntu-latest" not in workflows[name], name
+    assert "runs-on: ubuntu-latest" in workflows["github-hosted"]
+    assert "self-hosted" not in workflows["github-hosted"]
+
+
+def test_operating_documents_record_the_account_runner_split():
+    for relative in (
+        "AGENTS.md", "README.md", "docs/KERNEL-CONTRACT.md", "docs/OPERATIONS.md",
+        "docs/DEGRADED-MODE.md", "docs/ENFORCEMENT-REGISTER.md",
+        "integrations/hermes/README.md", "skills/init-agent-project/SKILL.md",
+        "skills/implement-next-issue/SKILL.md",
+    ):
+        content = text(ROOT / relative)
+        assert "self-hosted-mac" in content, relative
+        assert "github-hosted" in content, relative

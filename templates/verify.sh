@@ -8,7 +8,9 @@
 # content, send email or applications, or take a trading action.
 #
 # Written for bash 3.2 so it runs unmodified on the operator-owned
-# [self-hosted, macOS, ARM64, aru-ci] runner.
+# [self-hosted, macOS, ARM64, aru-ci] runners and on GitHub-hosted runners.
+# The governed workflow declares which runner profile this repository uses; the
+# governance section below refuses any workflow that contradicts it.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
@@ -181,20 +183,49 @@ if [ -f "${governance_flag}" ]; then
 
   workflow=".github/workflows/governed-pr.yml"
   [ -f "${workflow}" ] || fail "${workflow} is missing"
-  grep -Fq 'runs-on: [self-hosted, macOS, ARM64, aru-ci]' "${workflow}" \
-    || fail "governed workflow must target exactly [self-hosted, macOS, ARM64, aru-ci]"
+  profile_count="$(grep -c '^# aru-runner-profile: ' "${workflow}" || true)"
+  [ "${profile_count}" = "1" ] \
+    || fail "governed workflow must declare exactly one '# aru-runner-profile:' line"
+  profile="$(sed -n 's/^# aru-runner-profile: //p' "${workflow}")"
+  case "${profile}" in
+    self-hosted-mac)
+      expected_runs_on='runs-on: [self-hosted, macOS, ARM64, aru-ci]'
+      profile_forbidden=(
+        'runs-on:[[:space:]]*ubuntu'
+        'runs-on:[[:space:]]*macos-'
+        'runs-on:[[:space:]]*windows'
+      )
+      ;;
+    github-hosted)
+      expected_runs_on='runs-on: ubuntu-latest'
+      # A hosted-account repository must never reach a personal machine.
+      profile_forbidden=(
+        'self-hosted'
+        'runs-on:[[:space:]]*macos-'
+        'runs-on:[[:space:]]*windows'
+      )
+      ;;
+    *)
+      fail "governed workflow declares an unknown runner profile: ${profile}"
+      ;;
+  esac
+  # Validate the active runs-on value, not any text occurrence: a commented copy
+  # of the expected target must not license a different or additional runner.
+  active_runs_on="$(sed -E 's/[[:space:]]*#.*$//' "${workflow}" \
+    | grep -E '^[[:space:]]*runs-on:' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | sort -u || true)"
+  [ "${active_runs_on}" = "${expected_runs_on}" ] \
+    || fail "the ${profile} runner profile requires exactly one active ${expected_runs_on}"
   grep -Fq 'name: aru-governed-pr' "${workflow}" \
     || fail "governed workflow must publish the aru-governed-pr check name"
   grep -Fq 'bash .aru/verify.sh' "${workflow}" \
     || fail "governed workflow must run .aru/verify.sh"
   grep -Fq 'enforce_touches.py' "${workflow}" \
     || fail "governed workflow must enforce touches: against the actual diff"
-  echo "governed workflow: self-hosted pool, check name, verify.sh, touches enforcement"
+  echo "governed workflow: ${profile} profile, check name, verify.sh, touches enforcement"
 
   for forbidden in \
-    'runs-on:[[:space:]]*ubuntu' \
-    'runs-on:[[:space:]]*macos-' \
-    'runs-on:[[:space:]]*windows' \
+    "${profile_forbidden[@]}" \
     'pull_request_target' \
     'actions/cache' \
     'upload-artifact' \
@@ -209,7 +240,7 @@ if [ -f "${governance_flag}" ]; then
   if grep -Eq '^[[:space:]]*(contents|issues|pull-requests|actions|checks|deployments|packages|id-token):[[:space:]]*(write|admin)' "${workflow}"; then
     fail "governed workflow permissions must stay read-only"
   fi
-  echo "no hosted fallback, cache, artifact, deployment secret, or write permission"
+  echo "no cross-profile runner, cache, artifact, deployment secret, or write permission"
 
   vendored="$(git ls-files -- '.aru/**' | grep -E '/(merge_pr|create_pr|create_branch|claim_issue|check_ci|fetch_next_work|fetch_pr_feedback|triage_backlog|init_project|cleanup_worktrees|revert_merge|review_policy|review_risk|review_evidence|reviewer_probe|merge_state|common)\.py$' || true)"
   [ -z "${vendored}" ] || fail "Factory lifecycle scripts must not be vendored: ${vendored}"
