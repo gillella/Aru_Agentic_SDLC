@@ -9,9 +9,9 @@ import claim_issue
 import triage_backlog
 
 
-def backlog_issue(*labels: str) -> dict[str, Any]:
+def backlog_issue(*labels: str, number: int = 3) -> dict[str, Any]:
     return {
-        "number": 3, "title": "ready", "state": "OPEN",
+        "number": number, "title": "ready", "state": "OPEN",
         "body": "## Acceptance Criteria\n\n- [ ] Complete the fix.\n\ntouches: scripts/example.py",
         "labels": [{"name": label} for label in labels],
     }
@@ -83,14 +83,9 @@ def _mock_claim_context(monkeypatch, snapshots, status="Ready"):
 
 @pytest.mark.parametrize("race", [False, True])
 def test_claim_settlement_and_race_rollback(monkeypatch, race):
-    snapshots = [
-        {"number": 7, "labels": [], "state": "OPEN"},
-        {"number": 7, "labels": [{"name": "agent:codex-1"}] + ([{"name": "agent:codex-2"}] if race else []), "state": "OPEN"},
-        ({"number": 7, "labels": [{"name": "agent:codex-1"}, {"name": "agent:codex-2"}], "state": "OPEN"}
-         if race else {"number": 7, "labels": [{"name": "agent:codex-1"}], "state": "OPEN"}),
-        ({"number": 7, "labels": [{"name": "agent:codex-2"}], "state": "OPEN"}
-         if race else {"number": 7, "labels": [{"name": "agent:codex-1"}], "state": "OPEN"}),
-    ]
+    owners = ["agent:codex-1"] + (["agent:codex-2"] if race else [])
+    owned = backlog_issue(*owners, number=7)
+    snapshots = [backlog_issue(number=7), owned, owned, backlog_issue("agent:codex-2" if race else "agent:codex-1", number=7)]
     statuses_live = ["Ready", "Ready"] if race else ["Ready", "Ready", "In Progress"]
     _mock_claim_context(monkeypatch, snapshots, status=statuses_live)
     commands, statuses = [], []
@@ -114,17 +109,17 @@ def test_claim_settlement_and_race_rollback(monkeypatch, race):
         assert "--add-label" in commands[0]
 
 
-def test_claim_rollback_quota_surfaces_original_failure(monkeypatch, capsys):
-    snapshots = [
-        {"number": 7, "labels": [], "state": "OPEN"},
-        {"number": 7, "labels": [{"name": "agent:codex-1"}, {"name": "agent:codex-2"}], "state": "OPEN"},
-        {"number": 7, "labels": [{"name": "agent:codex-1"}, {"name": "agent:codex-2"}], "state": "OPEN"},
-    ]
+@pytest.mark.parametrize("mutation_failure", [False, True])
+def test_claim_rollback_quota_surfaces_original_failure(monkeypatch, capsys, mutation_failure):
+    contested = backlog_issue("agent:codex-1", "agent:codex-2", number=7)
+    snapshots = [backlog_issue(number=7), contested, contested]
     _mock_claim_context(monkeypatch, snapshots, status="Ready")
     commands = []
 
     def quota_on_rollback(argv, **_kwargs):
         commands.append(argv)
+        if mutation_failure and "--add-label" in argv:
+            raise claim_issue.KernelError("App edit failed")
         if "--remove-label" in argv:
             raise claim_issue.KernelError("GitHub GraphQL quota exhausted; stop and wait for the budget to reset")
 
@@ -133,12 +128,12 @@ def test_claim_rollback_quota_surfaces_original_failure(monkeypatch, capsys):
     with pytest.raises(SystemExit, match="2"):
         claim_issue.main()
     assert commands == [
-        ["gh", "issue", "edit", "7", "--add-label", "agent:codex-1", "--add-assignee", "@me"],
+        ["gh", "issue", "edit", "7", "--add-label", "agent:codex-1"],
         ["gh", "issue", "edit", "7", "--remove-label", "agent:codex-1"],
     ]
     error = capsys.readouterr().err
     assert "GitHub GraphQL quota exhausted; stop and wait for the budget to reset" in error
-    assert "original claim failure: claim race detected; no exclusive winner" in error
+    assert "original claim failure: " + ("App edit failed" if mutation_failure else "claim race detected; no exclusive winner") in error
 
 
 @pytest.mark.parametrize("agent", ["A", "contains space", "x", "../agent"])
@@ -147,13 +142,67 @@ def test_agent_ids_are_bounded(agent):
         claim_issue.safe_agent(agent)
 
 
-def test_release_requires_in_progress_and_no_linked_open_pr(monkeypatch):
-    record = {
-        "number": 7,
-        "labels": [{"name": "agent:codex-1"}, {"name": "status:in-progress"}],
-    }
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("restore_peer", [None, "Ready", "In Progress"])
+def test_app_claim_failure_retries_and_release_preserves_human_assignees(monkeypatch, partial, restore_peer):
+    record = backlog_issue("status:ready")
+    record["assignees"] = [{"login": "human-owner"}]
+    failure = [True]
+    attempts = []
     monkeypatch.setattr(claim_issue, "issue", lambda _number: record)
-    monkeypatch.setattr(claim_issue, "status_of", lambda _record: "In Progress")
+    monkeypatch.setattr(claim_issue, "ensure_label", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(claim_issue, "other_active_claims", lambda *_args: [])
+
+    def command(argv):
+        assert "--add-assignee" not in argv and "--remove-assignee" not in argv
+        adding = "--add-label" in argv
+        if adding:
+            attempts.append(True)
+        fail = adding and bool(failure) and failure.pop()
+        label = {"name": "agent:codex-1"}
+        if not fail or partial:
+            if adding:
+                record["labels"].append(label)
+            else:
+                record["labels"].remove(label)
+        if adding and len(attempts) == 3 and restore_peer:
+            record["labels"].append({"name": "agent:peer"})
+            transition(3, restore_peer, expected_current="Ready")
+        if fail:
+            raise claim_issue.KernelError("App edit failed")
+
+    def transition(_number, status, *, expected_current, pre_mutation_check=None):
+        if claim_issue.status_of(record) != expected_current:
+            raise claim_issue.KernelError("status precondition failed")
+        if pre_mutation_check:
+            pre_mutation_check()
+        record["labels"] = [label for label in record["labels"] if not label["name"].startswith("status:")]
+        record["labels"].append({"name": "status:" + status.lower().replace(" ", "-")})
+
+    monkeypatch.setattr(claim_issue, "run", command)
+    monkeypatch.setattr(claim_issue, "set_status", transition)
+    with pytest.raises(claim_issue.KernelError, match="App edit failed"):
+        claim_issue.claim(3, "codex-1")
+    assert claim_issue.status_of(record) == "Ready" and claim_issue.claimants(record) == []
+    assert claim_issue.claim(3, "codex-1")["status"] == "In Progress"
+    linked = iter([[], [], [44]])
+    monkeypatch.setattr(claim_issue, "linked_open_prs", lambda _number: next(linked))
+    with pytest.raises(claim_issue.KernelError, match="release raced"):
+        claim_issue.release(3, "codex-1")
+    assert record["assignees"] == [{"login": "human-owner"}]
+    if restore_peer:
+        assert claim_issue.status_of(record) == restore_peer and claim_issue.claimants(record) == ["agent:peer"]
+        return
+    assert claim_issue.status_of(record) == "In Progress"
+    assert claim_issue.claimants(record) == ["agent:codex-1"]
+    monkeypatch.setattr(claim_issue, "linked_open_prs", lambda _number: [])
+    assert claim_issue.release(3, "codex-1")["status"] == "Ready"
+    assert claim_issue.claimants(record) == [] and record["assignees"] == [{"login": "human-owner"}]
+
+
+def test_release_requires_in_progress_and_no_linked_open_pr(monkeypatch):
+    record = backlog_issue("agent:codex-1", "status:in-progress", number=7)
+    monkeypatch.setattr(claim_issue, "issue", lambda _number: record)
     monkeypatch.setattr(claim_issue, "linked_open_prs", lambda _number: [44])
     monkeypatch.setattr(
         claim_issue,
@@ -173,35 +222,17 @@ def test_closed_stale_active_claim_blocks_a_second_claim(monkeypatch):
         claim_issue,
         "gh_paginated",
         lambda _endpoint: [
-            {
-                "number": 3,
-                "state": "closed",
-                "labels": [
-                    {"name": "agent:codex-1"},
-                    {"name": "status:in-progress"},
-                ],
-            },
-            {
-                "number": 4,
-                "state": "closed",
-                "labels": [
-                    {"name": "agent:codex-1"},
-                    {"name": "status:done"},
-                ],
-            },
+            {**backlog_issue("agent:codex-1", "status:in-progress"), "state": "closed"},
+            {**backlog_issue("agent:codex-1", "status:done"), "number": 4, "state": "closed"},
         ],
     )
     assert claim_issue.other_active_claims(7, "codex-1") == [3]
 
 
 def test_release_rolls_back_status_when_claim_removal_fails(monkeypatch):
-    record = {
-        "number": 7,
-        "labels": [{"name": "agent:codex-1"}, {"name": "status:in-progress"}],
-    }
+    record = backlog_issue("agent:codex-1", "status:in-progress", number=7)
     statuses = []
     monkeypatch.setattr(claim_issue, "issue", lambda _number: record)
-    monkeypatch.setattr(claim_issue, "status_of", lambda _record: "In Progress")
     monkeypatch.setattr(claim_issue, "linked_open_prs", lambda _number: [])
     monkeypatch.setattr(
         claim_issue,
@@ -228,23 +259,15 @@ def test_release_rolls_back_status_when_claim_removal_fails(monkeypatch):
 
 def test_linked_open_pr_inventory_is_complete_and_bounded(monkeypatch):
     monkeypatch.setattr(claim_issue, "repo_slug", lambda: "owner/repo")
+    connection = {
+        "nodes": [{"number": 5, "state": "CLOSED"}, {"number": 7, "state": "OPEN"}],
+        "pageInfo": {"hasNextPage": False},
+    }
     monkeypatch.setattr(
         claim_issue,
         "gh_json",
         lambda *_args, **_kwargs: {
-            "data": {
-                "repository": {
-                    "issue": {
-                        "closedByPullRequestsReferences": {
-                            "nodes": [
-                                {"number": 5, "state": "CLOSED"},
-                                {"number": 7, "state": "OPEN"},
-                            ],
-                            "pageInfo": {"hasNextPage": False},
-                        }
-                    }
-                }
-            }
+            "data": {"repository": {"issue": {"closedByPullRequestsReferences": connection}}}
         },
     )
 
