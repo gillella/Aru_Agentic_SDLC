@@ -8,12 +8,14 @@ only lifecycle state.
 
 Require a valid Ready issue, exclusive claim, declared `touches:`, isolated
 worktree, smallest acceptable change, a PR with `Closes #N`, the exact-head
-`aru-governed-pr` check on `[self-hosted, macOS, ARM64, aru-ci]`, one
-authoritative reviewer distinct from the author when risk requires one, and
-merge through `merge_pr.py --expected-head`. GitHub Actions orchestrates the
-check, but only operator-owned Macs supply compute. It runs this repository's
-`.aru/verify.sh` and validates `touches:` against the actual diff. Never fall
-back to a GitHub-hosted runner; an offline pool leaves merge blocked.
+`aru-governed-pr` check, one authoritative reviewer distinct from the author
+when risk requires one, and merge through `merge_pr.py --expected-head`.
+
+This repository is scaffolded for the `__ARU_RUNNER_PROFILE__` runner profile,
+so GitHub Actions orchestrates the check and __ARU_RUNNER_TARGET__ supply the
+compute. It runs this repository's `.aru/verify.sh` and validates `touches:`
+against the actual diff. __ARU_RUNNER_RULE__ `.aru/verify.sh` refuses a workflow
+whose declared profile and `runs-on:` disagree.
 
 A `merge_pr.py` merge-queue or auto-merge result is still in flight. Keep the
 issue In Review until GitHub confirms the exact head merged; only then mark Done
