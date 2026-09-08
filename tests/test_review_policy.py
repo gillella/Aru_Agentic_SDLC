@@ -27,13 +27,13 @@ def configured_policy_labels() -> tuple[str, ...]:
     )
 
 
-def test_registration_labels_define_equal_external_pool():
+def test_registration_cannot_reenable_retired_reviewers():
     policy = review_policy.review_policy_from_labels(
         labels("reviewer-registered:coderabbit", "reviewer-registered:sourcery")
     )
-    assert policy.external_reviewers == ("coderabbit", "sourcery")
+    assert policy.external_reviewers == ("coderabbit",)
     assert policy.coding_fallbacks == review_policy.CODING_REVIEWERS
-    assert policy.timeout_seconds == 120
+    assert policy.timeout_seconds == 900
     assert policy.sources == {
         "external_reviewers": "registration-labels",
         "coding_fallbacks": "ARU_CODING_REVIEWERS",
@@ -41,11 +41,11 @@ def test_registration_labels_define_equal_external_pool():
     }
 
 
-def test_repository_labels_configure_equal_pool_and_timeout():
+def test_repository_labels_configure_coderabbit_and_completion_timeout():
     policy = review_policy.review_policy_from_labels(configured_policy_labels())
     assert policy.as_dict() == {
-        "selection": "equal-external-pool",
-        "external_reviewers": ["coderabbit", "sourcery", "codeant"],
+        "selection": "coderabbit-first",
+        "external_reviewers": ["coderabbit"],
         "coding_fallbacks": [
             "claude-code",
             "openai-codex",
@@ -82,7 +82,7 @@ def test_malformed_or_contradictory_policy_fails_closed(extra, message):
         )
 
 
-def test_equal_external_pool_rotates_by_issue_number():
+def test_coderabbit_remains_preferred_for_every_issue_number():
     policy = review_policy.review_policy_from_labels(
         labels(
             "reviewer-registered:coderabbit",
@@ -103,10 +103,10 @@ def test_equal_external_pool_rotates_by_issue_number():
         },
         reviewer_actors={},
     )
-    assert selected == ("codeant", None, None)
+    assert selected == ("coderabbit", None, None)
 
 
-def test_equal_pool_exhausts_untried_external_reviewers_before_coding(monkeypatch):
+def test_coding_fallback_excludes_prior_candidates(monkeypatch):
     monkeypatch.setenv("ARU_CODING_REVIEWERS", "claude-code:m1@1,claude-code:m2@2")
     policy = review_policy.default_review_policy(("coderabbit", "sourcery", "codeant"))
     observed = {}
@@ -278,10 +278,10 @@ def test_check_run_pagination_accepts_repeated_overall_total(monkeypatch):
         observed + timedelta(seconds=1),
         timeout_seconds=120,
     )
-    assert decision == ("external-pending", 119)
+    assert decision == ("external-unavailable", None)
 
 
-def test_reviewer_status_reports_equal_pool_sources_bindings_and_probes(monkeypatch):
+def test_reviewer_status_reports_retirement_sources_bindings_and_probes(monkeypatch):
     monkeypatch.setattr(
         review_policy, "load_repository_review_policy", lambda: (
             review_policy.review_policy_from_labels(configured_policy_labels()),
@@ -304,6 +304,7 @@ def test_reviewer_status_reports_equal_pool_sources_bindings_and_probes(monkeypa
             candidate[:3] for candidate in candidates if candidate[1] == "m1"
         ],
     )
+    monkeypatch.setattr(review_policy, "coderabbit_capability", lambda *_args: {"state": "unavailable", "reason": "fixture"})
     status = review_policy.reviewer_status(
         probe=True,
         author_identity="MO",
@@ -311,10 +312,10 @@ def test_reviewer_status_reports_equal_pool_sources_bindings_and_probes(monkeypa
         runner=result,
     )
     by_identity = {item["identity"]: item for item in status["coding_reviewers"]}
-    assert status["schema"] == "aru.reviewer-status/v2"
-    assert status["policy"]["selection"] == "equal-external-pool"
+    assert status["schema"] == "aru.reviewer-status/v3"
+    assert status["policy"]["selection"] == "coderabbit-first"
     assert status["policy"]["external_reviewers"] == [
-        "coderabbit", "sourcery", "codeant"
+        "coderabbit"
     ]
     assert by_identity["m1"]["probe"] == "ok"
     assert by_identity["mo"]["probe"] == "ineligible"
@@ -323,7 +324,7 @@ def test_reviewer_status_reports_equal_pool_sources_bindings_and_probes(monkeypa
     assert status["valid"] is False
     assert "configured coding identity mg has no reviewer binding" in status["errors"]
     assert status["warnings"] == []
-    assert {item["policy_role"] for item in status["external_reviewers"]} == {"equal"}
+    assert {item["policy_role"] for item in status["external_reviewers"]} == {"preferred", "retired"}
     assert status["configuration_sources"]["runtime_availability"] == "bounded on-demand probe"
 
 
@@ -358,10 +359,10 @@ def test_reviewer_status_cli_is_read_only_and_forwards_probe_exclusions(
 ):
     observed = {}
     payload = {
-        "schema": "aru.reviewer-status/v2",
+        "schema": "aru.reviewer-status/v3",
         "valid": True,
         "policy": {
-            "selection": "equal-external-pool",
+            "selection": "coderabbit-first",
             "external_reviewers": ["coderabbit"],
             "coding_fallbacks": ["claude-code"],
             "timeout_seconds": 900,
@@ -393,4 +394,52 @@ def test_reviewer_status_cli_is_read_only_and_forwards_probe_exclusions(
         "author_identity": "codex-author",
         "author_actor": "author-login",
     }
-    assert '"schema": "aru.reviewer-status/v2"' in capsys.readouterr().out
+    assert '"schema": "aru.reviewer-status/v3"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("override,expected", [
+    ({}, "available"),
+    ({"head_sha": "b" * 40}, "unavailable"),
+    ({"app": {"slug": "untrusted"}}, "unavailable"),
+    ({"status": "QUEUED"}, "unavailable"),
+    ({"status": "COMPLETED", "conclusion": "SUCCESS"}, "unavailable"),
+    ({"output": {"summary": "Access denied"}}, "unavailable"),
+    ({"output": {"summary": "Review skipped"}}, "unavailable"),
+    ({"output": {"summary": "Rate limit exceeded"}}, "unavailable"),
+    ({"started_at": "2026-09-08T09:00:00Z"}, "unavailable"),
+])
+def test_capability_requires_recent_current_head_running_trusted_app(override, expected):
+    from review_evidence import coderabbit_check_capability
+    now = datetime(2026, 9, 8, 10, 10, tzinfo=timezone.utc)
+    check = dict(name="CodeRabbit", app={"slug": "coderabbitai"}, head_sha="a" * 40,
+                 status="IN_PROGRESS", started_at="2026-09-08T10:00:00Z")
+    check.update(override)
+    data = {"total_count": 1, "check_runs": [check]}
+    assert coderabbit_check_capability(data, "a" * 40, now)["state"] == expected
+
+
+def test_capability_transport_is_bounded_and_falls_back_on_unreadable(monkeypatch):
+    monkeypatch.setattr(review_policy, "repo_slug", lambda: "owner/repo")
+    def unavailable(argv, *, timeout):
+        assert argv == ["api", "repos/owner/repo/commits/" + "a" * 40 + "/check-runs?per_page=100&filter=latest"]
+        assert timeout == 8
+        raise create_pr.KernelError("bounded command timed out")
+    monkeypatch.setattr(review_policy, "gh_json", unavailable)
+    assert review_policy.coderabbit_capability("a" * 40)["state"] == "unavailable"
+
+
+@pytest.mark.parametrize("retired", ["sourcery", "codeant"])
+def test_retired_authority_never_waits_or_reads_provider_state(monkeypatch, retired):
+    monkeypatch.setattr(review_policy, "repo_slug", lambda: pytest.fail("retired provider lookup"))
+    assert review_policy.external_decision(42, {}, retired, datetime.now(timezone.utc)) == ("external-retired", None)
+
+
+def test_missing_capability_immediately_uses_independent_coding_even_with_legacy_pool(monkeypatch):
+    monkeypatch.setenv("ARU_CODING_REVIEWERS", "claude-code:m1@1")
+    policy = review_policy.ReviewPolicy(("sourcery", "codeant", "coderabbit"), ("claude-code",), 900, {})
+    result = review_policy.select_reviewer_from_pool(
+        policy, number=581, author_identity="writer", author_family="openai-codex",
+        author_actor="writer", external_states={"sourcery": "available", "codeant": "available", "coderabbit": "pending"},
+        reviewer_actors={"m1": "reviewer"}, probe_runner=lambda _a: pytest.fail("unused"),
+        coding_probe=lambda **_kw: ("claude-code", "m1", "reviewer"))
+    assert result == ("claude-code", "m1", "reviewer")

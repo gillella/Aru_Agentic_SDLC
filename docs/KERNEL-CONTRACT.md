@@ -1,19 +1,19 @@
 # Minimal Kernel Contract
 
-This is the canonical operating contract for Aru v1.0.0. Other documentation,
+This is the canonical operating contract for the Aru v2.0.0 source candidate. Other documentation,
 skills, and generated instructions summarize or explain this file; they do not
 add merge gates.
 
-## v1 public API and compatibility
+## v2 public API and compatibility
 
-The stable v1 public API is the five lifecycle statuses, the issue contract,
+The v2 public API is the five lifecycle statuses, the issue contract,
 the `touches:` write boundary, the eleven supported lifecycle commands named
 below, the six installed skills, the `aru-governed-pr` check name and the
 `self-hosted-mac` / `github-hosted` runner-profile contract, the path-derived risk
 tiers, the `review-policy:*`, `reviewer-registered:*`, `reviewer-binding:*`,
 `review:*`, and `agent:*` label contracts, and the seven operating documents.
 
-Compatible v1.x releases may correct or extend those interfaces without
+Compatible v2.x releases may correct or extend those interfaces without
 weakening their fail-closed guarantees. Removing or incompatibly changing one
 requires a new major version. Private helper internals, evidence documents,
 consumer verification commands, external Driver cadence, and consumer release
@@ -125,19 +125,30 @@ independently or relax merge-group provenance to unblock regeneration.
 
 ## Review and continuation
 
-Tier 0-1 changes do not wait for an authoritative review. Tier 2-3 changes use
-one authority selected from the equal pool defined by
-`reviewer-registered:<service>` labels. The issue number rotates the initial
-external assignment. Unavailable external services are not retried on the same
-head; only after that pool is exhausted may the four coding families be
-borrowed. The optional `review-policy:timeout=<seconds>` label defaults to 120
-seconds. Ranked primary/fallback or otherwise unsupported declarations fail
-closed. Bootstrap `review:*` labels do not register a provider. A coding
-reviewer must be bound to a GitHub actor distinct from the PR author and submit
-the required
-full-current-head formal attestation. For a review-required change, self-review,
-stale verdicts, unresolved findings or threads, `REQUEST_CHANGES`, no-op
-provider results, and zero or multiple authorities block merge.
+Tier 0-1 changes do not wait for an authoritative review.
+For Tier 2-3, CodeRabbit is the sole preferred external provider. Sourcery and
+CodeAnt are retired: registration and historical evidence never make them
+eligible for new assignments. Use one bounded authenticated check for usable
+CodeRabbit access to the current repository/head. If access is denied, errored,
+rate-limited, unavailable or unproven, immediately select an available distinct
+coding reviewer; never wait through retired providers. Generic green checks,
+cached installation inventory and empty/skipped reviews are not approval.
+The optional `review-policy:timeout=<seconds>` is a completion deadline only
+for an accepted review (default 900 seconds, informed by the observed 11-minute
+CodeRabbit review). Explicit unavailability bypasses it. Ranked declarations
+remain invalid. Use `create_pr.py --refresh-reviewer <PR>` to migrate a retired
+assignment; do not hand-edit authority or erase prior findings/history.
+A coding reviewer must be bound to an actor distinct from the PR author and
+submit a full-current-head formal attestation. All applicable findings remain
+resolved before merge. Availability, assignment and actual execution/verdict
+are different observations. No available independent reviewer leaves an owned
+blocked action; never manufacture approval.
+
+This operator-requested provider-policy change is the v2 major-version
+migration. Historical labels and review records remain readable. Status output
+uses `aru.reviewer-status/v3`; consumers reading v2 status must adopt the new
+selection/retired/capability fields with this source revision. A source merge is
+not a published release or proof of installation on other hosts.
 
 The Kernel does not wait or poll. For each pending Tier 2-3 authority
 assignment, the external Driver owns exactly one continuation event:
@@ -159,8 +170,9 @@ Policy and external registration are repository-shared GitHub configuration;
 coding identities and subscriptions remain machine-local.
 `create_pr.py --reviewer-status --json` reports the effective policy, sources,
 registrations, bindings, and exclusions without mutation. Optional
-`--probe-reviewers` adds bounded local liveness observations. Remove
-`reviewer-registered:<service>` when external access expires or is uninstalled.
+`--probe-reviewers` adds bounded local liveness observations. Remove retired Sourcery/CodeAnt registration definitions during operator rollout;
+retain historical review/assignment records. An active CodeRabbit registration
+is configuration, not capability proof.
 
 ## Risk-proportional consumer policy
 

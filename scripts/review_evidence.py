@@ -102,6 +102,8 @@ def _latest_state(evidence: list[tuple[datetime, str]]) -> str:
         return PENDING
     latest_at = max(observed_at for observed_at, _state in evidence)
     states = {state for observed_at, state in evidence if observed_at == latest_at}
+    if len(states) > 1:
+        states.discard(PENDING)  # progress adds no verdict beside simultaneous substantive evidence
     if len(states) != 1:
         raise KernelError("external reviewer evidence conflicts at the latest timestamp")
     return states.pop()
@@ -115,7 +117,7 @@ def _record_state(record: dict[str, Any], *, head: str) -> str | None:
     }:
         return None
     commit = record.get("commit_id") or record.get("commitId")
-    return AVAILABLE if commit is None or commit == head else None
+    return AVAILABLE if commit == head else None
 
 
 def _check_state(check: dict[str, Any]) -> str | None:
@@ -168,6 +170,29 @@ def external_state(
         if state := _check_state(check):
             evidence.append((observed_at, state))
     return _latest_state(evidence)
+
+
+def coderabbit_check_capability(
+    data: Any, head: str, observed_at: datetime, timeout_seconds: int = 900
+) -> dict[str, str]:
+    """Only a current, authenticated, running review demonstrates usable access."""
+    if not isinstance(data, dict) or not isinstance(data.get("check_runs"), list):
+        raise KernelError("capability check inventory is malformed")
+    checks = data["check_runs"]
+    if data.get("total_count") != len(checks) or any(not isinstance(c, dict) for c in checks):
+        raise KernelError("capability check inventory is incomplete")
+    matching = [c for c in checks if _trusted_check(c, "coderabbit", head)]
+    if len(matching) > 1:
+        raise KernelError("capability checks are ambiguous")
+    if not matching:
+        return {"state": UNAVAILABLE, "reason": "no-current-head-app-evidence"}
+    check = matching[0]
+    if review_evidence_unavailable(check) or _check_state(check) == UNAVAILABLE:
+        return {"state": UNAVAILABLE, "reason": "provider-unavailable"}
+    age = (observed_at - evidence_time(check, subject="capability check")).total_seconds()
+    if str(check.get("status")).upper() == "IN_PROGRESS" and 0 <= age < timeout_seconds:
+        return {"state": AVAILABLE, "reason": "current-head-authenticated-review-running"}
+    return {"state": UNAVAILABLE, "reason": "usable-review-not-established"}
 
 
 __all__ = [

@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 
 from common import (
+    ACTIVE_EXTERNAL_REVIEWERS,
+    RETIRED_EXTERNAL_REVIEWERS,
     CODING_REVIEWERS,
     EXTERNAL_REVIEWERS,
     REVIEWER_CONFIG_ENV,
@@ -20,6 +22,7 @@ from common import (
     canonical_github_actor,
     configured_coding_reviewers,
     gh_json,
+    git,
     gh_paginated,
     label_names,
     normalized_identity,
@@ -33,6 +36,7 @@ from review_evidence import (
     UNAVAILABLE,
     authority_assigned_at,
     external_state,
+    coderabbit_check_capability,
 )
 from reviewer_probe import (
     CodingCandidate,
@@ -43,7 +47,8 @@ from reviewer_probe import (
 
 TIMEOUT_PREFIX = "review-policy:timeout="
 POLICY_PREFIX = "review-policy:"
-DEFAULT_TIMEOUT_SECONDS = 2 * 60
+DEFAULT_TIMEOUT_SECONDS = 15 * 60
+CAPABILITY_TIMEOUT_SECONDS = 8
 MIN_TIMEOUT_SECONDS = 60
 MAX_TIMEOUT_SECONDS = 24 * 60 * 60
 ASSIGNMENT_AUDIT_PREFIXES = (
@@ -68,7 +73,7 @@ class ReviewPolicy:
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "selection": "equal-external-pool",
+            "selection": "coderabbit-first",
             "external_reviewers": list(self.external_reviewers),
             "coding_fallbacks": list(self.coding_fallbacks),
             "timeout_seconds": self.timeout_seconds,
@@ -90,7 +95,7 @@ def registered_external_reviewers(names: Iterable[str]) -> tuple[str, ...]:
     inventory = set(names)
     return tuple(
         service
-        for service in EXTERNAL_REVIEWERS
+        for service in ACTIVE_EXTERNAL_REVIEWERS
         if REVIEW_REGISTRATION_PREFIX + service in inventory
     )
 
@@ -103,14 +108,29 @@ def registration_states(names: Iterable[str]) -> dict[str, str]:
     }
 
 
-def registered_external_states(names: tuple[str, ...] | None = None) -> dict[str, str]:
-    if names is None:
-        names = repository_label_names()
-    states = registration_states(names)
-    return {
-        service: AVAILABLE if state == "available" else UNAVAILABLE
-        for service, state in states.items()
-    }
+def coderabbit_capability(head: str | None = None) -> dict[str, str]:
+    """Bounded GitHub App observation; inventory or generic green is insufficient."""
+    try:
+        head = head or git(["rev-parse", "HEAD"])
+        if not re.fullmatch(r"[0-9a-f]{40}", head):
+            raise KernelError("invalid capability head")
+        slug = repo_slug()
+        data = gh_json([
+            "api", f"repos/{slug}/commits/{head}/check-runs?per_page=100&filter=latest",
+        ], timeout=CAPABILITY_TIMEOUT_SECONDS)
+        return coderabbit_check_capability(data, head, datetime.now(timezone.utc))
+    except KernelError:
+        return {"state": UNAVAILABLE, "reason": "capability-unreadable-or-timed-out"}
+
+
+def registered_external_states(
+    names: tuple[str, ...] | None = None, *, head: str | None = None
+) -> dict[str, str]:
+    names = repository_label_names() if names is None else names
+    states = {service: UNAVAILABLE for service in EXTERNAL_REVIEWERS}
+    if "coderabbit" in registered_external_reviewers(names):
+        states["coderabbit"] = coderabbit_capability(head)["state"]
+    return states
 
 
 def external_decision(
@@ -120,6 +140,8 @@ def external_decision(
     observed_at: datetime,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> tuple[str, int | None]:
+    if authority in RETIRED_EXTERNAL_REVIEWERS:
+        return "external-retired", None
     slug = repo_slug()
     reviews = gh_paginated(f"repos/{slug}/pulls/{number}/reviews?per_page=100")
     comments = gh_paginated(f"repos/{slug}/issues/{number}/comments?per_page=100")
@@ -155,6 +177,12 @@ def external_decision(
     if state == AVAILABLE:
         return "external-available", None
     if state == PENDING and age < timeout_seconds:
+        capability = coderabbit_check_capability(
+            {"total_count": len(checks), "check_runs": checks},
+            str(pr["headRefOid"]), observed_at, timeout_seconds,
+        )
+        if capability["state"] != AVAILABLE:
+            return "external-unavailable", None
         return "external-pending", timeout_seconds - int(age)
     reason = "external-unavailable" if state == UNAVAILABLE else "external-pending-timeout"
     return reason, None
@@ -162,7 +190,7 @@ def external_decision(
 
 def default_review_policy(registered: Iterable[str]) -> ReviewPolicy:
     registered = set(registered)
-    installed = tuple(service for service in EXTERNAL_REVIEWERS if service in registered)
+    installed = tuple(service for service in ACTIVE_EXTERNAL_REVIEWERS if service in registered)
     return ReviewPolicy(
         external_reviewers=installed,
         coding_fallbacks=CODING_REVIEWERS,
@@ -316,8 +344,8 @@ def probe_coding_reviewer(
     author_identity = normalized_identity(author_identity)
     author_actor = canonical_github_actor(author_actor)
     excluded = {normalized_identity(identity) for identity in excluded_identities}
+    candidates: list[CodingCandidate] = []
     for family in order:
-        candidates: list[CodingCandidate] = []
         for identity, subscription in configured.get(family, ()):
             actor = str(actors.get(identity) or "").lower()
             candidate: CodingCandidate = (family, identity, actor, subscription)
@@ -328,10 +356,11 @@ def probe_coding_reviewer(
                 and not same_github_actor(actor, author_actor)
             ):
                 candidates.append(candidate)
-        available = available_coding_reviewers(candidates, runner=runner)
-        if available:
-            family, identity, actor = available[rotation_key % len(available)]
-            return family, identity, actor
+    available = available_coding_reviewers(candidates, runner=runner)
+    for family in order:
+        matching = [candidate for candidate in available if candidate[0] == family]
+        if matching:
+            return matching[rotation_key % len(matching)]
     return None
 
 
@@ -399,11 +428,12 @@ def select_reviewer_from_pool(
     external_pool = [
         (service, None, None)
         for service in policy.external_reviewers
-        if external_states.get(service) in {AVAILABLE, PENDING}
+        if service in ACTIVE_EXTERNAL_REVIEWERS
+        and external_states.get(service) == AVAILABLE
         and reviewer_candidate_key(service) not in excluded
     ]
     if external_pool:
-        return external_pool[number % len(external_pool)]
+        return external_pool[0]
     if not os.environ.get(REVIEWER_CONFIG_ENV, "").strip():
         return None
     if not author_actor:
@@ -439,6 +469,7 @@ def reviewer_status(
     errors: list[str] = []
     warnings: list[str] = []
     required_families = set(policy.coding_fallbacks)
+    capability = coderabbit_capability() if probe and "coderabbit" in registered else {"state": "unprobed", "reason": "not-requested"}
     configured = {}
     if os.environ.get(REVIEWER_CONFIG_ENV, "").strip():
         try:
@@ -484,19 +515,20 @@ def reviewer_status(
                     "probe": probe_state,
                 }
             )
-    configured_families = {str(item["family"]) for item in coding}
-    for family in sorted(required_families - configured_families):
-        errors.append(f"policy coding authority {family} has no local configured identity")
+    if required_families and not any(item["eligible"] for item in coding):
+        errors.append("no eligible independent coding fallback is configured")
     return {
-        "schema": "aru.reviewer-status/v2",
+        "schema": "aru.reviewer-status/v3",
         "valid": not errors,
         "policy": policy.as_dict(),
+        "coderabbit_capability": capability,
+        "review_evidence": {"assignment": "not-inspected", "execution": "not-inspected", "current_head_verdict": "not-inspected"},
         "external_reviewers": [
             {
                 "service": service,
-                "registered": service in registered,
-                "policy_role": "equal" if service in policy.external_reviewers else "unregistered",
-                "availability": "observed-on-pr" if service in registered else "unregistered",
+                "registered": REVIEW_REGISTRATION_PREFIX + service in names,
+                "policy_role": ("retired" if service in RETIRED_EXTERNAL_REVIEWERS else "preferred" if service in registered else "unregistered"),
+                "availability": "retired" if service in RETIRED_EXTERNAL_REVIEWERS else "unprobed" if service in registered else "unregistered",
             }
             for service in EXTERNAL_REVIEWERS
         ],
@@ -506,8 +538,8 @@ def reviewer_status(
             "author_actor": normalized_author_actor or None,
         },
         "configuration_sources": {
-            "repository_policy": "equal pool plus optional GitHub review-policy:timeout label",
-            "external_registration": "GitHub reviewer-registered:* labels define the equal pool",
+            "repository_policy": "CodeRabbit-first plus optional GitHub review-policy:timeout label",
+            "external_registration": "GitHub reviewer-registered:coderabbit; Sourcery and CodeAnt retired",
             "coding_inventory": REVIEWER_CONFIG_ENV,
             "reviewer_bindings": f"GitHub {REVIEW_BINDING_PREFIX}* label definitions",
             "runtime_availability": "bounded on-demand probe" if probe else "not probed",

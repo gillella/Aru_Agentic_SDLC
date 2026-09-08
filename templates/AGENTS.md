@@ -28,14 +28,18 @@ distinct authoritative review. Unrecognized safe paths fail upward to Tier 2;
 empty, malformed, or unsafe paths fail to Tier 3. Consumer policy may add
 controls but must not downgrade the Kernel tier.
 
-For Tier 2-3, every `reviewer-registered:<service>` external provider belongs to
-one equal pool. The issue number rotates the initial assignment; unavailable
-services are not retried on the same head, and Claude Code, OpenAI Codex, xAI
-Cursor, and Google Antigravity are borrowed only after that pool is exhausted.
-The optional `review-policy:timeout=<seconds>` label defaults to 120 seconds.
-Inspect the effective policy with `create_pr.py --reviewer-status --json`;
-ranked or invalid declarations fail closed. Remove a registration label only
-when external access ends.
+For Tier 2-3, CodeRabbit is the sole preferred external provider. Sourcery and
+CodeAnt are retired: registration and historical evidence never make them
+eligible for new assignments. Use one bounded authenticated check for usable
+CodeRabbit access to the current repository/head. If access is denied, errored,
+rate-limited, unavailable or unproven, immediately select an available distinct
+coding reviewer; never wait through retired providers. Generic green checks,
+cached installation inventory and empty/skipped reviews are not approval.
+The optional `review-policy:timeout=<seconds>` is a completion deadline only
+for an accepted review (default 900 seconds, informed by the observed 11-minute
+CodeRabbit review). Explicit unavailability bypasses it. Ranked declarations
+remain invalid. Use `create_pr.py --refresh-reviewer <PR>` to migrate a retired
+assignment; do not hand-edit authority or erase prior findings/history.
 
 The installed skills are exactly `init-agent-project`, `create-github-issue`,
 `triage-backlog`, `implement-next-issue`, `remediate-ci-failure`, and

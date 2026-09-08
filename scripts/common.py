@@ -29,7 +29,9 @@ REVIEW_REGISTRATION_PREFIX = "reviewer-registered:"
 REVIEW_BINDING_PREFIX = "reviewer-binding:"
 AUTHOR_PREFIX = "author:"
 AUTHOR_FAMILY_PREFIX = "author-family:"
-EXTERNAL_REVIEWERS = ("coderabbit", "sourcery", "codeant")
+EXTERNAL_REVIEWERS = ("coderabbit", "sourcery", "codeant")  # historical evidence remains readable
+ACTIVE_EXTERNAL_REVIEWERS = ("coderabbit",)
+RETIRED_EXTERNAL_REVIEWERS = ("sourcery", "codeant")
 CODING_REVIEWERS = ("claude-code", "openai-codex", "xai-cursor", "google-antigravity")
 REVIEWER_CONFIG_ENV = "ARU_CODING_REVIEWERS"
 REVIEW_AUTHORITIES = EXTERNAL_REVIEWERS + CODING_REVIEWERS
@@ -41,6 +43,8 @@ REVIEW_UNAVAILABLE_RE = re.compile(
     r"rate[ -]?limit(?:ed|ing)?|reviews? paused|provider outage|service outage|"
     r"unsupported bot(?:-authored)? pr|cannot review|unable to review|"
     r"payment required|insufficient credits?|capacity exhausted|"
+    r"access (?:denied|expired)|private repositor(?:y|ies).{0,80}(?:expired|upgrade)|"
+    r"subscription (?:expired|ended)|trial (?:has )?expired|"
     r"cost (?:limit|quota|cap) (?:reached|exceeded)|"
     r"reviews? (?:was )?(?:skipped|not performed)|skipping (?:the )?(?:pr )?review|"
     r"no[- ]?op(?: review)?|bot author (?:is |was )?detected|not eligible for review)\b)",
@@ -276,7 +280,7 @@ def _redact_diagnostic(value: str) -> str:
 
 def run(
     argv: Iterable[str], *, cwd: str | Path | None = None, check: bool = True,
-    input_text: str | None = None, auth: str | None = None,
+    input_text: str | None = None, auth: str | None = None, timeout: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = [str(part) for part in argv]
     environment = None
@@ -284,7 +288,10 @@ def run(
         command, environment = _github_command(command[1:], auth, cwd)
     elif auth is not None:
         raise KernelError("GitHub authority was provided for a non-GitHub command")
-    result = subprocess.run(command, cwd=cwd, env=environment, input=input_text, text=True, capture_output=True, check=False)
+    try:
+        result = subprocess.run(command, cwd=cwd, env=environment, input=input_text, text=True, capture_output=True, check=False, **({"timeout": timeout} if timeout is not None else {}))
+    except subprocess.TimeoutExpired as exc:
+        raise KernelError("bounded command timed out") from exc
     result = subprocess.CompletedProcess(result.args, result.returncode, _redact_diagnostic(result.stdout or ""), _redact_diagnostic(result.stderr or ""))
     if result.returncode:
         _raise_if_quota(result.stdout, result.stderr)
@@ -312,8 +319,8 @@ def _raise_if_graphql_quota(data: Any) -> None:
     _raise_if_quota(*blobs)
 
 
-def gh_json(args: Iterable[str], *, cwd: str | Path | None = None, auth: str | None = None) -> Any:
-    result = run(["gh", *args], cwd=cwd, auth=auth)
+def gh_json(args: Iterable[str], *, cwd: str | Path | None = None, auth: str | None = None, timeout: float | None = None) -> Any:
+    result = run(["gh", *args], cwd=cwd, auth=auth, **({"timeout": timeout} if timeout is not None else {}))
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError as exc:

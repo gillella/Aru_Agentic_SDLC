@@ -255,7 +255,7 @@ def recover_coding_authority(
     if len(reason) < 10:
         raise KernelError("coding reviewer unavailability reason is too short")
     effective = policy or load_repository_review_policy()[0]
-    states = external_states if external_states is not None else registered_external_states()
+    states = external_states if external_states is not None else registered_external_states(head=str(pr["headRefOid"]))
     previous_reviewer = _one_label_value(pr, REVIEWER_PREFIX)
     selected = select_reviewer_from_pool(
         effective,
@@ -329,7 +329,7 @@ def assign_missing_authority(
     author_identity = _one_label_value(pr, AUTHOR_PREFIX)
     author_family = _one_label_value(pr, AUTHOR_FAMILY_PREFIX)
     effective = policy or load_repository_review_policy()[0]
-    states = external_states if external_states is not None else registered_external_states()
+    states = external_states if external_states is not None else registered_external_states(head=str(pr["headRefOid"]))
     authority, identity, actor = choose_initial_reviewer(
         number,
         author_identity,
@@ -384,7 +384,7 @@ def _refresh_external_authority(
             result["next_action"] = "refresh-reviewer"
         return result
 
-    states = external_states if external_states is not None else registered_external_states()
+    states = external_states if external_states is not None else registered_external_states(head=str(pr["headRefOid"]))
     author_identity = _one_label_value(pr, AUTHOR_PREFIX)
     author_family = _one_label_value(pr, AUTHOR_FAMILY_PREFIX)
     selected = select_reviewer_from_pool(
@@ -436,7 +436,7 @@ def _refresh_external_authority(
             datetime.now(timezone.utc),
             effective.timeout_seconds,
         )
-        if confirmed not in {"external-unavailable", "external-pending-timeout"}:
+        if confirmed not in {"external-unavailable", "external-pending-timeout", "external-retired"}:
             raise KernelError(f"external reviewer recovered before fallback: {confirmed}")
 
     replace_authority(
@@ -483,7 +483,7 @@ def refresh_assignment(
     if policy is None:
         policy, names = load_repository_review_policy()
         if external_states is None:
-            external_states = registered_external_states(names)
+            external_states = registered_external_states(names, head=str(pr["headRefOid"]))
     authority = _optional_authority(pr)
     if authority is None:
         if coding_unavailable_reason:
@@ -732,7 +732,7 @@ def main() -> int:
             )
             policy = result["policy"]
             plain_output = (
-                "review policy: equal external pool "
+                "review policy: CodeRabbit-first "
                 f"{', '.join(policy['external_reviewers']) or 'none'}; "
                 "coding fallback "
                 f"{', '.join(policy['coding_fallbacks']) or 'none'} "

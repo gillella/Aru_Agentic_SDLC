@@ -28,3 +28,8 @@ push, the external Driver owns the one review-continuation event defined in
 or the configured policy timeout. If substantive coding review aborts or loses
 capacity, report the truthful reason through
 `create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable <reason>`.
+
+Retire Sourcery and CodeAnt. Prefer usable authenticated current-head CodeRabbit;
+otherwise immediately select an available independent coding reviewer through
+the governed refresh helper. A failed availability check does not wait for the
+completion timer. Preserve Tier 0–1 without authoritative-review waits.

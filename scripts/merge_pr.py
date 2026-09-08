@@ -13,7 +13,7 @@ from typing import Any
 from check_ci import ci_verdict, check_name, check_state
 from common import (
     AUTHOR_FAMILY_PREFIX, AUTHOR_PREFIX, CODING_REVIEWERS, REVIEW_PREFIX,
-    REVIEWER_ACTOR_PREFIX, REVIEWER_PREFIX, REVIEW_AUTHORITIES, REVIEW_SERVICES,
+    REVIEWER_ACTOR_PREFIX, REVIEWER_PREFIX, REVIEW_AUTHORITIES, REVIEW_SERVICES, RETIRED_EXTERNAL_REVIEWERS,
     KernelError, gh_paginated, gh_json, json_print, label_names, same_github_actor,
     review_risk_tier, review_evidence_unavailable, repo_slug, run,
 )
@@ -94,6 +94,8 @@ def assigned_service(pr: dict[str, Any]) -> str:
     if len(labels) != 1:
         raise KernelError("PR must have exactly one review:<authority> label")
     service = labels[0][len(REVIEW_PREFIX) :]
+    if service in RETIRED_EXTERNAL_REVIEWERS:
+        raise KernelError("retired review authority; run create_pr.py --refresh-reviewer")
     if service not in REVIEW_AUTHORITIES:
         raise KernelError(f"unsupported review authority: {service}")
     reviewer_labels = [
@@ -281,7 +283,6 @@ def _valid_codeant_record(record: Any) -> bool:
         return False
     return isinstance(record.get("done"), bool)
 
-
 def parse_codeant_status_payload(
     comment: dict[str, Any],
 ) -> tuple[bool, list[dict[str, Any]] | None]:
@@ -305,7 +306,6 @@ def parse_codeant_status_payload(
     if any(not _valid_codeant_record(record) for record in payload):
         return False, None
     return True, payload
-
 
 def validate_codeant_status_comments(
     comments: list[dict[str, Any]], head: str, assigned_at: datetime
@@ -565,9 +565,10 @@ def exact_head_review(
         return False
     if _successful_service_review(reviews, head, service, assigned_at):
         return True
+    if service == "coderabbit":
+        return False  # green/no-op check is not a substantive current-head verdict
     if service == "codeant":
-        if successful_codeant_status_review(head, reviews, comments, assigned_at):
-            return True
+        return successful_codeant_status_review(head, reviews, comments, assigned_at)
     return successful_service_check(pr, service, checks, assigned_at)
 
 

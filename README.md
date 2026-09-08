@@ -3,7 +3,7 @@
 > A small, fail-closed rules-and-guidelines kernel that moves one approved
 > GitHub issue to one safely merged pull request.
 
-**Project status: Stable and ready for consumer adoption — v1.0.0
+**Project status: v2.0.0 reviewer-policy source candidate
 (2026-09-01).** Future kernel improvements should originate in evidence from
 real governed consumer projects.
 
@@ -72,7 +72,7 @@ The source of truth stays deliberately small:
 
 ## Is it usable for another project?
 
-**Yes, with explicit prerequisites.** Version 1.0.0 can govern a new project or
+**Yes, with explicit prerequisites.** The current source contract can govern a new project or
 be migrated into an existing project when all of these are true:
 
 - Git, Python 3.11+, and an authenticated GitHub CLI are available.
@@ -251,26 +251,28 @@ review. Tier 2 sensitive/contract and Tier 3 production/destructive changes
 require one current-head authority distinct from the author. Unknown or
 unrecognized safe paths fail upward to Tier 2; malformed or unsafe paths fail
 to Tier 3. Installed external providers require
-`reviewer-registered:<service>`; every registered external provider is an equal
-member of the specialized-review pool. Eligible coding identities require a
-binding to a distinct GitHub actor. The only optional repository policy setting
-is the pending timeout:
+`reviewer-registered:coderabbit`. Coding identities require a binding to a
+GitHub actor distinct from the author.
 
-```text
-review-policy:timeout=120
-```
+For Tier 2-3, CodeRabbit is the sole preferred external provider. Sourcery and
+CodeAnt are retired: registration and historical evidence never make them
+eligible for new assignments. Use one bounded authenticated check for usable
+CodeRabbit access to the current repository/head. If access is denied, errored,
+rate-limited, unavailable or unproven, immediately select an available distinct
+coding reviewer; never wait through retired providers. Generic green checks,
+cached installation inventory and empty/skipped reviews are not approval.
+The optional `review-policy:timeout=<seconds>` is a completion deadline only
+for an accepted review (default 900 seconds, informed by the observed 11-minute
+CodeRabbit review). Explicit unavailability bypasses it. Ranked declarations
+remain invalid. Use `create_pr.py --refresh-reviewer <PR>` to migrate a retired
+assignment; do not hand-edit authority or erase prior findings/history.
 
-The issue number rotates initial assignments across the registered external
-pool. A service that is unavailable, rate-limited, or timed out is not retried
-on the same head; after all registered external services are attempted, one
-distinct available coding identity may be borrowed. Ranked primary/fallback
-labels are invalid. Remove `reviewer-registered:<service>` only when access
-expires or the integration is uninstalled.
-
-Inspect the effective policy and configuration sources without mutation with
-`create_pr.py --reviewer-status --json`; add `--probe-reviewers` only for
-bounded local coding-provider liveness checks. Coding subscriptions remain in
-machine-local `ARU_CODING_REVIEWERS`.
+Inspect `create_pr.py --reviewer-status --json` for v3 configuration/status;
+`--probe-reviewers` adds bounded CodeRabbit current-head App evidence and coding
+liveness checks. A new head without usable App evidence immediately uses coding
+fallback. Coding subscriptions remain machine-local in `ARU_CODING_REVIEWERS`.
+This v2 source-policy migration changes the v1 provider behavior; retain old
+release tags and pin consumer reconciliation to the verified merged source.
 
 The Kernel never waits or polls. For each pending Tier 2-3 authority assignment,
 an external Driver owns the single continuation event defined in the
