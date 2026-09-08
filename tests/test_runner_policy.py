@@ -63,44 +63,61 @@ def test_rendering_refuses_unknown_profiles_and_leaves_no_token():
 def test_scaffold_binds_the_workflow_and_instructions_to_one_profile(tmp_path, profile, runs_on, absent):
     init_project.scaffold("consumer", tmp_path, runner_profile=profile)
     raw = (tmp_path / ".github/workflows/governed-pr.yml").read_text(encoding="utf-8")
-    workflow = yaml.safe_load(raw)
-    assert workflow["jobs"]["governed-pr"]["runs-on"] == runs_on
-    assert f"# aru-runner-profile: {profile}" in raw
-    assert absent not in raw
+    job = yaml.safe_load(raw)["jobs"]["governed-pr"]
+    assert (job["runs-on"], job["name"]) == (runs_on, "aru-governed-pr")
+    assert f"# aru-runner-profile: {profile}" in raw and absent not in raw
     # Profile-independent guarantees survive in both renderings.
-    assert workflow["permissions"] == {"contents": "read", "issues": "read", "pull-requests": "read"}
-    assert workflow["jobs"]["governed-pr"]["name"] == "aru-governed-pr"
-    assert "bash .aru/verify.sh" in raw
-    assert '--expected-head "$ARU_EXPECTED_HEAD"' in raw
+    assert yaml.safe_load(raw)["permissions"] == {"contents": "read", "issues": "read", "pull-requests": "read"}
+    assert "bash .aru/verify.sh" in raw and '--expected-head "$ARU_EXPECTED_HEAD"' in raw
     assert profile in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
 
 
-def test_repository_creation_refuses_a_cross_account_profile(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("owner", "message"),
+    [
+        # gh created the repository in Unum-Inc: stop before labels, Project or ruleset.
+        ("gillella", "created outside the requested account gillella"),
+        # A matching owner still cannot provision a workflow bound to the other profile.
+        ("Unum-Inc", "not assigned the self-hosted-mac runner profile"),
+        ("", "unsafe GitHub owner"), ("bad/owner", "unsafe GitHub owner"), ("-dash", "unsafe GitHub owner"),
+    ],
+)
+def test_repository_creation_refuses_a_cross_account_profile(monkeypatch, tmp_path, owner, message):
+    calls = []
+
     def fake_command(argv, *, cwd, json_output=False, auth=None):
-        if argv[:3] == ["gh", "repo", "view"]:
-            return {"nameWithOwner": "Unum-Inc/consumer"}
-        return ""
+        calls.append(list(argv))
+        return {"nameWithOwner": "Unum-Inc/consumer"} if argv[:3] == ["gh", "repo", "view"] else ""
 
     monkeypatch.setattr(init_project, "command", fake_command)
-    with pytest.raises(BootstrapError, match="not assigned the self-hosted-mac runner profile"):
-        init_project.github_setup("consumer", tmp_path, private=True, runner_profile=MAC)
+    with pytest.raises(BootstrapError, match=message):
+        init_project.github_setup("consumer", tmp_path, private=True, owner=owner, runner_profile=MAC)
+    assert not any(call[:3] == ["gh", "label", "create"] for call in calls)
+
+
+def test_github_bootstrap_requires_an_owner(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(init_project, "scaffold", lambda *a, **k: pytest.fail("must fail before scaffold"))
+    argv = ["init_project.py", "--name", "consumer", "--directory", str(tmp_path), "--github", "--runner-profile", MAC]
+    monkeypatch.setattr("sys.argv", argv)
+    with pytest.raises(SystemExit):
+        init_project.main()
+    assert "--github requires --owner" in capsys.readouterr().err
 
 
 def _verify(tmp_path, profile, mutate=None):
     """Scaffold one profile, optionally corrupt the workflow, then verify."""
-    run = {"cwd": tmp_path, "check": True, "capture_output": True}
-    subprocess.run(["git", "init", "-b", "main"], **run)
-    subprocess.run(["git", "config", "user.name", "Test"], **run)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], **run)
+    def git(*args):
+        subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
+    git("init", "-b", "main")
+    git("config", "user.name", "Test")
+    git("config", "user.email", "test@example.com")
     init_project.scaffold("consumer", tmp_path, runner_profile=profile)
     workflow = tmp_path / ".github/workflows/governed-pr.yml"
     if mutate is not None:
         workflow.write_text(mutate(workflow.read_text(encoding="utf-8")), encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
-    return subprocess.run(
-        ["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False
-    )
+    git("add", ".")
+    git("commit", "-m", "init")
+    return subprocess.run(["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False)
 
 
 @pytest.mark.parametrize("profile", [MAC, HOSTED])
@@ -113,12 +130,16 @@ def test_verification_accepts_the_workflow_of_its_declared_profile(tmp_path, pro
 @pytest.mark.parametrize(
     ("profile", "old", "new", "message"),
     [
-        # The declared profile and the actual compute target must agree.
+        # The declared profile and the ACTIVE compute target must agree; commented copies,
+        # generic self-hosted targets and additional runners are refused.
         (MAC, MAC_RUNS_ON, "runs-on: ubuntu-latest", "self-hosted-mac runner profile requires exactly"),
         (HOSTED, "runs-on: ubuntu-latest", MAC_RUNS_ON, "github-hosted runner profile requires exactly"),
-        # A hosted repository must never reach a personal machine.
+        (MAC, "timeout-minutes: 20", "runs-on: ubuntu-latest\n    timeout-minutes: 20", "requires exactly one active"),
+        (MAC, MAC_RUNS_ON, f"# {MAC_RUNS_ON}\n    runs-on: self-hosted", "requires exactly one active"),
+        (MAC, MAC_RUNS_ON, f"{MAC_RUNS_ON} # {MAC_RUNS_ON}\n    runs-on: [self-hosted, linux]", "requires exactly one active"),
+        (HOSTED, "runs-on: ubuntu-latest", "# runs-on: ubuntu-latest\n    runs-on: ubuntu-22.04", "requires exactly one active"),
+        # A hosted repository must never reach a personal machine, even in a comment.
         (HOSTED, "timeout-minutes: 20", "timeout-minutes: 20 # self-hosted", "must not contain: self-hosted"),
-        (MAC, "timeout-minutes: 20", "runs-on: ubuntu-latest\n    timeout-minutes: 20", "must not contain: runs-on:"),
         # An unknown, absent or duplicated declaration fails closed.
         (MAC, MARKER_MAC, "# aru-runner-profile: ubuntu", "unknown runner profile: ubuntu"),
         (MAC, MARKER_MAC + "\n", "", "exactly one '# aru-runner-profile:' line"),

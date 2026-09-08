@@ -161,8 +161,9 @@ the expected profile; a declaration that contradicts the account is refused.
 Add `--github --private` when you also want the helper to create a private
 GitHub repository, labels, linked Project Board, and a minimal ruleset with no
 configured bypass actors that requires `aru-governed-pr` from GitHub Actions.
-Repository creation revalidates the created owner against the scaffolded
-profile and refuses the rest of provisioning if they disagree. On
+`--github` requires `--owner`: the repository is created as `OWNER/NAME`, and
+provisioning stops if it lands in any other account or the created owner is not
+assigned the scaffolded profile. On
 `self-hosted-mac` the generated workflow runs only on repository-level
 Apple-silicon macOS runners labeled `aru-ci`; register one before admitting
 work. The helper writes the governance scaffold but does not commit or push it.

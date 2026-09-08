@@ -347,16 +347,18 @@ def provision_ruleset(slug: str, directory: Path) -> dict[str, object] | str:
 
 
 def github_setup(
-    name: str, directory: Path, private: bool, *, runner_profile: str
+    name: str, directory: Path, private: bool, *, owner: str, runner_profile: str
 ) -> dict[str, object]:
     profile_spec(runner_profile)
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", owner):
+        raise BootstrapError(f"unsafe GitHub owner: {owner!r}")
     visibility = "--private" if private else "--public"
     command(
         [
             "gh",
             "repo",
             "create",
-            name,
+            f"{owner}/{name}",
             visibility,
             "--source",
             str(directory),
@@ -371,9 +373,15 @@ def github_setup(
         json_output=True,
     )
     slug = view["nameWithOwner"]
+    # Labels, the Project and the ruleset must land in the requested account, not
+    # wherever the authenticated login happened to create the repository.
+    created_owner = slug.split("/", 1)[0]
+    if created_owner.casefold() != owner.casefold():
+        raise BootstrapError(
+            f"{slug} was created outside the requested account {owner}; provisioning stopped"
+        )
     # The scaffolded workflow is already bound to one profile. Refuse the rest of
     # provisioning when the account it actually landed in is assigned another.
-    created_owner = slug.split("/", 1)[0]
     if account_runner_profile(created_owner) != runner_profile:
         raise BootstrapError(
             f"{slug} belongs to {created_owner}, which is not assigned the "
@@ -472,11 +480,14 @@ def main() -> int:
     parser.add_argument("--runner-profile", choices=sorted(RUNNER_PROFILES))
     args = parser.parse_args()
     try:
+        if args.github and args.owner is None:
+            raise BootstrapError("--github requires --owner to name the account that owns the repository")
         profile = resolve_runner_profile(args.owner, args.runner_profile)
         written = scaffold(args.name, args.directory, runner_profile=profile)
         remote = (
             github_setup(
-                args.name, args.directory.resolve(), args.private, runner_profile=profile
+                args.name, args.directory.resolve(), args.private,
+                owner=args.owner, runner_profile=profile,
             )
             if args.github
             else None

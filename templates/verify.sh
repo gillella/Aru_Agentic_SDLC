@@ -209,8 +209,13 @@ if [ -f "${governance_flag}" ]; then
       fail "governed workflow declares an unknown runner profile: ${profile}"
       ;;
   esac
-  grep -Fq "${expected_runs_on}" "${workflow}" \
-    || fail "the ${profile} runner profile requires exactly: ${expected_runs_on}"
+  # Validate the active runs-on value, not any text occurrence: a commented copy
+  # of the expected target must not license a different or additional runner.
+  active_runs_on="$(sed -E 's/[[:space:]]*#.*$//' "${workflow}" \
+    | grep -E '^[[:space:]]*runs-on:' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | sort -u || true)"
+  [ "${active_runs_on}" = "${expected_runs_on}" ] \
+    || fail "the ${profile} runner profile requires exactly one active ${expected_runs_on}"
   grep -Fq 'name: aru-governed-pr' "${workflow}" \
     || fail "governed workflow must publish the aru-governed-pr check name"
   grep -Fq 'bash .aru/verify.sh' "${workflow}" \

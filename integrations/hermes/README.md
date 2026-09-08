@@ -50,18 +50,19 @@ Clear history only when retiring the profile and its event routes. These are
 delivery identities, never issue lifecycle state.
 
 `max_workers` bounds project concurrency. `max_review_backlog` bounds open PRs
-and queued verification work before new admission. Unknown CI evidence,
+and, separately, the repository's queued GitHub Actions workflow runs before new
+admission; every queued run counts, not only governed verification. Unknown CI evidence,
 unresolved dependency, `needs-human`, `needs-design`, or overlapping write
 boundary blocks new work. Existing work and PR convergence receive attention
 before new claims.
 
 How verification capacity is proven depends on the project's runner profile,
 derived from its account: `gillella` is `self-hosted-mac` and `Unum-Inc` is
-`github-hosted`. A project may also declare `runner_profile` explicitly; an
-unknown name, or one contradicting its account's assignment, is refused when
-the configuration loads. An account with neither an assignment nor a
-declaration has no profile, and admission stays blocked rather than borrowing
-another account's runners.
+`github-hosted`. A project may also declare `runner_profile` explicitly, but
+only to confirm its account's assignment: an unknown name, a name contradicting
+the assignment, or any declaration for an account outside the table is refused
+when the configuration loads. An unassigned account has no profile, and
+admission stays blocked rather than borrowing another account's runners.
 
 - `self-hosted-mac` reads the repository's self-hosted runner inventory and
   requires at least one online runner carrying all of `self-hosted`, `macOS`,

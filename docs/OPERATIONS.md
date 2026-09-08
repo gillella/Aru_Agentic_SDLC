@@ -371,11 +371,12 @@ Passing both is allowed and asserts agreement — `--owner gillella
 --runner-profile github-hosted` is refused rather than silently moving a
 personal repository off the Macs.
 
-With `--github`, the helper creates the GitHub repository, labels, a linked
-Project, the five status choices, and a minimal default-branch ruleset with no
-configured bypass actors that requires `aru-governed-pr` from GitHub Actions.
-It then rereads the created repository's actual owner and refuses the remaining
-provisioning if that account is not assigned the profile already scaffolded
+With `--github`, the helper creates the GitHub repository as `OWNER/NAME`
+(`--owner` is mandatory here), labels, a linked Project, the five status
+choices, and a minimal default-branch ruleset with no configured bypass actors
+that requires `aru-governed-pr` from GitHub Actions. It then rereads the created
+repository's actual owner and refuses the remaining provisioning if it differs
+from the requested account or is not assigned the profile already scaffolded
 into the workflow. On `self-hosted-mac` the generated workflow targets only
 repository-level Apple-silicon macOS runners labeled `aru-ci`; register at
 least one before admitting work. On `github-hosted` no runner registration is

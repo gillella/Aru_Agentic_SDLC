@@ -71,32 +71,22 @@ def test_ruleset_requires_the_server_exact_head_check_and_no_bypass():
 def test_kernel_workflow_is_read_only_exact_head_and_immutable():
     path = init_project.Path(__file__).resolve().parents[1] / ".github/workflows/governed-pr.yml"
     workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
-    assert workflow["permissions"] == {
-        "contents": "read",
-        "issues": "read",
-        "pull-requests": "read",
-    }
+    assert workflow["permissions"] == {"contents": "read", "issues": "read", "pull-requests": "read"}
     job = workflow["jobs"]["governed-pr"]
     assert job["name"] == "aru-governed-pr"
     assert job["runs-on"] == ["self-hosted", "macOS", "ARM64", "aru-ci"]
     preflight = job["steps"][0]
     assert preflight["name"] == "Validate self-hosted runner trust boundary"
     assert "ARU_HEAD_REPOSITORY" in preflight["env"]
-    assert "command -v python3" in preflight["run"]
-    assert "command -v gh" in preflight["run"]
+    assert "command -v python3" in preflight["run"] and "command -v gh" in preflight["run"]
     checkout = job["steps"][1]
-    assert checkout["with"]["ref"] == ("${{ github.event.pull_request.head.sha || github.sha }}")
-    assert checkout["uses"].startswith("actions/checkout@")
-    assert len(checkout["uses"].split("@", 1)[1]) == 40
+    assert checkout["with"]["ref"] == "${{ github.event.pull_request.head.sha || github.sha }}"
+    assert checkout["uses"].startswith("actions/checkout@") and len(checkout["uses"].split("@", 1)[1]) == 40
     assert checkout["with"]["persist-credentials"] is False
     raw = path.read_text(encoding="utf-8")
-    assert "merge_group:" in raw
-    assert "github.event_name == 'pull_request'" in raw
-    assert "pull_request_target" not in raw
-    assert "ubuntu-latest" not in raw
-    assert "actions/upload-artifact" not in raw
-    assert "actions/setup-python" not in raw
-    assert "cache:" not in raw
+    assert "merge_group:" in raw and "github.event_name == 'pull_request'" in raw
+    for absent in ("pull_request_target", "ubuntu-latest", "actions/upload-artifact", "actions/setup-python", "cache:"):
+        assert absent not in raw
 
 
 def test_scaffold_creates_only_minimal_governance(tmp_path):
@@ -203,39 +193,34 @@ def test_project_name_is_contained(name):
 
 
 def test_github_setup_marks_project_graphql_authority(monkeypatch, tmp_path):
-    calls = []
-    rulesets = []
+    calls, rulesets = [], []
+    responses = {
+        ("gh", "repo", "view"): {"nameWithOwner": "gillella/consumer"},
+        ("gh", "project", "create"): {"number": 5, "url": "https://example.test/project/5"},
+        ("gh", "project", "field-list"): {"fields": [{"name": "Status", "id": "PVTSSF_1"}]},
+    }
 
     def fake_command(argv, *, cwd, json_output=False, auth=None):
         calls.append((argv, auth))
-        if argv[:3] == ["gh", "repo", "view"]:
-            return {"nameWithOwner": "gillella/consumer"}
-        if argv[:3] == ["gh", "project", "create"]:
-            return {"number": 5, "url": "https://example.test/project/5"}
-        if argv[:3] == ["gh", "project", "field-list"]:
-            return {"fields": [{"name": "Status", "id": "PVTSSF_1"}]}
         if argv[:3] == ["gh", "api", "repos/gillella/consumer/rulesets"]:
             input_path = argv[argv.index("--input") + 1]
             rulesets.append(init_project.json.loads(init_project.Path(input_path).read_text()))
             return {"_links": {"html": {"href": "https://example.test/rules/1"}}}
-        return ""
+        return responses.get(tuple(argv[:3]), "")
+
+    def calls_with(*prefix):
+        return [call for call in calls if call[0][: len(prefix)] == list(prefix)]
 
     monkeypatch.setattr(init_project, "command", fake_command)
-
     result = init_project.github_setup(
-        "consumer", tmp_path, private=True, runner_profile="self-hosted-mac"
+        "consumer", tmp_path, private=True, owner="gillella", runner_profile="self-hosted-mac"
     )
-
-    graphql_calls = [call for call in calls if call[0][:3] == ["gh", "api", "graphql"]]
     assert result["repository"] == "gillella/consumer"
-    assert len(graphql_calls) == 1
-    assert graphql_calls[0][1] == init_project.PROJECT_AUTH
+    assert [call[0][3] for call in calls_with("gh", "repo", "create")] == ["gillella/consumer"]
+    assert [auth for _, auth in calls_with("gh", "api", "graphql")] == [init_project.PROJECT_AUTH]
     assert rulesets == [init_project.ruleset_payload()]
-    ruleset_calls = [
-        call for call in calls if call[0][:3] == ["gh", "api", "repos/gillella/consumer/rulesets"]
-    ]
-    assert len(ruleset_calls) == 1
-    assert ruleset_calls[0][1] == init_project.REPOSITORY_AUTH
+    ruleset_calls = calls_with("gh", "api", "repos/gillella/consumer/rulesets")
+    assert [auth for _, auth in ruleset_calls] == [init_project.REPOSITORY_AUTH]
     assert result["ruleset"] == "https://example.test/rules/1"
 
 
@@ -326,11 +311,7 @@ def test_scaffold_consumer_drift_fixtures_and_permissions(tmp_path):
         assert actual_hash == expected_hash, f"Hash mismatch for {relative}"
 
     # Executable permissions binding
-    executable_files = {
-        ".aru/verify.sh",
-        ".aru/hooks/pre-push",
-        ".aru/hooks/enforce_touches.py",
-    }
+    executable_files = {".aru/verify.sh", ".aru/hooks/pre-push", ".aru/hooks/enforce_touches.py"}
     for relative in written:
         dest_file = target / relative
         mode = dest_file.stat().st_mode

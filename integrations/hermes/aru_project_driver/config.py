@@ -126,7 +126,14 @@ class Config:
         if declared not in RUNNER_PROFILES:
             raise DriverError(f"{repo}: unknown runner_profile: {declared!r}")
         assigned = runner_profile_for_account(repo)
-        if assigned is not None and declared != assigned:
+        # Kernel admission derives the profile from the account table alone, so a
+        # declaration can only confirm an assignment, never substitute for one.
+        if assigned is None:
+            raise DriverError(
+                f"{repo}: runner_profile {declared} cannot be declared for an account "
+                "with no assigned profile"
+            )
+        if declared != assigned:
             raise DriverError(
                 f"{repo}: runner_profile {declared} contradicts the {assigned} "
                 "profile assigned to its account"

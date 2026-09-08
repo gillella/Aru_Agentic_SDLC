@@ -101,10 +101,12 @@ def test_unassigned_account_must_declare_a_profile(tmp_path):
         config.runner_profile(repo)
 
 
-def test_unassigned_account_may_declare_a_known_profile(tmp_path):
+@pytest.mark.parametrize("declared", ["github-hosted", "self-hosted-mac"])
+def test_unassigned_account_cannot_declare_a_profile(tmp_path, declared):
+    # Admission would block this account anyway; loading must refuse it the same way.
     repo = "someone-else/repo"
-    config = Config(write_config(tmp_path, repo=repo, runner_profile="github-hosted"))
-    assert config.runner_profile(repo) == "github-hosted"
+    with pytest.raises(DriverError, match="no assigned profile"):
+        Config(write_config(tmp_path, repo=repo, runner_profile=declared))
 
 
 def test_an_unconfigured_repository_has_no_profile(tmp_path):

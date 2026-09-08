@@ -27,9 +27,10 @@ description: Bootstrap a repository with the Aru minimal issue-to-safe-merge ker
    risk-appropriate consumer commands.
 4. If GitHub setup was requested, create or attach one Project Board with the
    five statuses: Backlog, Ready, In Progress, In Review, Done.
-5. With `--github`, confirm the minimal ruleset has no configured bypass actors
-   and requires `aru-governed-pr` from GitHub Actions; the helper also refuses
-   provisioning if the created repository's owner is not assigned the
+5. With `--github` (which requires `--owner`), confirm the minimal ruleset has
+   no configured bypass actors and requires `aru-governed-pr` from GitHub
+   Actions; the helper creates `OWNER/NAME` and refuses provisioning if the
+   repository landed in another account or that owner is not assigned the
    scaffolded profile. On `self-hosted-mac`, confirm at least one
    repository-level macOS arm64 runner with label `aru-ci` is online before
    admitting work, and that Python 3.11+, pip, and `gh` are installed on every

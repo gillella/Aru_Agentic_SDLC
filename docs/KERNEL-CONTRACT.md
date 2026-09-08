@@ -195,8 +195,9 @@ the compute is one **runner profile**, selected by the repository's account:
 The account table is exhaustive and has no default. An account outside it
 resolves to no profile, so bootstrap refuses to scaffold it and Driver
 admission stays blocked rather than borrowing another account's runners. A
-consumer may also declare its profile explicitly; a declaration that names an
-unknown profile, or contradicts its account's assignment, is refused.
+consumer may also declare its profile explicitly, but only to confirm its
+account's assignment; a declaration that names an unknown profile, contradicts
+the assignment, or belongs to an account with no assignment is refused.
 
 The profile chooses compute and its diagnostics only. Every required Kernel
 job, under either profile, keeps the `aru-governed-pr` check name, the
