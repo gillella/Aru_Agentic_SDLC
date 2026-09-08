@@ -360,6 +360,18 @@ def test_capability_transport_is_bounded_and_falls_back_on_unreadable(monkeypatc
     assert review_policy.coderabbit_capability("a" * 40)["reason"] == "no-coderabbit-evidence-yet"
     monkeypatch.setattr(review_policy, "gh_json", lambda argv, *, timeout: [{"total_count": 0, "check_runs": []}])
     assert review_policy.coderabbit_capability("a" * 40)["state"] == "unavailable"
+    observed = datetime(2026, 9, 8, 10, 0, tzinfo=timezone.utc)
+    pr = {"createdAt": observed.isoformat(), "headRefOid": "a" * 40}
+    monkeypatch.setattr(review_policy, "gh_paginated", lambda _endpoint: [])
+    for malformed in (None, {"unexpected": "malformed status record"}, {"context": [], "state": "pending"}, {"context": "CodeRabbit", "state": {}}):
+        for records in ([malformed], [cr_status("pending", "Review in progress"), malformed]):
+            def inventory(argv, **_kwargs):
+                data = records if "statuses?" in argv[-1] else {"total_count": 0, "check_runs": []}
+                return [data] if "--slurp" in argv else data
+            monkeypatch.setattr(review_policy, "gh_json", inventory)
+            assert review_policy.coderabbit_capability("a" * 40)["state"] == "unavailable"
+            with pytest.raises(create_pr.KernelError, match="commit status inventory is malformed"):
+                review_policy.external_decision(42, pr, "coderabbit", observed + timedelta(seconds=1))
 
 
 @pytest.mark.parametrize("retired", ["sourcery", "codeant"])

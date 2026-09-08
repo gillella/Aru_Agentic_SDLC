@@ -1341,6 +1341,9 @@ selects coding fallback at once. No activity yet leaves CodeRabbit eligible for
 initial assignment, since it only runs once `review:coderabbit` is applied; if
 no authentic activity appears within 120 seconds of assignment the refresh
 falls back to coding review rather than waiting out the completion deadline.
+The initial or repaired assignment's emitted `retry_at` schedules that bounded
+observation; accepted activity retains the original completion deadline.
+Malformed inventories, including mixed valid and malformed statuses, fail closed.
 The public CodeRabbit inventory API is deliberately not treated as health: its
 `is_installed` field is cached and does not prove a usable review worker.
 

@@ -111,25 +111,19 @@ def registration_states(names: Iterable[str]) -> dict[str, str]:
     }
 
 
-def _statuses(pages: Any, *, strict: bool = False) -> list[dict[str, Any]]:
-    """Flatten paginated commit-status pages down to status-shaped records.
-
-    Anything that is not a list is a transport or API failure and is refused. In
-    strict mode (the bounded capability probe) a non-empty payload with no
-    status-shaped record is also refused, so an unexpected API shape reads as
-    unreadable rather than as "no activity yet".
-    """
+def _statuses(pages: Any) -> list[dict[str, Any]]:
+    """Validate every status in a direct or paginated inventory; never drop errors."""
     if isinstance(pages, list) and all(isinstance(page, list) for page in pages):
         pages = [record for page in pages for record in page]
-    if not isinstance(pages, list):
+    if not isinstance(pages, list) or any(
+        not isinstance(record, dict)
+        or not isinstance(record.get("context"), str)
+        or not record["context"].strip()
+        or record.get("state") not in ("pending", "success", "error", "failure")
+        for record in pages
+    ):
         raise KernelError("commit status inventory is malformed")
-    statuses = [
-        record for record in pages
-        if isinstance(record, dict) and "context" in record and "state" in record
-    ]
-    if strict and pages and not statuses:
-        raise KernelError("commit status inventory is malformed")
-    return statuses
+    return pages
 
 
 def _check_runs(data: Any) -> list[dict[str, Any]]:
@@ -156,7 +150,7 @@ def coderabbit_capability(head: str | None = None) -> dict[str, str]:
         slug = repo_slug()
         statuses = _statuses(gh_json([
             "api", f"repos/{slug}/commits/{head}/statuses?per_page=100",
-        ], timeout=CAPABILITY_TIMEOUT_SECONDS), strict=True)
+        ], timeout=CAPABILITY_TIMEOUT_SECONDS))
         checks = _check_runs(gh_json([
             "api", f"repos/{slug}/commits/{head}/check-runs?per_page=100&filter=latest",
         ], timeout=CAPABILITY_TIMEOUT_SECONDS))
