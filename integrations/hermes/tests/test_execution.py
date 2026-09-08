@@ -86,12 +86,39 @@ def test_bounded_preflight_timeout_and_missing_executable_fail_closed(tmp_path):
         execution.run_bounded([str(tmp_path / "missing-command")], tmp_path)
 
 
-def test_cursor_capacity_ignores_unrelated_agent_executable(monkeypatch):
+def test_process_presence_is_diagnostic_not_exhaustion(monkeypatch):
     process = SimpleNamespace(returncode=0, stdout="42 /usr/local/bin/agent\n")
     monkeypatch.setattr(capacity.subprocess, "run", lambda *a, **k: process)
-    assert capacity.observe("xai-cursor")["available"] is True
+    assert capacity.observe("xai-cursor") == {"available": True, "reason": "no matching local agent; quota not yet probed"}
     process.stdout += "43 /usr/local/bin/cursor-agent\n"
-    assert capacity.observe("xai-cursor")["available"] is False
+    observed = capacity.observe("xai-cursor")
+    assert observed["available"] is True and observed["reason"].startswith("1 unrelated local agent")
+
+
+@pytest.mark.parametrize("environment,available", [
+    ("", True),  # desktop session without an observable CLAUDE_CONFIG_DIR
+    ("claude CLAUDE_CONFIG_DIR=/Users/x/.config/claude-subscriptions/config-2", True),  # another profile
+    ("claude CLAUDE_CONFIG_DIR=/Users/x/.config/claude-subscriptions/config-1", False),  # this lane's profile
+])
+def test_only_the_lanes_own_claude_profile_vetoes(monkeypatch, environment, available):
+    def run(argv, **_kwargs):
+        if argv[:2] == ["ps", "-axo"]:
+            return SimpleNamespace(returncode=0, stdout="77 /opt/homebrew/bin/claude\n")
+        return SimpleNamespace(returncode=0, stdout=environment)
+    monkeypatch.setattr(capacity.subprocess, "run", run)
+    observed = capacity.observe("claude-code", "1")
+    assert observed["available"] is available
+    if not available:
+        assert observed["reason"] == "managed session for profile 1 is live (pid 77)"
+
+
+def test_unreachable_observer_blocks_only_this_observation(setup, monkeypatch):
+    config, state, _ = setup
+    monkeypatch.setattr(execution, "run_bounded", lambda *args: (_ for _ in ()).throw(
+        DriverError("agent preflight unavailable: TimeoutExpired")))
+    observed = execution.availability(config, "owner/repo", "model-one", state)
+    assert observed["available"] is False and observed["reason"].startswith("observer unavailable")
+    assert state.capacity_busy("same-subscription") is False  # nothing was reserved or recorded
 
 
 @pytest.mark.parametrize("payload,returncode", [
