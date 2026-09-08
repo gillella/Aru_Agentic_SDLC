@@ -184,7 +184,21 @@ coding identities and subscriptions remain machine-local.
 registrations, bindings, and exclusions without mutation. Optional
 `--probe-reviewers` adds bounded local liveness observations. Remove retired Sourcery/CodeAnt registration definitions during operator rollout;
 retain historical review/assignment records. An active CodeRabbit registration
-is configuration, not capability proof.
+is configuration, not capability proof. Capability is read from CodeRabbit's own
+authenticated activity on the head, on either supported surface: App check runs
+(`review_progress`) or legacy commit statuses (`commit_status`, creator
+`coderabbitai[bot]`). A running or completed review within the deadline is
+usable; queued or generic success is not yet proof; denial, error, a skip after
+the review label, a stale run or a future timestamp is unavailability. No
+activity yet keeps CodeRabbit eligible for initial assignment, because it cannot
+run before that label, but an assignment with no authentic activity inside a
+120-second window falls back to coding review instead of waiting the deadline.
+Every initial or repaired assignment emits its first refresh within that window
+(or the shorter configured timeout). Only activity from the current assignment
+or a valid current-PR verdict establishes acceptance; prior same-head activity
+proves access only. Later observations do not reset the assignment's completion
+deadline. Malformed status inventories fail closed,
+including mixed valid and malformed records, rather than becoming empty activity.
 
 ## Risk-proportional consumer policy
 

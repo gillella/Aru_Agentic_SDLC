@@ -194,21 +194,23 @@ def test_configured_timeout_is_used_by_external_decision(monkeypatch):
         "headRefOid": "a" * 40,
         "statusCheckRollup": [],
     }
-    monkeypatch.setattr(
-        review_policy,
-        "gh_json",
-        lambda _argv: [{"total_count": 0, "check_runs": []}],
-    )
+    monkeypatch.setattr(review_policy, "gh_json", lambda argv: [] if "statuses" in argv[-1] else [{"total_count": 0, "check_runs": []}])
     monkeypatch.setattr(review_policy, "repo_slug", lambda: "owner/repo")
     monkeypatch.setattr(review_policy, "gh_paginated", lambda _endpoint: [])
-    decision = create_pr._external_decision(
-        42,
-        pr,
-        "coderabbit",
-        observed + timedelta(seconds=600),
-        timeout_seconds=600,
-    )
-    assert decision == ("external-pending-timeout", None)
+    assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=600), timeout_seconds=600) == ("external-pending-timeout", None)
+    # No activity yet: wait only through the 120 s activity window, then fall back; a skip ends it at once.
+    assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=1), timeout_seconds=600) == ("external-pending", 119)
+    assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=121), timeout_seconds=600) == ("external-unavailable", None)
+    def with_status(status):
+        monkeypatch.setattr(review_policy, "gh_json", lambda argv: [[status]] if "statuses" in argv[-1] else [{"total_count": 0, "check_runs": []}])
+    for state, description in (("pending", "Review in progress"), ("success", "Review completed")):
+        with_status(cr_status(state, description, (observed - timedelta(seconds=60)).isoformat()))
+        assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=60), timeout_seconds=600) == ("external-pending", 60)
+        assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=121), timeout_seconds=600) == ("external-unavailable", None)
+    with_status(cr_status("success", "Review skipped: excluded by label configuration", "2026-09-01T00:00:30Z"))
+    assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=60), timeout_seconds=600) == ("external-unavailable", None)
+    with_status(cr_status("pending", "Review in progress", "2026-09-01T00:01:00Z"))  # running: full deadline applies
+    assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=300), timeout_seconds=600) == ("external-pending", 300)
 
 
 def test_check_run_pagination_accepts_repeated_overall_total(monkeypatch):
@@ -218,14 +220,8 @@ def test_check_run_pagination_accepts_repeated_overall_total(monkeypatch):
         "headRefOid": "a" * 40,
         "statusCheckRollup": [],
     }
-    monkeypatch.setattr(
-        review_policy,
-        "gh_json",
-        lambda _argv: [
-            {"total_count": 2, "check_runs": [{"name": "first"}]},
-            {"total_count": 2, "check_runs": [{"name": "second"}]},
-        ],
-    )
+    pages = [{"total_count": 2, "check_runs": [{"name": "first"}]}, {"total_count": 2, "check_runs": [{"name": "second"}]}]
+    monkeypatch.setattr(review_policy, "gh_json", lambda argv: [] if "statuses" in argv[-1] else pages)
     monkeypatch.setattr(review_policy, "repo_slug", lambda: "owner/repo")
     monkeypatch.setattr(review_policy, "gh_paginated", lambda _endpoint: [])
     monkeypatch.setattr(
@@ -233,52 +229,24 @@ def test_check_run_pagination_accepts_repeated_overall_total(monkeypatch):
         "external_state",
         lambda *_args, **_kwargs: review_policy.PENDING,
     )
-    decision = create_pr._external_decision(
-        42,
-        pr,
-        "coderabbit",
-        observed + timedelta(seconds=1),
-        timeout_seconds=120,
-    )
-    assert decision == ("external-unavailable", None)
+    assert create_pr._external_decision(42, pr, "coderabbit", observed + timedelta(seconds=1), timeout_seconds=120) == ("external-pending", 119)
 
 
 def test_reviewer_status_reports_retirement_sources_bindings_and_probes(monkeypatch):
-    monkeypatch.setattr(
-        review_policy, "load_repository_review_policy", lambda: (
-            review_policy.review_policy_from_labels(configured_policy_labels()),
-            configured_policy_labels(),
-        )
-    )
-    monkeypatch.setenv(
-        "ARU_CODING_REVIEWERS",
-        "claude-code:m1@1,openai-codex:mo,xai-cursor:mx,google-antigravity:mg",
-    )
-    monkeypatch.setattr(review_policy, "registered_coding_actors", lambda: {
-        "m1": "claude-reviewer",
-        "mo": "codex-reviewer",
-        "mx": "cursor-reviewer",
-    })
-    monkeypatch.setattr(
-        review_policy,
-        "available_coding_reviewers",
-        lambda candidates, **_kwargs: [
-            candidate[:3] for candidate in candidates if candidate[1] == "m1"
-        ],
-    )
+    labels = configured_policy_labels()
+    monkeypatch.setattr(review_policy, "load_repository_review_policy",
+                        lambda: (review_policy.review_policy_from_labels(labels), labels))
+    monkeypatch.setenv("ARU_CODING_REVIEWERS", "claude-code:m1@1,openai-codex:mo,xai-cursor:mx,google-antigravity:mg")
+    monkeypatch.setattr(review_policy, "registered_coding_actors",
+                        lambda: {"m1": "claude-reviewer", "mo": "codex-reviewer", "mx": "cursor-reviewer"})
+    monkeypatch.setattr(review_policy, "available_coding_reviewers",
+                        lambda candidates, **_kwargs: [c[:3] for c in candidates if c[1] == "m1"])
     monkeypatch.setattr(review_policy, "coderabbit_capability", lambda *_args: {"state": "unavailable", "reason": "fixture"})
-    status = review_policy.reviewer_status(
-        probe=True,
-        author_identity="MO",
-        author_actor="author-login",
-        runner=result,
-    )
+    status = review_policy.reviewer_status(probe=True, author_identity="MO", author_actor="author-login", runner=result)
     by_identity = {item["identity"]: item for item in status["coding_reviewers"]}
     assert status["schema"] == "aru.reviewer-status/v3"
     assert status["policy"]["selection"] == "coderabbit-first"
-    assert status["policy"]["external_reviewers"] == [
-        "coderabbit"
-    ]
+    assert status["policy"]["external_reviewers"] == ["coderabbit"]
     assert by_identity["m1"]["probe"] == "ok"
     assert by_identity["mo"]["probe"] == "ineligible"
     assert by_identity["mx"]["probe"] == "failed"
@@ -316,78 +284,100 @@ def test_policy_label_names_fit_github_limit():
     assert all(len(name) <= 50 for name in configured_policy_labels())
 
 
-def test_reviewer_status_cli_is_read_only_and_forwards_probe_exclusions(
-    monkeypatch, capsys
-):
+def test_reviewer_status_cli_is_read_only_and_forwards_probe_exclusions(monkeypatch, capsys):
     observed = {}
-    payload = {
-        "schema": "aru.reviewer-status/v3",
-        "valid": True,
-        "policy": {
-            "selection": "coderabbit-first",
-            "external_reviewers": ["coderabbit"],
-            "coding_fallbacks": ["claude-code"],
-            "timeout_seconds": 900,
-        },
-    }
+    payload = {"schema": "aru.reviewer-status/v3", "valid": True, "policy": {
+        "selection": "coderabbit-first", "external_reviewers": ["coderabbit"], "coding_fallbacks": ["claude-code"], "timeout_seconds": 900}}
 
     def status(**kwargs):
         observed.update(kwargs)
         return payload
 
     monkeypatch.setattr(create_pr, "reviewer_status", status)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        [
-            "create_pr.py",
-            "--reviewer-status",
-            "--probe-reviewers",
-            "--agent",
-            "codex-author",
-            "--author-github-login",
-            "author-login",
-            "--json",
-        ],
-    )
+    monkeypatch.setattr(sys, "argv", ["create_pr.py", "--reviewer-status", "--probe-reviewers", "--agent", "codex-author",
+                                      "--author-github-login", "author-login", "--json"])
     assert create_pr.main() == 0
-    assert observed == {
-        "probe": True,
-        "author_identity": "codex-author",
-        "author_actor": "author-login",
-    }
+    assert observed == {"probe": True, "author_identity": "codex-author", "author_actor": "author-login"}
     assert '"schema": "aru.reviewer-status/v3"' in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("override,expected", [
-    ({}, "available"),
-    ({"head_sha": "b" * 40}, "unavailable"),
-    ({"app": {"slug": "untrusted"}}, "unavailable"),
-    ({"status": "QUEUED"}, "unavailable"),
-    ({"status": "COMPLETED", "conclusion": "SUCCESS"}, "unavailable"),
-    ({"output": {"summary": "Access denied"}}, "unavailable"),
-    ({"output": {"summary": "Review skipped"}}, "unavailable"),
-    ({"output": {"summary": "Rate limit exceeded"}}, "unavailable"),
-    ({"started_at": "2026-09-08T09:00:00Z"}, "unavailable"),
+def cr_status(state, description, at="2026-09-08T10:00:00Z", creator={"login": "coderabbitai[bot]", "type": "Bot"}):
+    return {"context": "CodeRabbit", "state": state, "description": description, "creator": creator, "created_at": at}  # real Status API shape
+
+
+def cr_check(status, conclusion=None, at="2026-09-08T10:00:00Z", app="coderabbitai", head="a" * 40, **output):
+    return {"name": "CodeRabbit", "app": {"slug": app}, "head_sha": head, "status": status, "conclusion": conclusion,
+            "started_at": at, "output": output}
+
+
+SINCE = datetime(2026, 9, 8, 9, 0, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("statuses,checks,since,expected", [
+    ([], [], None, ("pending", "no-coderabbit-evidence-yet")),
+    # Legacy commit-status surface: queued is not proof, in-progress and completed are.
+    ([cr_status("pending", "Review queued")], [], None, ("pending", "review-queued")),
+    ([cr_status("pending", "Review in progress")], [], None, ("available", "current-head-review-running")),
+    ([cr_status("success", "Review completed")], [], None, ("available", "current-head-review-completed")),
+    ([cr_status("pending", "Review in progress")], [], datetime(2026, 9, 8, 10, 1, tzinfo=timezone.utc), ("pending", "awaiting-current-assignment-activity")),
+    ([], [cr_check("COMPLETED", "SUCCESS")], datetime(2026, 9, 8, 10, 1, tzinfo=timezone.utc), ("pending", "awaiting-current-assignment-activity")),
+    ([cr_status("success", "No review result here")], [], None, ("pending", "unrecognized-success")),
+    ([cr_status("pending", "Review in progress", "2026-09-08T09:00:00Z")], [], None, ("unavailable", "review-stalled")),
+    ([cr_status("success", "Review completed", "2020-01-01T00:00:00Z")], [], None, ("unavailable", "completed-without-current-verdict")),
+    ([cr_status("success", "Review completed", "2099-01-01T00:00:00Z")], [], None, ("unavailable", "future-timestamp")),
+    ([cr_status("error", "Internal error")], [], None, ("unavailable", "provider-error")),
+    ([cr_status("success", "Review rate limited")], [], None, ("unavailable", "provider-denied")),
+    # Label-gated skip before assignment keeps CodeRabbit eligible; after assignment it is a refusal.
+    ([cr_status("success", "Review skipped: excluded by label configuration")], [], None, ("pending", "awaiting-review-label")),
+    ([cr_status("success", "Review skipped: excluded by label configuration")], [], SINCE, ("unavailable", "skipped-after-assignment")),
+    # App check-run surface (review_progress) is equally authentic; foreign apps and heads are ignored.
+    ([], [cr_check("QUEUED")], None, ("pending", "review-queued")),
+    ([], [cr_check("IN_PROGRESS")], None, ("available", "current-head-review-running")),
+    ([], [cr_check("COMPLETED", "SUCCESS")], None, ("available", "current-head-review-completed")),
+    ([], [cr_check("COMPLETED", "CANCELLED")], None, ("unavailable", "provider-error")),
+    ([], [cr_check("COMPLETED", "SUCCESS", summary="Review skipped: excluded by label configuration")], SINCE, ("unavailable", "skipped-after-assignment")),
+    ([], [cr_check("IN_PROGRESS", app="untrusted"), cr_check("IN_PROGRESS", head="b" * 40)], None, ("pending", "no-coderabbit-evidence-yet")),
+    # Spoofed statuses never count; the newest trusted signal wins across surfaces.
+    ([cr_status("success", "Review completed", creator={"login": "human", "type": "User"})], [], None, ("pending", "no-coderabbit-evidence-yet")),
+    ([cr_status("pending", "Review queued", "2026-09-08T09:59:00Z")], [cr_check("COMPLETED", "SUCCESS")], None, ("available", "current-head-review-completed")),
+    # Same-second disagreement fails closed; same-second agreement across surfaces does not.
+    ([cr_status("pending", "Review in progress"), cr_status("error", "Internal error")], [], None, ("unavailable", "conflicting-evidence")),
+    ([cr_status("pending", "Review in progress")], [cr_check("IN_PROGRESS")], None, ("available", "current-head-review-running")),
 ])
-def test_capability_requires_recent_current_head_running_trusted_app(override, expected):
-    from review_evidence import coderabbit_check_capability
+def test_capability_reads_authenticated_coderabbit_activity_on_either_surface(statuses, checks, since, expected):
+    from review_evidence import coderabbit_capability_state
     now = datetime(2026, 9, 8, 10, 10, tzinfo=timezone.utc)
-    check = dict(name="CodeRabbit", app={"slug": "coderabbitai"}, head_sha="a" * 40,
-                 status="IN_PROGRESS", started_at="2026-09-08T10:00:00Z")
-    check.update(override)
-    data = {"total_count": 1, "check_runs": [check]}
-    assert coderabbit_check_capability(data, "a" * 40, now)["state"] == expected
+    result = coderabbit_capability_state(statuses, checks, head="a" * 40, observed_at=now, since=since, timeout_seconds=900)
+    assert (result["state"], result["reason"]) == expected
 
 
 def test_capability_transport_is_bounded_and_falls_back_on_unreadable(monkeypatch):
     monkeypatch.setattr(review_policy, "repo_slug", lambda: "owner/repo")
     def unavailable(argv, *, timeout):
-        assert argv == ["api", "repos/owner/repo/commits/" + "a" * 40 + "/check-runs?per_page=100&filter=latest"]
+        assert argv == ["api", "repos/owner/repo/commits/" + "a" * 40 + "/statuses?per_page=100"]
         assert timeout == 8
         raise create_pr.KernelError("bounded command timed out")
     monkeypatch.setattr(review_policy, "gh_json", unavailable)
     assert review_policy.coderabbit_capability("a" * 40)["state"] == "unavailable"
+    monkeypatch.setattr(review_policy, "gh_json", lambda argv, *, timeout: {"message": "Not Found"})
+    assert review_policy.coderabbit_capability("a" * 40)["state"] == "unavailable"  # not a status list
+    # Both surfaces read and empty: eligible but unproven. A non-status payload is unreadable, not "empty".
+    monkeypatch.setattr(review_policy, "gh_json", lambda argv, *, timeout: [] if "statuses" in argv[1] else {"total_count": 0, "check_runs": []})
+    assert review_policy.coderabbit_capability("a" * 40)["reason"] == "no-coderabbit-evidence-yet"
+    monkeypatch.setattr(review_policy, "gh_json", lambda argv, *, timeout: [{"total_count": 0, "check_runs": []}])
+    assert review_policy.coderabbit_capability("a" * 40)["state"] == "unavailable"
+    observed = datetime(2026, 9, 8, 10, 0, tzinfo=timezone.utc)
+    pr = {"createdAt": observed.isoformat(), "headRefOid": "a" * 40}
+    monkeypatch.setattr(review_policy, "gh_paginated", lambda _endpoint: [])
+    for malformed in (None, {"unexpected": "malformed status record"}, {"context": [], "state": "pending"}, {"context": "CodeRabbit", "state": {}}):
+        for records in ([malformed], [cr_status("pending", "Review in progress"), malformed]):
+            def inventory(argv, **_kwargs):
+                data = records if "statuses?" in argv[-1] else {"total_count": 0, "check_runs": []}
+                return [data] if "--slurp" in argv else data
+            monkeypatch.setattr(review_policy, "gh_json", inventory)
+            assert review_policy.coderabbit_capability("a" * 40)["state"] == "unavailable"
+            with pytest.raises(create_pr.KernelError, match="commit status inventory is malformed"):
+                review_policy.external_decision(42, pr, "coderabbit", observed + timedelta(seconds=1))
 
 
 @pytest.mark.parametrize("retired", ["sourcery", "codeant"])
@@ -396,12 +386,17 @@ def test_retired_authority_never_waits_or_reads_provider_state(monkeypatch, reti
     assert review_policy.external_decision(42, {}, retired, datetime.now(timezone.utc)) == ("external-retired", None)
 
 
-def test_missing_capability_immediately_uses_independent_coding_even_with_legacy_pool(monkeypatch):
+@pytest.mark.parametrize("coderabbit,expected", [
+    ("unavailable", ("claude-code", "m1", "reviewer")),  # explicit denial: immediate coding fallback
+    ("pending", ("coderabbit", None, None)),  # no status yet on a fresh PR: CodeRabbit is selected
+    ("available", ("coderabbit", None, None)),
+])
+def test_denied_coderabbit_uses_independent_coding_while_unproven_stays_eligible(monkeypatch, coderabbit, expected):
     monkeypatch.setenv("ARU_CODING_REVIEWERS", "claude-code:m1@1")
     policy = review_policy.ReviewPolicy(("sourcery", "codeant", "coderabbit"), ("claude-code",), 900, {})
     result = review_policy.select_reviewer_from_pool(
         policy, number=581, author_identity="writer", author_family="openai-codex",
-        author_actor="writer", external_states={"sourcery": "available", "codeant": "available", "coderabbit": "pending"},
+        author_actor="writer", external_states={"sourcery": "available", "codeant": "available", "coderabbit": coderabbit},
         reviewer_actors={"m1": "reviewer"}, probe_runner=lambda _a: pytest.fail("unused"),
         coding_probe=lambda **_kw: ("claude-code", "m1", "reviewer"))
-    assert result == ("claude-code", "m1", "reviewer")
+    assert result == expected
