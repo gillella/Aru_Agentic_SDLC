@@ -249,6 +249,15 @@ class KernelAdapter:
     def reviewer_status(self) -> dict:
         return self._invoke("reviewer_status")
 
+    def review_binding(self, number: int, expected: dict | None = None) -> dict:
+        return self._invoke("review_binding", number=number, expected=expected)
+
+    def review_worktree(self, binding: dict) -> str:
+        return self._invoke("review_worktree", number=binding["pr"], expected=binding)
+
+    def refresh_reviewer(self, number: int, expected: dict, reason: str | None = None) -> dict:
+        return self._invoke("refresh_reviewer", number=number, expected=expected, reason=reason)
+
     def issue_summary(self, number: int) -> dict:
         return self._invoke("issue_summary", number=number)
 
@@ -565,7 +574,11 @@ class _Bridge:
             raise KernelAdapterError(f"issue #{number}: " + "; ".join(sorted(set(errors))))
         return record
 
-    def _handoff_operation(self, operation: str, payload: dict) -> Any:
+    def _evidence_operation(self, operation: str, payload: dict) -> Any:
+        if operation == "refresh_reviewer":
+            return self.refresh_reviewer(payload["number"], payload["expected"], payload.get("reason"))
+        if operation in {"review_binding", "review_worktree"}:
+            return self._review_operation(operation, payload)
         # The bridge is executed as a file, with this directory on sys.path.
         import handoff_evidence
         if operation == "issue_summary":
@@ -581,8 +594,8 @@ class _Bridge:
         return self.claims.release(number, agent)
 
     def dispatch(self, operation: str, payload: dict) -> Any:
-        if operation in {"issue_summary", "dependency_evidence", "source_pr"}:
-            return self._handoff_operation(operation, payload)
+        if operation in {"issue_summary", "dependency_evidence", "source_pr", "review_binding", "review_worktree", "refresh_reviewer"}:
+            return self._evidence_operation(operation, payload)
         if operation == "snapshot":
             return self.snapshot()
         if operation == "next_work":
@@ -610,6 +623,109 @@ class _Bridge:
         if operation == "branch":
             return self.branch(number, agent)
         raise KernelAdapterError("unsupported kernel adapter operation")
+
+    def _review_operation(self, operation: str, payload: dict) -> Any:
+        binding = self.review_binding(payload["number"], payload.get("expected"))
+        return self.review_worktree(binding) if operation == "review_worktree" else binding
+
+    def refresh_reviewer(self, number: int, expected: dict, reason: str | None = None) -> dict:
+        """Caller holds Driver coordination; canonical helper owns all mutation guards."""
+        self.identity()
+        create = importlib.import_module("create_pr")
+        if reason:
+            current = self.review_binding(number, expected)
+            if current.get("verdict"):
+                raise KernelAdapterError("review completed before recovery; reread convergence")
+        pr = self.merge_state.pull_request(number)
+        if (expected.get("repo") != self.repo or expected.get("pr") != number
+                or pr.get("state") != "OPEN" or pr.get("isDraft") is not False
+                or pr.get("headRefOid") != expected.get("head")
+                or create._optional_authority(pr) != expected.get("authority")
+                or create._one_label_value(pr, self.common.AUTHOR_PREFIX) != expected.get("author")
+                or self.merge_state.linked_issues(pr["body"]) != [expected["issue"]]
+                or "needs-human" in self.common.label_names(pr)):
+            raise KernelAdapterError("review authority changed before refresh; cancel stale action")
+        merge = importlib.import_module("merge_pr")
+        if reason and merge._coding_assignment(pr) != tuple(expected[k] for k in (
+            "reviewer", "reviewer_actor", "author", "author_family", "author_actor"
+        )):
+            raise KernelAdapterError("coding assignment changed before recovery")
+        self.revalidate(expected["issue"], expected["author"])
+        # Pass the validated snapshot into the canonical helper, whose replacement
+        # guard compares it again before mutation; never let a new head inherit a failure.
+        authority, now = expected.get("authority"), datetime.now(timezone.utc)
+        if reason:
+            result = create.recover_coding_authority(number, pr, authority, reason, now, create._default_probe)
+        elif authority is None:
+            result = create.assign_missing_authority(number, pr, now, create._default_probe)
+        elif authority in self.common.CODING_REVIEWERS:
+            result = {}
+        else:
+            result = create._refresh_external_authority(number, pr, authority, now, create._default_probe)
+        # Fallback helper results omit next_action; reread the resulting authority.
+        return {**result, **self.review.reviewer_continuation(number)}
+
+    def review_binding(self, number: int, expected: dict | None = None) -> dict:
+        """Read exact-head assignment and verdict using canonical kernel evidence."""
+        if type(number) is not int or number <= 0:
+            raise KernelAdapterError("review PR number must be a positive integer")
+        self.identity()
+        c = self.common
+        merge = importlib.import_module("merge_pr")
+        pr = self.merge_state.pull_request(number)
+        head = pr.get("headRefOid")
+        if (pr.get("state") != "OPEN" or pr.get("isDraft") is not False
+                or not isinstance(head, str) or not re.fullmatch(r"[a-f0-9]{40}", head)):
+            raise KernelAdapterError("review requires an open non-draft PR and full head")
+        authority = merge.assigned_service(pr)
+        assignment = merge._coding_assignment(pr)
+        if authority not in c.CODING_REVIEWERS or assignment is None:
+            raise KernelAdapterError("review requires one complete coding assignment")
+        reviewer, actor, author, family, author_actor = assignment
+        if (c.normalized_identity(reviewer) == c.normalized_identity(author)
+                or c.same_github_actor(actor, author_actor)
+                or c.configured_reviewer_family(reviewer) != authority
+                or not c.same_github_actor(c.registered_coding_actors().get(reviewer, ""), actor)):
+            raise KernelAdapterError("reviewer identity, family or trusted actor is not independent")
+        issues = self.merge_state.linked_issues(pr["body"])
+        if len(issues) != 1:
+            raise KernelAdapterError("review requires exactly one linked issue")
+        issue = self.revalidate(issues[0], author)
+        if "needs-human" in c.label_names(pr):
+            raise KernelAdapterError("needs-human PR cannot dispatch a review")
+        binding = {"repo": self.repo, "pr": number, "head": head, "authority": authority,
+                   "reviewer": reviewer, "reviewer_actor": actor, "author": author,
+                   "author_family": family, "author_actor": author_actor, "issue": issues[0]}
+        if expected and any(binding.get(k) != v for k, v in expected.items() if k != "verdict"):
+            raise KernelAdapterError("review head or assignment changed; cancel stale continuation")
+        verdict = merge.coding_review_verdict(pr, merge.pull_reviews(number), authority, issues)
+        current = self.merge_state.pull_request(number)
+        if any(current.get(k) != pr.get(k) for k in ("state", "isDraft", "headRefOid", "labels", "body", "author")):
+            raise KernelAdapterError("review authority changed during evidence read")
+        if issue["agents"] != [author]:
+            raise KernelAdapterError("review author no longer owns the issue")
+        return {**binding, "verdict": verdict}
+
+    def review_worktree(self, binding: dict) -> str:
+        """Create/reuse a detached review checkout; never borrow an author's tree."""
+        c = self.common
+        directory = c.primary_worktree() / ".worktrees" / (
+            f"review-pr-{binding['pr']}-{binding['head']}-{binding['reviewer']}"
+        )
+        if not directory.exists():
+            c.git(["fetch", "origin", f"pull/{binding['pr']}/head"])
+            if c.git(["rev-parse", "FETCH_HEAD"]) != binding["head"]:
+                raise KernelAdapterError("review head advanced during fetch")
+            self.review_binding(binding["pr"], binding)
+            c.git(["worktree", "add", "--detach", str(directory), binding["head"]])
+        if (c.repo_root(cwd=directory) != directory
+                or c.checkout_repository(cwd=directory).casefold() != self.repo.casefold()
+                or c.git(["rev-parse", "HEAD"], cwd=directory) != binding["head"]
+                or c.git(["branch", "--show-current"], cwd=directory)
+                or c.git(["status", "--porcelain"], cwd=directory)):
+            raise KernelAdapterError("review worktree is not clean, detached and bound to the head")
+        self.review_binding(binding["pr"], binding)
+        return str(directory)
 
     def promote(self, number: int) -> dict:
         def guard() -> None:

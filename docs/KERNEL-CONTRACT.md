@@ -144,6 +144,18 @@ resolved before merge. Availability, assignment and actual execution/verdict
 are different observations. No available independent reviewer leaves an owned
 blocked action; never manufacture approval.
 
+The writer owns remediation; a reviewer who becomes an author loses independent
+authority and must be replaced through the governed helper with a truthful
+reason. One valid distinct current-head reviewer is sufficient. All applicable
+findings, including late findings from replaced providers, need a recorded
+code fix, evidence-backed disagreement, advisory-only decision or accepted
+tracked follow-up. The feedback skill defines these dispositions. A real
+security/correctness defect remains blocking regardless of severity wording;
+a follow-up issue cannot waive it. Advisory-only disposition can complete
+without unrelated code, new tests or another push. A push still requires fresh
+exact-head CI and any risk-required review. Resolving a thread must reflect its
+substance, not just its latest bot reply or an outdated marker.
+
 This operator-requested provider-policy change is the v2 major-version
 migration. Historical labels and review records remain readable. Status output
 uses `aru.reviewer-status/v3`; consumers reading v2 status must adopt the new

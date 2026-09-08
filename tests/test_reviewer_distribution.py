@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import threading
 import time
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -32,7 +33,44 @@ def external_states(**overrides):
     return states
 
 
-def test_initial_assignment_never_rotates_to_retired_provider(monkeypatch):
+@pytest.mark.parametrize("changed", ["reviewer", "reviewer-actor", "author-actor"])
+@pytest.mark.parametrize("boundary", ["selection", "before-write"])
+def test_coding_recovery_preserves_same_family_reassignment(monkeypatch, changed, boundary):
+    original = {"number": 42, "headRefOid": "a" * 40, "author": {"login": "author-login"},
+                "labels": ["review:claude-code", "reviewer:m1", "reviewer-actor:old-bot",
+                           "author:writer", "author-family:openai-codex"]}
+    live, commands, reads = deepcopy(original), [], []
+    def drift():
+        if changed == "author-actor":
+            live["author"]["login"] = "new-author"
+        else:
+            live["labels"] = [name for name in live["labels"] if not name.startswith(changed + ":")]
+            live["labels"].append(changed + ":new-reviewer")
+    def choose(*args, **kwargs):
+        if boundary == "selection":
+            drift()
+        return "claude-code", "m3", "third-bot"
+    def read(args):
+        reads.append(args)
+        if boundary == "before-write" and len(reads) == 2:
+            drift()
+        return deepcopy(live)
+    monkeypatch.setattr(create_pr, "select_reviewer_from_pool", choose)
+    monkeypatch.setattr(create_pr, "_attempted_reviewer_keys", lambda *args: set())
+    monkeypatch.setattr(create_pr, "gh_json", read)
+    monkeypatch.setattr(create_pr, "ensure_label", lambda *args, **kwargs: None)
+    monkeypatch.setattr(create_pr, "run", commands.append)
+    with pytest.raises(create_pr.KernelError, match="changed during fallback"):
+        create_pr.recover_coding_authority(
+            42, original, "claude-code", "old review worker lost its reservation",
+            datetime.now(timezone.utc), lambda argv: result(argv),
+            policy=review_policy.default_review_policy(("coderabbit",)), external_states=external_states(),
+        )
+    assert not any(command[1:3] == ["pr", "edit"] for command in commands)
+    assert len(reads) == (1 if boundary == "selection" else 2)
+
+
+def test_preferred_external_is_deterministic_without_retired_or_coding_probes(monkeypatch):
     monkeypatch.setenv(
         "ARU_CODING_REVIEWERS",
         "claude-code:m1@1,openai-codex:mo",
@@ -52,17 +90,12 @@ def test_initial_assignment_never_rotates_to_retired_provider(monkeypatch):
             "author-login",
             external_states=states,
             reviewer_actors=actors,
-            probe_runner=lambda argv: result(argv),
+            probe_runner=lambda argv: pytest.fail("available preferred external must not probe coding"),
         )
-        for number in range(4)
+        for number in (0, 1, 2, 3, 11, 11)
     ]
 
-    assert assignments == [
-        ("coderabbit", None, None),
-        ("coderabbit", None, None),
-        ("coderabbit", None, None),
-        ("coderabbit", None, None),
-    ]
+    assert assignments == [("coderabbit", None, None)] * 6
 
 
 def test_initial_coding_assignment_uses_aggregate_capacity_probe():
@@ -123,42 +156,6 @@ def test_initial_assignment_prefers_a_different_author_family(monkeypatch):
         probe_runner=lambda argv: result(argv),
     )
     assert reviewer == ("xai-cursor", "mx", "cursor-reviewer")
-
-
-def test_unavailable_coding_candidate_does_not_displace_external(monkeypatch):
-    monkeypatch.setenv("ARU_CODING_REVIEWERS", "claude-code:m1@1")
-    calls = []
-
-    def unavailable(argv):
-        calls.append(argv)
-        return result(argv, ok=False)
-
-    reviewer = create_pr.choose_initial_reviewer(
-        1,
-        "codex-author",
-        "openai-codex",
-        "author-login",
-        external_states=external_states(coderabbit=create_pr.AVAILABLE),
-        reviewer_actors={"m1": "claude-reviewer"},
-        probe_runner=unavailable,
-    )
-    assert reviewer == ("coderabbit", None, None)
-    assert calls == []
-
-
-def test_initial_assignment_is_deterministic(monkeypatch):
-    monkeypatch.setenv("ARU_CODING_REVIEWERS", "claude-code:m1@1")
-    arguments = {
-        "author_identity": "codex-author",
-        "author_family": "openai-codex",
-        "author_actor": "author-login",
-        "external_states": external_states(coderabbit=create_pr.AVAILABLE),
-        "reviewer_actors": {"m1": "claude-reviewer"},
-        "probe_runner": lambda argv: result(argv),
-    }
-    assert create_pr.choose_initial_reviewer(11, **arguments) == (
-        create_pr.choose_initial_reviewer(11, **arguments)
-    )
 
 
 def test_available_external_does_not_require_local_coding_configuration(monkeypatch):

@@ -5,10 +5,9 @@ scheduler; it creates no daemon or second Project lifecycle database. Local
 files contain dispatch ownership, wake deduplication, and operational state.
 GitHub supplies issue status, claims, dependencies, reservations, and PR gates.
 Current files under the configured canonical kernel, including its contract
-and versioned workflow skills, control those transitions. An installed
-`aru-code-factory` skill may be older; use it only for verified native provider
-execution details that agree with the canonical files. Updating that skill is
-a separate explicit operation, never an implicit installation dependency.
+and versioned workflow skills, control those transitions. Configured worker
+commands and the existing supervisor execute assigned work; callbacks need no
+expanded historical factory instructions or additional provider launcher.
 
 The native heartbeat runs every ten minutes. Its generated script must be a
 real file under the configured Hermes home's `scripts` directory: native
@@ -27,12 +26,38 @@ obsolete timer. The timer runs the common precheck and cannot itself rotate
 review authority or merge. Consumed exact timers stay consumed; the heartbeat
 and controller's fresh authority check prevent a tight replay loop.
 
-An external `await-authoritative-review` remains quiet. When that action names
-an assigned coding fallback, the Hermes brain checks or arranges one existing
-provider review worker after validating the live head, authority, family,
-actor separation, process ownership, and availability. Native provider
-dispatch and the canonical formal review workflow do the work; this adapter
-does not add a general review launcher, reviewer queue, or source of authority.
+An external `await-authoritative-review` remains quiet. For an assigned coding
+fallback, reconciliation validates repository, PR, full head, sole authority,
+registered actor, independent identity and configured family. It checks the
+author's existing claim, Stop, needs-human, worker cap and shared capacity,
+then uses a detached review worktree and the existing supervisor. The child
+rereads binding and checkout before execution; the review prompt requires a
+further reread immediately before attestation. The kernel still validates the
+actual current-head attestation at merge, including changes during review.
+
+The existing worker receipt contains the review binding and launching/running/
+exited state. It deduplicates that exact assignment across events and restart.
+An active review holds the existing account reservation; author mutation waits
+until it settles. A lost reservation or exit without a kernel verdict yields
+an owned recovery action, never a blind same-assignment relaunch. Reconcile
+holds the existing coordination lock around due refresh and coding recovery,
+records one recovery attempt in the existing failed worker receipt before the
+canonical helper call, and dispatches a new coding assignment immediately.
+The helper revalidates authority and owns selection; kernel attempt history
+bounds candidates. A failed or interrupted recovery stays owned and requires
+operator reconciliation rather than repeating that attempt. No new queue,
+timer class or lifecycle status is introduced.
+Unavailable authority, capacity or permissions returns `execution:blocked`
+with owner/reason/next step. Stop leaves existing workers and claims intact.
+
+The receipt's `execution:queued` means the supervised process was submitted;
+the durable `running` receipt proves the supervisor began. Child startup also
+revalidates the reloaded configured lane family and recorded task binding.
+`completed` requires
+fresh kernel verdict evidence, never exit code zero alone. The existing worker
+completion wake and recovery heartbeat own continuation into the current-head
+merge/finalization or author-feedback path. Source tests are isolated evidence;
+#557 separately owns authorized installed-runtime and live continuation proof.
 
 Hermes' native webhook adapter validates HMAC and accepts configured event
 types, but normally creates an independent session for each delivery. Its

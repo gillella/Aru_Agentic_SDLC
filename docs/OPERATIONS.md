@@ -805,6 +805,27 @@ worktree (never rebase or force push), resolve conflicts within declared
 `touches:` boundaries, and push. Any new push requires a new exact-head server
 check and, for Tier 2-3, a new review verdict.
 
+Use the feedback skill to record each finding's disposition. Read the original
+finding, including late results from a replaced reviewer; a bot setup reply or
+an outdated marker does not establish resolution.
+
+| Disposition | Concrete completion |
+| --- | --- |
+| Fix | The writer repairs the defect, cites the fixing commit and relevant verification, then resolves the thread. |
+| Evidence-backed disagreement | Cite the existing guard and test that disprove the reported failure, explain why, and resolve without an invented change. |
+| Advisory-only | Record why the suggested rename is optional and keep the present name; resolve without unrelated edits or tests. |
+| Accepted tracked follow-up | Explain why current behavior is safe and link the accepted refactor issue. A real defect cannot be waived by moving it to another issue. |
+
+Actual security/correctness defects block regardless of a low/info label.
+The writer fixes; the reviewer stays independent. If a reviewer commits a fix,
+record that authorship and use the governed replacement helper with the truthful
+reason. The same author under another identity is not an independent reviewer.
+One valid independent current-head verdict is enough; no extra brands or rounds
+are required. Check existing relevant coverage before requesting new tests,
+following `.coderabbit.yaml`'s scoped test guidance. A reply-only disposition
+does not require another commit or repeated suites; all ordinary merge evidence
+must still be valid, and any push requires fresh exact-head CI/risk-based review.
+
 For a pending Tier 2-3 review, the external Driver refreshes authority only for
 its one due continuation event:
 
