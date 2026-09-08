@@ -32,36 +32,61 @@ def install_result(target: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_installer_replaces_legacy_aru_hook_without_chaining_it(tmp_path):
-    target, hooks = repository(tmp_path)
-    legacy = hooks / "pre-push"
-    legacy.write_text(
-        "#!/usr/bin/env bash\n# Aru_Agentic_SDLC pre-push hook: legacy\n",
-        encoding="utf-8",
-    )
-    legacy.chmod(0o755)
-
+@pytest.mark.parametrize("revision", [
+    "7a3dc46", "2b55cfc", "d3a0588", "4393d3c", "2dfe4ce", "a1559da",
+])
+@pytest.mark.parametrize("location", ["pre-push", "pre-push.pre-aru", "both"])
+def test_installer_upgrades_authentic_historical_hooks(push_repo, revision, location):
+    target, hooks, remote = push_repo
+    # CI already fetches full history; these immutable source versions are the fixtures.
+    historical = subprocess.check_output(["git", "show", f"{revision}:hooks/pre-push"], cwd=ROOT)
     install(target)
+    names = ["pre-push", "pre-push.pre-aru"] if location == "both" else [location]
+    for name in names:
+        (hooks / name).write_bytes(historical)
+        (hooks / name).chmod(0o755)
+    for _ in range(2):
+        install(target)
+        assert (hooks / "pre-push").read_bytes() == (ROOT / "hooks/pre-push").read_bytes()
+        assert not (hooks / "pre-push.pre-aru").exists()
+        result = invoke_hook(target, hooks, remote, "0" * 40)
+        assert result.returncode == 0, result.stderr + result.stdout
 
-    assert "direct pushes to the default branch" in legacy.read_text(encoding="utf-8")
-    assert (hooks / "touches.py").is_file()
-    assert 'enforcer="${hook_dir}/enforce_touches.py"' in legacy.read_text(
-        encoding="utf-8"
-    )
-    assert not (hooks / "pre-push.pre-aru").exists()
 
-
-def test_installer_preserves_and_chains_a_user_owned_hook(tmp_path):
-    target, hooks = repository(tmp_path)
+@pytest.mark.parametrize("old_backup", [False, True])
+def test_installer_preserves_and_chains_a_user_owned_hook(push_repo, old_backup):
+    target, hooks, remote = push_repo
     custom = hooks / "pre-push"
-    custom.write_text("#!/usr/bin/env bash\necho user-hook\n", encoding="utf-8")
+    contents = "#!/usr/bin/env bash\n# Aru_Agentic_SDLC pre-push hook: local note\n"
+    contents += "# Aru managed pre-push hook; installed by scripts/install_hooks.sh\n"
+    contents += "cat > prior-input\necho user-hook\nexit 7\n"
+    custom.write_text(contents)
     custom.chmod(0o755)
+    if old_backup:
+        (hooks / "pre-push.pre-aru").write_bytes(subprocess.check_output(
+            ["git", "show", "4393d3c:hooks/pre-push"], cwd=ROOT,
+        ))
+    for _ in range(2):
+        install(target)
+        assert (hooks / "pre-push.pre-aru").read_text() == contents
+        result = invoke_hook(target, hooks, remote, "0" * 40)
+        assert result.returncode == 7 and "user-hook" in result.stdout
+        assert "0" * 40 in (target / "prior-input").read_text()
 
-    install(target)
 
-    preserved = hooks / "pre-push.pre-aru"
-    assert preserved.read_text(encoding="utf-8") == "#!/usr/bin/env bash\necho user-hook\n"
-    assert "pre-push.pre-aru" in custom.read_text(encoding="utf-8")
+@pytest.mark.parametrize("modified_history", [False, True])
+def test_installer_refuses_ambiguous_custom_hooks_without_changes(tmp_path, modified_history):
+    target, hooks = repository(tmp_path)
+    current = b"#!/usr/bin/env bash\necho custom\n"
+    if modified_history:
+        current += subprocess.check_output(["git", "show", "4393d3c:hooks/pre-push"], cwd=ROOT)
+    (hooks / "pre-push").write_bytes(current)
+    (hooks / "pre-push.pre-aru").write_text("other user hook\n")
+    result = install_result(target)
+    assert result.returncode != 0 and "operator review" in result.stderr
+    assert (hooks / "pre-push").read_bytes() == current
+    assert (hooks / "pre-push.pre-aru").read_text() == "other user hook\n"
+    assert not (hooks / "enforce_touches.py").exists()
 
 
 def test_installer_refuses_external_core_hooks_path(tmp_path):
@@ -113,25 +138,13 @@ def test_installer_refuses_symlink_hook_targets(tmp_path, hook_name):
 
 def test_hook_allows_one_initial_branch_on_a_verified_empty_remote(tmp_path):
     target, hooks = repository(tmp_path)
-    subprocess.run(
-        ["git", "config", "user.name", "Test"], cwd=target, check=True
-    )
-    subprocess.run(
-        ["git", "config", "user.email", "test@example.com"], cwd=target, check=True
-    )
     (target / "README.md").write_text("bootstrap\n", encoding="utf-8")
-    subprocess.run(["git", "add", "README.md"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-m", "bootstrap"], cwd=target, check=True)
+    git(target, "add", "README.md")
+    git(target, "commit", "-m", "bootstrap")
     remote = tmp_path / "remote.git"
-    subprocess.run(["git", "init", "--bare", str(remote)], check=True)
+    git(target, "init", "--bare", str(remote))
     install(target)
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=target,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    head = git(target, "rev-parse", "HEAD")
     update = (
         f"refs/heads/main {head} refs/heads/main {'0' * 40}\n"
     )
