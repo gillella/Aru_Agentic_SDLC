@@ -1,6 +1,7 @@
 """Small bridge to Hermes' existing scheduler; no scheduler thread of our own."""
 from __future__ import annotations
 
+import ast
 import contextlib
 import datetime as dt
 import fcntl
@@ -48,11 +49,33 @@ def _require_wake_gate(runtime: Path) -> None:
     """
     message = "Installed Hermes lacks script wake gates; upgrade before enabling the Driver"
     scheduler_source = runtime / "cron" / "scheduler.py"
-    if not scheduler_source.is_file() or "_parse_wake_gate(" not in scheduler_source.read_text():
+    if not scheduler_source.is_file() or not _wake_gate_nodes(scheduler_source)[0]:
         raise SchedulerError(message)
     modules = sorted(path for path in (runtime / "cron").glob("*.py") if path.is_file())
-    if not any("def _parse_wake_gate(" in path.read_text() for path in modules):
+    if not any(_wake_gate_nodes(path)[1] for path in modules):
         raise SchedulerError(message)
+
+
+def _wake_gate_nodes(path: Path) -> tuple[bool, bool]:
+    """Return (calls, defines) for ``_parse_wake_gate`` using the AST, not text.
+
+    Comments, strings and the definition itself never count as a call, so a
+    scheduler that merely defines the parser without consulting it is refused.
+    Unparseable source counts as neither.
+    """
+    try:
+        tree = ast.parse(path.read_text())
+    except (OSError, SyntaxError, ValueError):
+        return False, False
+    calls = defines = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_parse_wake_gate":
+            defines = True
+        elif isinstance(node, ast.Call):
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+            calls |= name == "_parse_wake_gate"
+    return calls, defines
 
 
 def _load_api(hermes_home: Path, hermes_repo: Path | None, cron_api: Any):

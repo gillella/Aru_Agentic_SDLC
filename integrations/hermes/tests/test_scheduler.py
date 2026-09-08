@@ -289,10 +289,18 @@ def test_malformed_review_events_raise_catchable_error_before_native_access(setu
         # Hermes 0.21.1: call site stays in scheduler.py, definition moved to scheduler_prompt.py.
         ({"scheduler.py": "from cron.scheduler_prompt import _parse_wake_gate\n_parse_wake_gate('')\n",
           "scheduler_prompt.py": "def _parse_wake_gate(o):\n    return True\n"}, True),
+        # Attribute-style call still counts.
+        ({"scheduler.py": "import cron.scheduler_prompt as p\np._parse_wake_gate('')\n",
+          "scheduler_prompt.py": "def _parse_wake_gate(o):\n    return True\n"}, True),
         # No gate at all, a definition the scheduler never calls, or no scheduler module.
         ({"scheduler.py": "def _run_job_script(p):\n    return True\n"}, False),
+        ({"scheduler.py": "def _parse_wake_gate(o):\n    return True\n"}, False),
         ({"scheduler.py": "pass\n", "scheduler_prompt.py": "def _parse_wake_gate(o):\n    return True\n"}, False),
         ({"scheduler_prompt.py": "def _parse_wake_gate(o):\n    return True\n"}, False),
+        # Mentions in comments, strings, or unparseable source are not calls.
+        ({"scheduler.py": "# _parse_wake_gate('')\nx = '_parse_wake_gate()'\n",
+          "scheduler_prompt.py": "def _parse_wake_gate(o):\n    return True\n"}, False),
+        ({"scheduler.py": "_parse_wake_gate(\n", "scheduler_prompt.py": "def _parse_wake_gate(o):\n    return True\n"}, False),
     ],
 )
 def test_wake_gate_probe_accepts_the_definition_in_any_cron_module(tmp_path, files, ok):
