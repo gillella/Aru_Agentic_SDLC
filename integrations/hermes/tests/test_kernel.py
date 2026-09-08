@@ -190,7 +190,7 @@ def review_bridge(tmp_path, monkeypatch):
                          "reviewer:reviewer-one", "reviewer-actor:review-bot"]}
     bridge.merge_state.pull_request = lambda number: deepcopy(opened)
     bridge.revalidate = lambda number, agent: {"agents": [agent]} if number == 1 else pytest.fail("wrong issue")
-    for name in ("CODING_REVIEWERS", "normalized_identity", "same_github_actor", "configured_reviewer_family"):
+    for name in ("AUTHOR_PREFIX", "CODING_REVIEWERS", "normalized_identity", "same_github_actor", "configured_reviewer_family"):
         setattr(bridge.common, name, getattr(common, name))
     bridge.common.registered_coding_actors = lambda: {"reviewer-one": "review-bot"}
     monkeypatch.setenv("ARU_CODING_REVIEWERS", "claude-code:reviewer-one@1")
@@ -257,6 +257,37 @@ def test_review_worktree_is_detached_and_revalidates_after_fetch(review_bridge, 
     bridge.common.git = lambda args, **kwargs: "b" * 40 if args[0] == "rev-parse" else ""
     with pytest.raises(KernelAdapterError, match="advanced"):
         bridge.review_worktree(binding)
+
+
+def test_reviewer_recovery_calls_only_canonical_helper_after_binding_check(review_bridge, monkeypatch):
+    bridge, opened = review_bridge
+    binding = bridge.review_binding(9)
+    create = importlib.import_module("create_pr")
+    calls = []
+    fallback = {"pr": 9, "authority": "openai-codex", "action": "fallback", "reason": "worker lost", "reviewer": "second"}
+    monkeypatch.setattr(create, "recover_coding_authority", lambda *args: calls.append(args) or fallback)
+    bridge.review = SimpleNamespace(reviewer_continuation=lambda number: {
+        "authority": "openai-codex", "next_action": "await-authoritative-review", "retry_at": None})
+    refreshed = bridge.refresh_reviewer(9, binding, "worker lost")
+    assert refreshed["next_action"] == "await-authoritative-review" and refreshed["reviewer"] == "second"
+    assert calls[0][:4] == (9, opened, "claude-code", "worker lost")
+    opened["headRefOid"] = "b" * 40
+    with pytest.raises(KernelAdapterError, match="changed"):
+        bridge.refresh_reviewer(9, binding, "worker lost")
+    assert len(calls) == 1
+
+
+def test_recovery_rejects_observed_same_family_reassignment(review_bridge, monkeypatch):
+    bridge, opened = review_bridge
+    binding = bridge.review_binding(9)
+    create = importlib.import_module("create_pr")
+    monkeypatch.setattr(create, "recover_coding_authority", lambda *a: pytest.fail("stale recovery must not mutate"))
+    def drift(number, expected):
+        opened["labels"][-2:] = ["reviewer:second", "reviewer-actor:other-bot"]
+        return binding
+    bridge.review_binding = drift
+    with pytest.raises(KernelAdapterError, match="assignment changed"):
+        bridge.refresh_reviewer(9, binding, "worker lost")
 
 
 def test_conflicting_first_candidate_does_not_starve_independent_issue(tmp_path):

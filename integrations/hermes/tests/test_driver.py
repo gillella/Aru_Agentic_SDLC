@@ -321,7 +321,7 @@ def test_generated_environment_bakes_each_directory_once(fake_gh, tmp_path, monk
     assert gh is None and entries == ["/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin"]
 
 
-@pytest.mark.parametrize("gate", ["valid", "stale", "denied", "completed", "stopped"])
+@pytest.mark.parametrize("gate", ["valid", "stale", "denied", "completed", "stopped", "lane-family", "receipt-head"])
 def test_review_child_revalidates_before_actual_execution_and_uses_completion_wake(config, monkeypatch, gate):
     state = State(config.state_dir)
     data = state.project("owner/repo")
@@ -344,6 +344,10 @@ def test_review_child_revalidates_before_actual_execution_and_uses_completion_wa
               "capacity_key": "account-one", "state": "launching", "started_at": 1,
               "worktree": str(worktree), "kind": "review", "pr": 9, "head": binding["head"],
               "review": binding, "prompt": prompt}
+    if gate == "lane-family":
+        config.lanes["agent-one"]["family"] = "claude-code"
+    elif gate == "receipt-head":
+        record["head"] = "b" * 40
     write_json(state.worker_path(record["id"]), record)
     reads, wakes = [], []
     def current(number, expected):
@@ -361,4 +365,4 @@ def test_review_child_revalidates_before_actual_execution_and_uses_completion_wa
     assert receipt["state"] == "exited" and receipt["review"]["verdict"] is None
     assert not state.capacity_busy("account-one")
     assert len(wakes) == (0 if gate == "stopped" else 1)
-    assert len(reads) == (0 if gate == "stopped" else 1)
+    assert len(reads) == (0 if gate in {"stopped", "lane-family", "receipt-head"} else 1)

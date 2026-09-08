@@ -39,15 +39,21 @@ The existing worker receipt contains the review binding and launching/running/
 exited state. It deduplicates that exact assignment across events and restart.
 An active review holds the existing account reservation; author mutation waits
 until it settles. A lost reservation or exit without a kernel verdict yields
-an owned recovery action, never a blind same-assignment relaunch. The Driver
-supervisor uses the governed reviewer-unavailability helper once after a fresh
-binding check and reconciles the resulting assignment. Kernel attempt history
-bounds retries; no new queue, timer class or lifecycle status is introduced.
+an owned recovery action, never a blind same-assignment relaunch. Reconcile
+holds the existing coordination lock around due refresh and coding recovery,
+records one recovery attempt in the existing failed worker receipt before the
+canonical helper call, and dispatches a new coding assignment immediately.
+The helper revalidates authority and owns selection; kernel attempt history
+bounds candidates. A failed or interrupted recovery stays owned and requires
+operator reconciliation rather than repeating that attempt. No new queue,
+timer class or lifecycle status is introduced.
 Unavailable authority, capacity or permissions returns `execution:blocked`
 with owner/reason/next step. Stop leaves existing workers and claims intact.
 
 The receipt's `execution:queued` means the supervised process was submitted;
-the durable `running` receipt proves the supervisor began. `completed` requires
+the durable `running` receipt proves the supervisor began. Child startup also
+revalidates the reloaded configured lane family and recorded task binding.
+`completed` requires
 fresh kernel verdict evidence, never exit code zero alone. The existing worker
 completion wake and recovery heartbeat own continuation into the current-head
 merge/finalization or author-feedback path. Source tests are isolated evidence;

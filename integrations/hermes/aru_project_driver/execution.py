@@ -128,6 +128,14 @@ complete merely because a process or command exited successfully.
 """
 
 
+def _validate_review_lane(repo: str, identity: str, issue: int, pr: int | None,
+                          head: str | None, review: dict | None, lane: dict) -> None:
+    if (not isinstance(review, dict) or review.get("repo") != repo or review.get("reviewer") != identity
+            or review.get("issue") != issue or review.get("pr") != pr or review.get("head") != head
+            or review.get("authority") != lane["family"]):
+        raise DriverError("review launch does not match its lane and assignment")
+
+
 def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
            *, kind: str = "implementation", pr: int | None = None,
            head: str | None = None, review: dict | None = None) -> dict:
@@ -136,11 +144,8 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
     if not state.project(repo)["enabled"]:
         raise DriverError("project stopped before worker launch")
     lane = config.lane(repo, identity)
-    if kind == "review" and (not review or review.get("repo") != repo
-            or review.get("reviewer") != identity or review.get("issue") != issue
-            or review.get("pr") != pr or review.get("head") != head
-            or review.get("authority") != lane["family"]):
-        raise DriverError("review launch does not match its lane and assignment")
+    if kind == "review":
+        _validate_review_lane(repo, identity, issue, pr, head, review, lane)
     directory = Path(worktree).resolve()
     repository = Path(config.project(repo)["repo_dir"]).resolve()
     if not directory.is_dir() or not directory.is_relative_to(repository / ".worktrees"):
@@ -192,6 +197,8 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
 def _revalidate_review_worker(config: Config, record: dict) -> None:
     if record.get("kind") != "review":
         return
+    _validate_review_lane(record["repo"], record["agent"], record["issue"], record.get("pr"),
+                          record.get("head"), record.get("review"), config.lane(record["repo"], record["agent"]))
     adapter = KernelAdapter(config.kernel_root,
                             Path(config.project(record["repo"])["repo_dir"]), record["repo"])
     current = adapter.review_binding(record["pr"], record["review"])

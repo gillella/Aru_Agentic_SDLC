@@ -255,6 +255,9 @@ class KernelAdapter:
     def review_worktree(self, binding: dict) -> str:
         return self._invoke("review_worktree", number=binding["pr"], expected=binding)
 
+    def refresh_reviewer(self, number: int, expected: dict, reason: str | None = None) -> dict:
+        return self._invoke("refresh_reviewer", number=number, expected=expected, reason=reason)
+
     def issue_summary(self, number: int) -> dict:
         return self._invoke("issue_summary", number=number)
 
@@ -572,6 +575,8 @@ class _Bridge:
         return record
 
     def _evidence_operation(self, operation: str, payload: dict) -> Any:
+        if operation == "refresh_reviewer":
+            return self.refresh_reviewer(payload["number"], payload["expected"], payload.get("reason"))
         if operation in {"review_binding", "review_worktree"}:
             return self._review_operation(operation, payload)
         # The bridge is executed as a file, with this directory on sys.path.
@@ -589,7 +594,7 @@ class _Bridge:
         return self.claims.release(number, agent)
 
     def dispatch(self, operation: str, payload: dict) -> Any:
-        if operation in {"issue_summary", "dependency_evidence", "source_pr", "review_binding", "review_worktree"}:
+        if operation in {"issue_summary", "dependency_evidence", "source_pr", "review_binding", "review_worktree", "refresh_reviewer"}:
             return self._evidence_operation(operation, payload)
         if operation == "snapshot":
             return self.snapshot()
@@ -622,6 +627,43 @@ class _Bridge:
     def _review_operation(self, operation: str, payload: dict) -> Any:
         binding = self.review_binding(payload["number"], payload.get("expected"))
         return self.review_worktree(binding) if operation == "review_worktree" else binding
+
+    def refresh_reviewer(self, number: int, expected: dict, reason: str | None = None) -> dict:
+        """Caller holds Driver coordination; canonical helper owns all mutation guards."""
+        self.identity()
+        create = importlib.import_module("create_pr")
+        if reason:
+            current = self.review_binding(number, expected)
+            if current.get("verdict"):
+                raise KernelAdapterError("review completed before recovery; reread convergence")
+        pr = self.merge_state.pull_request(number)
+        if (expected.get("repo") != self.repo or expected.get("pr") != number
+                or pr.get("state") != "OPEN" or pr.get("isDraft") is not False
+                or pr.get("headRefOid") != expected.get("head")
+                or create._optional_authority(pr) != expected.get("authority")
+                or create._one_label_value(pr, self.common.AUTHOR_PREFIX) != expected.get("author")
+                or self.merge_state.linked_issues(pr["body"]) != [expected["issue"]]
+                or "needs-human" in self.common.label_names(pr)):
+            raise KernelAdapterError("review authority changed before refresh; cancel stale action")
+        merge = importlib.import_module("merge_pr")
+        if reason and merge._coding_assignment(pr) != tuple(expected[k] for k in (
+            "reviewer", "reviewer_actor", "author", "author_family", "author_actor"
+        )):
+            raise KernelAdapterError("coding assignment changed before recovery")
+        self.revalidate(expected["issue"], expected["author"])
+        # Pass the validated snapshot into the canonical helper, whose replacement
+        # guard compares it again before mutation; never let a new head inherit a failure.
+        authority, now = expected.get("authority"), datetime.now(timezone.utc)
+        if reason:
+            result = create.recover_coding_authority(number, pr, authority, reason, now, create._default_probe)
+        elif authority is None:
+            result = create.assign_missing_authority(number, pr, now, create._default_probe)
+        elif authority in self.common.CODING_REVIEWERS:
+            result = {}
+        else:
+            result = create._refresh_external_authority(number, pr, authority, now, create._default_probe)
+        # Fallback helper results omit next_action; reread the resulting authority.
+        return {**result, **self.review.reviewer_continuation(number)}
 
     def review_binding(self, number: int, expected: dict | None = None) -> dict:
         """Read exact-head assignment and verdict using canonical kernel evidence."""

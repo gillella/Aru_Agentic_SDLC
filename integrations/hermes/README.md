@@ -33,9 +33,11 @@ is not progress: the result names a queued/running receipt or an owned blocker.
 The existing completion wake returns to the Driver. Fresh kernel verdict
 evidence routes approval to existing CI/merge/finalization and defects to the
 author. Exit or a lost reservation without a verdict requests governed reviewer
-recovery; the same assignment is never blindly relaunched. The configured
-Hermes supervisor owns the single recovery helper call and subsequent bounded
-reconcile. Missing permissions retain an explicit operator next action; Stop
+recovery; the same assignment is never blindly relaunched. Reconcile serializes
+the canonical refresh helper under its existing lock and records one recovery
+attempt in the failed worker receipt before dispatching a new assignment.
+Failed/interrupted recovery requires explicit operator reconciliation. Missing
+permissions retain an explicit operator next action; Stop
 and unavailable capacity do not activate another launcher.
 
 Callback examples before this repair:

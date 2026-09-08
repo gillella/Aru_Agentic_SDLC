@@ -289,12 +289,9 @@ class Controller:
             launched = []
             try:
                 plan = self._plan(repo)
-                timers = self.sync_reviews(repo, plan["actions"])
                 adapter = self.adapter(repo)
-                actions = [self._dispatch_review(repo, adapter, a, launched)
-                           if a.get("next_action") == "await-authoritative-review"
-                           and a.get("authority") in CODING_AUTHORITIES else a
-                           for a in plan["actions"]]
+                actions = [self._converge_review(repo, adapter, a, launched) for a in plan["actions"]]
+                timers = self.sync_reviews(repo, actions)
                 for work in plan["resumes"]:
                     if self._worker_count(repo) >= self.config.project(repo).get("max_workers", 4):
                         break
@@ -325,14 +322,27 @@ class Controller:
                 return {**result, "launched": launched}
 
     @staticmethod
-    def _review_blocked(work: dict, reason: str, *, recovery: bool = False) -> dict:
+    def _review_blocked(work: dict, reason: str) -> dict:
         return {**work, "execution": "blocked", "owner": "Hermes Driver",
-                "reason": reason, "next_action": "refresh-reviewer" if recovery else "review-blocked",
-                "coding_reviewer_unavailable": reason if recovery else None,
-                "next_step": "Reread bound authority, use governed reviewer recovery, then reconcile"
-                if recovery else "Restore the stated gate, then reconcile; heartbeat owns retry"}
+                "reason": reason, "next_action": "review-blocked",
+                "next_step": "Restore the stated gate, then reconcile; heartbeat owns retry"}
 
-    def _dispatch_review(self, repo: str, adapter, work: dict, launched: list) -> dict:
+    def _converge_review(self, repo: str, adapter, work: dict, launched: list) -> dict:
+        try:
+            if work.get("next_action") == "refresh-reviewer" and self._action_due(work):
+                if not self.state.project(repo)["enabled"]:
+                    raise DriverError("project stopped before reviewer refresh")
+                expected = {"repo": repo, "pr": work["pr"], "head": work["head"],
+                            "authority": work.get("authority"), "author": work["agent"], "issue": work["issue"]}
+                work = {**work, **adapter.refresh_reviewer(work["pr"], expected)}
+            if (work.get("next_action") == "await-authoritative-review"
+                    and work.get("authority") in CODING_AUTHORITIES):
+                return self._dispatch_review(repo, adapter, work, launched)
+            return work
+        except (KernelAdapterError, DriverError) as exc:
+            return self._review_blocked(work, str(exc))
+
+    def _dispatch_review(self, repo: str, adapter, work: dict, launched: list, *, recover=True) -> dict:
         """One receipt per exact assignment; never infer a verdict from process exit."""
         try:
             binding = adapter.review_binding(work["pr"], {
@@ -352,12 +362,37 @@ class Controller:
                         "next_step": "Existing worker completion event or recovery heartbeat"}
             matching = [r for r in receipts if r.get("review") == binding]
             if matching:
-                return self._review_blocked(work, "assigned review worker ended or lost its reservation without a valid verdict", recovery=True)
-            return self._start_review(repo, adapter, work, binding, launched)
+                return self._recover_review(repo, adapter, work, matching[-1], launched, recover)
+            return self._start_review(repo, adapter, work, binding, launched, recover)
         except (KernelAdapterError, DriverError) as exc:
             return self._review_blocked(work, str(exc))
 
-    def _start_review(self, repo: str, adapter, work: dict, binding: dict, launched: list) -> dict:
+    def _recover_review(self, repo: str, adapter, work: dict, receipt: dict, launched: list, recover: bool) -> dict:
+        if not self.state.project(repo)["enabled"]:
+            return self._review_blocked(work, "project stopped before reviewer recovery")
+        reason = receipt.get("reason") or "assigned review worker ended or lost its reservation without a valid verdict"
+        if not recover:
+            return self._review_blocked(work, reason)
+        if receipt.get("review_recovery_attempted"):
+            return {**self._review_blocked(work, receipt.get("recovery_error") or reason),
+                    "next_step": "Operator must reconcile the recorded recovery attempt before another helper call"}
+        receipt["review_recovery_attempted"] = True
+        write_json(self.state.worker_path(receipt["id"]), receipt)
+        try:
+            refreshed = adapter.refresh_reviewer(work["pr"], receipt["review"], reason)
+        except (KernelAdapterError, DriverError) as exc:
+            receipt["recovery_error"] = str(exc)
+            write_json(self.state.worker_path(receipt["id"]), receipt)
+            return {**self._review_blocked(work, str(exc)),
+                    "next_step": "Operator must reconcile the recorded recovery attempt before another helper call"}
+        next_work = {**work, **refreshed}
+        next_work.pop("review_binding", None)
+        if (next_work.get("next_action") == "await-authoritative-review"
+                and next_work.get("authority") in CODING_AUTHORITIES):
+            return self._dispatch_review(repo, adapter, next_work, launched, recover=False)
+        return next_work
+
+    def _start_review(self, repo: str, adapter, work: dict, binding: dict, launched: list, recover: bool) -> dict:
         identity = binding["reviewer"]
         lane = self.config.lane(repo, identity)
         if lane["family"] != binding["authority"]:
@@ -371,10 +406,15 @@ class Controller:
         if capacity.get("available") is not True:
             raise DriverError("review capacity unavailable or unknown: " + str(capacity.get("reason", "no observation")))
         if not self.probe(self.config, repo, identity, self.state):
-            return self._review_blocked(work, "assigned reviewer's bounded execution probe failed", recovery=True)
+            receipt = {"id": uuid.uuid4().hex, "repo": repo, "agent": identity, "issue": binding["issue"],
+                       "kind": "review", "pr": binding["pr"], "head": binding["head"], "review": binding,
+                       "capacity_key": lane["capacity_key"], "state": "launch_failed", "started_at": self.now(),
+                       "reason": "assigned reviewer's bounded execution probe failed", "worktree": None}
+            write_json(self.state.worker_path(receipt["id"]), receipt)
+            return self._recover_review(repo, adapter, work, receipt, launched, recover)
         current = adapter.review_binding(work["pr"], binding)
         if current.get("verdict"):
-            return self._dispatch_review(repo, adapter, work, launched)
+            return self._dispatch_review(repo, adapter, work, launched, recover=recover)
         worktree = adapter.review_worktree(binding)
         adapter.review_binding(work["pr"], binding)
         if not self.state.project(repo)["enabled"]:

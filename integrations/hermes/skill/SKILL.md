@@ -88,15 +88,16 @@ explicit `execution:blocked` owner, reason and next step. The supervisor records
 running and exited states; its existing completion event wakes this Driver.
 No separate generic reviewer or author worker may substitute for the assignment.
 
-For a due `refresh-reviewer` action, reread PR/head/sole authority and, when
-provided, every field of `review_binding`. Cancel a stale action. Invoke the
-canonical `create_pr.py --refresh-reviewer N` once; include
-`--coding-reviewer-unavailable REASON` only for the returned observed failure.
-Only that helper selects authority: CodeRabbit first when usable, otherwise
-an available distinct coding reviewer; retired providers are never candidates.
-Then run one fresh reconcile immediately so a new coding assignment executes.
-Do not overlap refresh commands or retry an exhausted assignment yourself.
-If recovery fails, report its precise blocker with this Driver as next owner.
+Reconcile performs due reviewer refresh under its existing coordination lock
+after rereading PR/head/sole authority, and calls only the canonical
+`create_pr.py` helper implementation. For a failed/lost coding worker it records
+one recovery attempt in that worker's receipt before passing the truthful
+unavailability reason to the helper. Only that helper selects authority:
+CodeRabbit first when usable, otherwise an available distinct coding reviewer;
+retired providers are never candidates. The same bounded activation dispatches
+the newly assigned coding reviewer. Do not run a second refresh from this
+callback. Unchanged failed recovery attempts require explicit operator
+reconciliation and retain their receipt; they are not blindly retried.
 Capacity/identity/permission blockers retain the heartbeat or explicit operator
 action as their next step. If this callback cannot execute an authorized
 action, explicitly name the required operator and action; a stopped Driver
