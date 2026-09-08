@@ -82,25 +82,13 @@ def test_malformed_or_contradictory_policy_fails_closed(extra, message):
         )
 
 
-def test_coderabbit_remains_preferred_for_every_issue_number():
-    policy = review_policy.review_policy_from_labels(
-        labels(
-            "reviewer-registered:coderabbit",
-            "reviewer-registered:sourcery",
-            "reviewer-registered:codeant",
-        )
-    )
+@pytest.mark.parametrize("number", [540, 542, 543])
+def test_usable_coderabbit_remains_preferred_without_unused_coding_config(monkeypatch, number):
+    monkeypatch.delenv("ARU_CODING_REVIEWERS", raising=False)
+    policy = review_policy.review_policy_from_labels(configured_policy_labels())
     selected = create_pr.choose_initial_reviewer(
-        542,
-        "codex-author",
-        "openai-codex",
-        "author-login",
-        policy=policy,
-        external_states={
-            "coderabbit": create_pr.AVAILABLE,
-            "sourcery": create_pr.AVAILABLE,
-            "codeant": create_pr.AVAILABLE,
-        },
+        number, "codex-author", "openai-codex", "author-login", policy=policy,
+        external_states={service: create_pr.AVAILABLE for service in create_pr.EXTERNAL_REVIEWERS},
         reviewer_actors={},
     )
     assert selected == ("coderabbit", None, None)
@@ -169,32 +157,6 @@ def test_attempted_reviewer_history_is_exact_head_and_identity_aware(monkeypatch
         authority="sourcery",
         identity=None,
     ) == {"external:coderabbit", "external:sourcery"}
-
-
-def test_missing_coding_configuration_skips_to_ordered_external_fallback(
-    monkeypatch,
-):
-    monkeypatch.delenv("ARU_CODING_REVIEWERS", raising=False)
-    policy = review_policy.ReviewPolicy(
-        external_reviewers=("coderabbit",),
-        coding_fallbacks=("claude-code",),
-        timeout_seconds=120,
-        sources={},
-    )
-    selected = create_pr.choose_initial_reviewer(
-        540,
-        "codex-author",
-        "openai-codex",
-        "author-login",
-        policy=policy,
-        external_states={
-            "coderabbit": create_pr.AVAILABLE,
-            "sourcery": create_pr.UNAVAILABLE,
-            "codeant": create_pr.UNAVAILABLE,
-        },
-        reviewer_actors={},
-    )
-    assert selected == ("coderabbit", None, None)
 
 
 def test_policy_order_still_prefers_a_non_author_coding_family(monkeypatch):
