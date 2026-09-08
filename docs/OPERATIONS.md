@@ -1329,9 +1329,14 @@ Remove the retired `reviewer-registered:sourcery` and `reviewer-registered:codea
 label definitions. Preserve historical `review:*` labels, findings and audit
 records; refresh each affected live PR through `create_pr.py --refresh-reviewer`.
 A retired assignment is immediately ineligible even before registrations are
-cleaned up. CodeRabbit registration alone is not a probe. The bounded GitHub
-Checks API observation requires the expected head, trusted CodeRabbit App and
-a recent running review; no such evidence immediately uses coding fallback.
+cleaned up. CodeRabbit registration alone is not a probe. The bounded
+observation reads CodeRabbit's authenticated commit statuses on the expected
+head (`/commits/<head>/statuses`, context `CodeRabbit`, creator
+`coderabbitai[bot]`): a recent `pending` or a `success` run is usable access; a
+denial, error, rate limit, stalled run or a skip posted after the review label
+is unavailability and selects coding fallback at once; no status yet leaves
+CodeRabbit eligible, since it only runs once `review:coderabbit` is applied.
+Check runs are not consulted because CodeRabbit does not create them here.
 The public CodeRabbit inventory API is deliberately not treated as health: its
 `is_installed` field is cached and does not prove a usable review worker.
 

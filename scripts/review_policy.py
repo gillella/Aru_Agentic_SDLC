@@ -35,8 +35,8 @@ from review_evidence import (
     PENDING,
     UNAVAILABLE,
     authority_assigned_at,
+    coderabbit_status_capability,
     external_state,
-    coderabbit_check_capability,
 )
 from reviewer_probe import (
     CodingCandidate,
@@ -108,17 +108,39 @@ def registration_states(names: Iterable[str]) -> dict[str, str]:
     }
 
 
+def _statuses(pages: Any) -> list[dict[str, Any]]:
+    """Flatten paginated commit-status pages down to status-shaped records.
+
+    Anything that is not a list is a transport or API failure and is refused.
+    Records without ``context``/``state`` are not statuses and are dropped; the
+    creator check downstream decides trust, so nothing here can grant capability.
+    """
+    if isinstance(pages, list) and all(isinstance(page, list) for page in pages):
+        pages = [record for page in pages for record in page]
+    if not isinstance(pages, list):
+        raise KernelError("commit status inventory is malformed")
+    return [
+        record for record in pages
+        if isinstance(record, dict) and "context" in record and "state" in record
+    ]
+
+
 def coderabbit_capability(head: str | None = None) -> dict[str, str]:
-    """Bounded GitHub App observation; inventory or generic green is insufficient."""
+    """Bounded observation of CodeRabbit's authenticated commit statuses on one head.
+
+    CodeRabbit never creates check runs here; registration, cached inventory and
+    a generic green rollup prove nothing. An unreadable or timed-out read is
+    reported as unavailable so the caller falls back instead of guessing.
+    """
     try:
         head = head or git(["rev-parse", "HEAD"])
         if not re.fullmatch(r"[0-9a-f]{40}", head):
             raise KernelError("invalid capability head")
         slug = repo_slug()
-        data = gh_json([
-            "api", f"repos/{slug}/commits/{head}/check-runs?per_page=100&filter=latest",
+        pages = gh_json([
+            "api", f"repos/{slug}/commits/{head}/statuses?per_page=100",
         ], timeout=CAPABILITY_TIMEOUT_SECONDS)
-        return coderabbit_check_capability(data, head, datetime.now(timezone.utc))
+        return coderabbit_status_capability(_statuses(pages), datetime.now(timezone.utc))
     except KernelError:
         return {"state": UNAVAILABLE, "reason": "capability-unreadable-or-timed-out"}
 
@@ -162,6 +184,10 @@ def external_decision(
     totals = {page.get("total_count") for page in pages}
     if len(totals) != 1 or totals.pop() != len(checks):
         raise KernelError("external review check-run inventory is incomplete")
+    statuses = _statuses(gh_json([
+        "api", "--paginate", "--slurp",
+        f"repos/{slug}/commits/{pr['headRefOid']}/statuses?per_page=100",
+    ]))
     assigned_at = authority_assigned_at(pr, events, authority)
     state = external_state(
         authority,
@@ -170,6 +196,7 @@ def external_decision(
         checks=checks,
         head=str(pr["headRefOid"]),
         since=assigned_at,
+        statuses=statuses,
     )
     age = (observed_at - assigned_at).total_seconds()
     if age < 0:
@@ -177,11 +204,13 @@ def external_decision(
     if state == AVAILABLE:
         return "external-available", None
     if state == PENDING and age < timeout_seconds:
-        capability = coderabbit_check_capability(
-            {"total_count": len(checks), "check_runs": checks},
-            str(pr["headRefOid"]), observed_at, timeout_seconds,
+        # Still inside the completion deadline: only an explicit denial, error,
+        # post-assignment skip or stalled run ends the wait early. No status yet
+        # is normal right after the review label is applied.
+        capability = coderabbit_status_capability(
+            statuses, observed_at, since=assigned_at, timeout_seconds=timeout_seconds,
         )
-        if capability["state"] != AVAILABLE:
+        if capability["state"] == UNAVAILABLE:
             return "external-unavailable", None
         return "external-pending", timeout_seconds - int(age)
     reason = "external-unavailable" if state == UNAVAILABLE else "external-pending-timeout"
@@ -429,7 +458,9 @@ def select_reviewer_from_pool(
         (service, None, None)
         for service in policy.external_reviewers
         if service in ACTIVE_EXTERNAL_REVIEWERS
-        and external_states.get(service) == AVAILABLE
+        # "pending" means registered with no denial observed yet; CodeRabbit
+        # cannot run before the review label exists, so it stays eligible.
+        and external_states.get(service) in {AVAILABLE, PENDING}
         and reviewer_candidate_key(service) not in excluded
     ]
     if external_pool:

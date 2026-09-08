@@ -87,6 +87,24 @@ def _trusted_actor(record: dict[str, Any], service: str) -> bool:
     return login in EXTERNAL_ACTORS[service] and actor_type in {"", "Bot"}
 
 
+def _trusted_status(record: dict[str, Any], service: str) -> bool:
+    """A commit status counts only when the provider's own App account created it.
+
+    CodeRabbit reports through the commit Status API (context "CodeRabbit"),
+    not through check runs. The context string is free text anyone with write
+    access can post, so trust rests on the authenticated creator, exactly as it
+    does for review objects.
+    """
+    creator = record.get("creator") or {}
+    login = str(creator.get("login") or "").lower()
+    creator_type = str(creator.get("type") or creator.get("__typename") or "")
+    return (
+        check_service(record, service)
+        and login in EXTERNAL_ACTORS[service]
+        and creator_type in {"", "Bot"}
+    )
+
+
 def _trusted_check(record: dict[str, Any], service: str, head: str) -> bool:
     app = record.get("app")
     return bool(
@@ -136,6 +154,37 @@ def _check_state(check: dict[str, Any]) -> str | None:
     return None
 
 
+def _status_state(status: dict[str, Any]) -> str | None:
+    # Mirrors _check_state for the Status API: "pending" is progress, "success"
+    # is a finished run but never a verdict (the review object carries that),
+    # and denials, errors and skips are unavailability.
+    if review_evidence_unavailable(status):
+        return UNAVAILABLE
+    state = str(status.get("state") or "").lower()
+    if state == "pending":
+        return PENDING
+    if state == "success":
+        return PENDING
+    if state in {"error", "failure"}:
+        return UNAVAILABLE
+    return None
+
+
+def _status_evidence(
+    statuses: list[dict[str, Any]], service: str, since: datetime
+) -> list[tuple[datetime, str]]:
+    evidence: list[tuple[datetime, str]] = []
+    for status in statuses:
+        if not isinstance(status, dict):
+            raise KernelError("external reviewer status evidence is malformed")
+        if not _trusted_status(status, service):
+            continue
+        observed_at = evidence_time(status, subject="external reviewer status")
+        if observed_at >= since and (state := _status_state(status)):
+            evidence.append((observed_at, state))
+    return evidence
+
+
 def external_state(
     service: str,
     *,
@@ -144,9 +193,10 @@ def external_state(
     checks: list[dict[str, Any]],
     head: str,
     since: datetime,
+    statuses: list[dict[str, Any]] = (),
 ) -> str:
     """Return the newest trusted provider state after the current assignment."""
-    evidence: list[tuple[datetime, str]] = []
+    evidence = _status_evidence(statuses, service, since)
     for record in [*reviews, *comments]:
         if not isinstance(record, dict):
             raise KernelError("external reviewer evidence is malformed")
@@ -172,31 +222,57 @@ def external_state(
     return _latest_state(evidence)
 
 
-def coderabbit_check_capability(
-    data: Any, head: str, observed_at: datetime, timeout_seconds: int = 900
+LABEL_GATED_SKIP_RE = re.compile(r"review skipped.{0,40}label", re.IGNORECASE)
+
+
+def coderabbit_status_capability(
+    statuses: list[dict[str, Any]],
+    observed_at: datetime,
+    *,
+    since: datetime | None = None,
+    timeout_seconds: int = 900,
 ) -> dict[str, str]:
-    """Only a current, authenticated, running review demonstrates usable access."""
-    if not isinstance(data, dict) or not isinstance(data.get("check_runs"), list):
-        raise KernelError("capability check inventory is malformed")
-    checks = data["check_runs"]
-    if data.get("total_count") != len(checks) or any(not isinstance(c, dict) for c in checks):
-        raise KernelError("capability check inventory is incomplete")
-    matching = [c for c in checks if _trusted_check(c, "coderabbit", head)]
-    if len(matching) > 1:
-        raise KernelError("capability checks are ambiguous")
-    if not matching:
-        return {"state": UNAVAILABLE, "reason": "no-current-head-app-evidence"}
-    check = matching[0]
-    if review_evidence_unavailable(check) or _check_state(check) == UNAVAILABLE:
+    """Judge usable CodeRabbit access from its authenticated commit statuses on the head.
+
+    Returns one of three states. ``available``: a review is running (recent
+    ``pending``) or completed on this head. ``pending``: nothing observed yet, or
+    only the label-gated skip that CodeRabbit posts before ``review:coderabbit``
+    is applied; CodeRabbit stays eligible because it cannot run before
+    assignment. ``unavailable``: explicit denial, error, rate limit, a skip after
+    assignment, or a stalled run. Untrusted creators are ignored, so a spoofed
+    status can neither grant nor revoke capability.
+    """
+    trusted = []
+    for status in statuses:
+        if not isinstance(status, dict):
+            raise KernelError("commit status inventory is malformed")
+        if _trusted_status(status, "coderabbit"):
+            trusted.append((evidence_time(status, subject="capability status"), status))
+    if not trusted:
+        return {"state": PENDING, "reason": "no-coderabbit-status-yet"}
+    seen_at, latest = max(trusted, key=lambda item: item[0])
+    description = str(latest.get("description") or "")
+    if LABEL_GATED_SKIP_RE.search(description):
+        if since is None or seen_at < since:
+            return {"state": PENDING, "reason": "awaiting-review-label"}
+        return {"state": UNAVAILABLE, "reason": "skipped-after-assignment"}
+    if review_evidence_unavailable(latest):
         return {"state": UNAVAILABLE, "reason": "provider-unavailable"}
-    age = (observed_at - evidence_time(check, subject="capability check")).total_seconds()
-    if str(check.get("status")).upper() == "IN_PROGRESS" and 0 <= age < timeout_seconds:
-        return {"state": AVAILABLE, "reason": "current-head-authenticated-review-running"}
-    return {"state": UNAVAILABLE, "reason": "usable-review-not-established"}
+    state = str(latest.get("state") or "").lower()
+    if state in {"error", "failure"}:
+        return {"state": UNAVAILABLE, "reason": "provider-error"}
+    if state == "pending":
+        age = (observed_at - seen_at).total_seconds()
+        if 0 <= age < timeout_seconds:
+            return {"state": AVAILABLE, "reason": "current-head-review-running"}
+        return {"state": UNAVAILABLE, "reason": "review-stalled"}
+    if state == "success":
+        return {"state": AVAILABLE, "reason": "current-head-review-completed"}
+    return {"state": UNAVAILABLE, "reason": "unrecognized-status"}
 
 
 __all__ = [
     "AVAILABLE", "EXTERNAL_ACTORS", "EXTERNAL_APP_SLUGS", "PENDING",
-    "UNAVAILABLE", "check_service",
+    "UNAVAILABLE", "check_service", "coderabbit_status_capability",
     "authority_assigned_at", "evidence_time", "external_state", "parse_time",
 ]

@@ -104,6 +104,30 @@ def test_rate_limited_success_check_does_not_satisfy_coderabbit(monkeypatch):
     assert merge_pr.exact_head_review(pr, 10, "coderabbit") is False
 
 
+SOURCERY_NOTICE = ("Hi @gillella! \U0001F44B\n\nYour private repo does not have access to Sourcery.\n\n"
+                   "Please [upgrade](https://app.sourcery.ai/login) to continue using Sourcery \u2728")
+
+
+def test_sourcery_private_repo_notice_is_recognized_as_unavailability():
+    import common
+    assert common.review_evidence_unavailable({"body": SOURCERY_NOTICE})
+    assert not common.review_evidence_unavailable({"body": "this helper does not have access to the config"})
+
+
+def test_status_evidence_feeds_external_state_after_assignment():
+    from datetime import datetime, timezone
+    import review_evidence as ev
+    def status(state, description, at=REVIEWED, creator={"login": "coderabbitai[bot]", "type": "Bot"}):
+        return {"context": "CodeRabbit", "state": state, "description": description, "creator": creator, "created_at": at}
+    base = dict(reviews=[], comments=[], checks=[], head=HEAD, since=datetime(2026, 9, 1, 10, 0, tzinfo=timezone.utc))
+    assert ev.external_state("coderabbit", statuses=[status("pending", "Review in progress")], **base) == ev.PENDING
+    assert ev.external_state("coderabbit", statuses=[status("success", "Review completed")], **base) == ev.PENDING
+    assert ev.external_state("coderabbit", statuses=[status("success", "Review skipped: excluded by label configuration")], **base) == ev.UNAVAILABLE
+    ignored = [status("error", "Review failed", "2026-09-01T09:00:00Z"),  # before assignment
+               status("error", "Review failed", creator={"login": "human", "type": "User"})]  # spoofed
+    assert ev.external_state("coderabbit", statuses=ignored, **base) == ev.PENDING
+
+
 def test_provider_approval_with_unavailability_text_does_not_satisfy_review(
     monkeypatch,
 ):

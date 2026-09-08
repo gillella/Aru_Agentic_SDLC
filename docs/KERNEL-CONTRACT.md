@@ -172,7 +172,12 @@ coding identities and subscriptions remain machine-local.
 registrations, bindings, and exclusions without mutation. Optional
 `--probe-reviewers` adds bounded local liveness observations. Remove retired Sourcery/CodeAnt registration definitions during operator rollout;
 retain historical review/assignment records. An active CodeRabbit registration
-is configuration, not capability proof.
+is configuration, not capability proof. Capability is read from CodeRabbit's own
+authenticated commit statuses on the head (context `CodeRabbit`, creator
+`coderabbitai[bot]`); it does not create check runs. `pending` is a running
+review, `success` a completed run, and denials, errors or a skip after the
+review label is applied are unavailability. No status yet keeps CodeRabbit
+eligible for initial assignment, because it cannot run before that label.
 
 ## Risk-proportional consumer policy
 

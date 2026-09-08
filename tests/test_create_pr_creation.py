@@ -16,7 +16,8 @@ def verification_body(command: str) -> str:
     return f"## Summary\n\nSummary\n\n## Verification\n\n- `{command}`"
 
 
-def test_create_pr_binds_head_and_exactly_one_reviewer(monkeypatch):
+@pytest.mark.parametrize("coderabbit", [create_pr.AVAILABLE, create_pr.PENDING])
+def test_create_pr_binds_head_and_exactly_one_reviewer(monkeypatch, coderabbit):
     record = {"number": 6, "labels": [{"name": "agent:codex-1"}]}
     lifecycle = ["In Progress"]
     monkeypatch.setattr(create_pr, "issue", lambda _number: record)
@@ -57,7 +58,7 @@ def test_create_pr_binds_head_and_exactly_one_reviewer(monkeypatch):
         "feat: small",
         verification_body("python3 -m pytest tests/test_create_pr_creation.py -q"),
         "codex-1",
-        external_states=external_states(coderabbit=create_pr.AVAILABLE),
+        external_states=external_states(coderabbit=coderabbit),
         reviewer_actors={},
         author_actor="author-login",
     )
