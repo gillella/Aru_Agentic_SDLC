@@ -25,6 +25,27 @@ MAX_PRS = 100
 MAX_REFERENCES = 100
 ACTIVE = {"In Progress", "In Review"}
 
+# Consumer runner profiles and the explicit account policy that selects one.
+# The tables live in this module, not in config.py, because the kernel bridge
+# executes this file as a script and cannot use package-relative imports.
+RUNNER_PROFILES = ("self-hosted-mac", "github-hosted")
+ACCOUNT_RUNNER_PROFILES = {
+    "gillella": "self-hosted-mac",
+    "unum-inc": "github-hosted",
+}
+SELF_HOSTED_LABELS = {"self-hosted", "macos", "arm64", "aru-ci"}
+GOVERNED_WORKFLOW_PATH = ".github/workflows/governed-pr.yml"
+
+
+def runner_profile_for_account(repo: str) -> str | None:
+    """Return the profile assigned to a repository's account, or None.
+
+    There is no default. An account outside the table has no profile, so its
+    verification capacity stays unproven and admission remains blocked.
+    """
+    owner, _, _ = repo.partition("/")
+    return ACCOUNT_RUNNER_PROFILES.get(owner.casefold())
+
 
 class KernelAdapterError(RuntimeError):
     """An observation or transition could not be safely established."""
@@ -285,28 +306,60 @@ class _Bridge:
             "priority": priority,
         }
 
+    def _self_hosted_capacity(self) -> dict:
+        """Operator-owned Macs prove capacity through repository runner inventory."""
+        runners = self.pages(f"repos/{self.repo}/actions/runners", key="runners")
+        eligible = []
+        for runner in runners:
+            labels = runner.get("labels")
+            if (
+                not isinstance(labels, list) or type(runner.get("busy")) is not bool
+                or runner.get("status") not in {"online", "offline"}
+                or any(not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in labels)
+            ):
+                raise KernelAdapterError("GitHub returned malformed runner inventory")
+            names = {label["name"].casefold() for label in labels}
+            if SELF_HOSTED_LABELS <= names:
+                eligible.append(runner)
+        online = [runner for runner in eligible if runner["status"] == "online"]
+        return {"available": bool(online), "online_runners": len(online),
+                "free_runners": sum(not runner["busy"] for runner in online)}
+
+    def _hosted_capacity(self) -> dict:
+        """Hosted accounts prove the governed workflow, not machine inventory.
+
+        GitHub publishes no hosted-runner count for a repository, so capacity is
+        never fabricated here: online_runners and free_runners stay None and only
+        the bounded workflow read below, together with the queue read, can make
+        hosted verification available.
+        """
+        workflows = self.pages(f"repos/{self.repo}/actions/workflows", key="workflows")
+        governed = []
+        for workflow in workflows:
+            if not isinstance(workflow.get("path"), str) or not isinstance(workflow.get("state"), str):
+                raise KernelAdapterError("GitHub returned malformed workflow inventory")
+            if workflow["path"] == GOVERNED_WORKFLOW_PATH:
+                governed.append(workflow)
+        if len(governed) != 1:
+            raise KernelAdapterError("repository publishes no unique governed workflow")
+        if governed[0]["state"] != "active":
+            raise KernelAdapterError(f"governed workflow is {governed[0]['state']}")
+        return {"available": True}
+
     def _ci(self) -> dict:
+        profile = runner_profile_for_account(self.repo)
         ci: dict[str, Any] = {
             "available": None, "online_runners": None, "free_runners": None,
-            "queued": None, "reason": None,
+            "queued": None, "reason": None, "runner_profile": profile,
         }
+        if profile is None:
+            ci["reason"] = f"no runner profile is assigned to the account of {self.repo}"
+            return ci
         try:
-            runners = self.pages(f"repos/{self.repo}/actions/runners", key="runners")
-            eligible = []
-            for runner in runners:
-                labels = runner.get("labels")
-                if (
-                    not isinstance(labels, list) or type(runner.get("busy")) is not bool
-                    or runner.get("status") not in {"online", "offline"}
-                    or any(not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in labels)
-                ):
-                    raise KernelAdapterError("GitHub returned malformed runner inventory")
-                names = {label["name"].casefold() for label in labels}
-                if {"self-hosted", "macos", "arm64", "aru-ci"} <= names:
-                    eligible.append(runner)
-            online = [runner for runner in eligible if runner["status"] == "online"]
-            ci.update(available=bool(online), online_runners=len(online),
-                      free_runners=sum(not runner["busy"] for runner in online))
+            if profile == "self-hosted-mac":
+                ci.update(self._self_hosted_capacity())
+            else:
+                ci.update(self._hosted_capacity())
         except (self.common.KernelError, KernelAdapterError) as exc:
             if str(exc) == getattr(self.common, "QUOTA_STOP_MESSAGE", None):
                 raise

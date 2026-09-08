@@ -14,10 +14,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from aru_project_driver.kernel import (  # noqa: E402
     KernelAdapter, KernelAdapterError, SCHEMA, _Bridge, _overlap,
+    runner_profile_for_account,
 )
 
 
-REPO = "example/project"
+# A personal gillella repository, which the account policy keeps on the Macs.
+REPO = "gillella/project"
+HOSTED_REPO = "Unum-Inc/project"
 ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location("_driver_test_touches", ROOT / "scripts/touches.py")
 touches_module = importlib.util.module_from_spec(spec)
@@ -54,6 +57,9 @@ class Backend:
         self.calls = []
         self.board_override = None
         self.ci_error = None
+        self.workflow_error = None
+        self.runner_status = "online"
+        self.workflows = [{"path": ".github/workflows/governed-pr.yml", "state": "active"}]
 
     def request(self, args):
         endpoint = args[1]
@@ -78,9 +84,13 @@ class Backend:
             if self.ci_error:
                 raise FakeError(self.ci_error)
             return {"total_count": 1, "runners": [{
-                "status": "online", "busy": False,
+                "status": self.runner_status, "busy": False,
                 "labels": [{"name": name} for name in ("self-hosted", "macOS", "ARM64", "aru-ci")],
             }]}
+        elif path.endswith("/actions/workflows"):
+            if self.workflow_error:
+                raise FakeError(self.workflow_error)
+            return {"total_count": len(self.workflows), "workflows": deepcopy(self.workflows)}
         elif path.endswith("/actions/runs"):
             return {"total_count": 0, "workflow_runs": []}
         else:
@@ -290,6 +300,76 @@ def test_online_runner_with_unknown_queue_cannot_admit_work(tmp_path):
     assert snapshot["ci"]["queued"] is None
     assert snapshot["ci"]["available"] is None
     assert snapshot["ci_available"] is None
+
+
+def hosted_ci(backend, tmp_path):
+    """Evaluate CI evidence for a Unum-Inc repository on the hosted profile."""
+    bridge = make_bridge(backend, tmp_path)
+    bridge.repo = HOSTED_REPO
+    return bridge._ci()
+
+
+def test_account_policy_selects_one_profile_without_fallback():
+    assert runner_profile_for_account("gillella/Aru_Agentic_SDLC") == "self-hosted-mac"
+    assert runner_profile_for_account("GILLELLA/other") == "self-hosted-mac"
+    assert runner_profile_for_account("Unum-Inc/unumnow") == "github-hosted"
+    assert runner_profile_for_account("unum-inc/other") == "github-hosted"
+    assert runner_profile_for_account("someone-else/project") is None
+
+
+def test_hosted_account_admits_on_bounded_workflow_and_queue_evidence(tmp_path):
+    ci = hosted_ci(Backend([issue(1)]), tmp_path)
+    assert ci["runner_profile"] == "github-hosted"
+    assert ci["available"] is True
+    assert ci["queued"] == 0
+    assert ci["reason"] is None
+    # Hosted capacity is never fabricated from a self-hosted inventory.
+    assert ci["online_runners"] is None and ci["free_runners"] is None
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        (lambda backend: setattr(backend, "workflow_error", "permission denied"), "permission denied"),
+        (lambda backend: backend.workflows.clear(), "no unique governed workflow"),
+        (lambda backend: backend.workflows.__setitem__(0, {"path": ".github/workflows/governed-pr.yml", "state": "disabled_manually"}), "disabled_manually"),
+        (lambda backend: backend.workflows.__setitem__(0, {"path": ".github/workflows/governed-pr.yml", "state": 7}), "malformed workflow inventory"),
+    ],
+)
+def test_unknown_hosted_workflow_evidence_blocks_admission(tmp_path, mutate, expected):
+    backend = Backend([issue(1)])
+    mutate(backend)
+    ci = hosted_ci(backend, tmp_path)
+    assert ci["available"] is None
+    assert expected in ci["reason"]
+
+
+def test_hosted_account_never_reads_self_hosted_runner_inventory(tmp_path):
+    backend = Backend([issue(1)])
+    backend.ci_error = "self-hosted inventory must not be consulted"
+    assert hosted_ci(backend, tmp_path)["available"] is True
+    assert not any(call.endswith("/actions/runners") for call in backend.calls)
+
+
+def test_offline_personal_pool_blocks_with_no_hosted_substitution(tmp_path):
+    backend = Backend([issue(1)])
+    backend.runner_status = "offline"
+    snapshot = make_bridge(backend, tmp_path).snapshot()
+    assert snapshot["ci"]["runner_profile"] == "self-hosted-mac"
+    assert snapshot["ci_available"] is False
+    assert snapshot["ci"]["online_runners"] == 0
+    assert not any(call.endswith("/actions/workflows") for call in backend.calls)
+
+
+def test_unassigned_account_is_blocked_before_any_capacity_read(tmp_path):
+    backend = Backend([issue(1)])
+    bridge = make_bridge(backend, tmp_path)
+    bridge.repo = "someone-else/project"
+    ci = bridge._ci()
+    assert ci["runner_profile"] is None
+    assert ci["available"] is None and ci["queued"] is None
+    assert "no runner profile is assigned" in ci["reason"]
+    assert backend.calls == []
 
 
 @pytest.mark.parametrize("status", ["Ready", "Backlog"])

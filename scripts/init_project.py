@@ -38,9 +38,96 @@ LABELS = {
     ),
 }
 
+# Consumer runner profiles. The check name, exact-head binding, read-only
+# permissions, event provenance and touches enforcement are identical for every
+# profile; only the compute target and its diagnostics differ.
+RUNNER_PROFILES = {
+    "self-hosted-mac": {
+        "runs_on": "[self-hosted, macOS, ARM64, aru-ci]",
+        "trust_step": "Validate self-hosted runner trust boundary",
+        "trust_message": (
+            "Only verified pull_request events from this repository may execute "
+            "on persistent self-hosted runners."
+        ),
+        "target": "operator-owned `[self-hosted, macOS, ARM64, aru-ci]` Macs",
+        "rule": (
+            "Never fall back to a GitHub-hosted runner; an offline pool leaves "
+            "merge blocked."
+        ),
+    },
+    "github-hosted": {
+        "runs_on": "ubuntu-latest",
+        "trust_step": "Validate hosted runner trust boundary",
+        "trust_message": (
+            "Only verified pull_request events from this repository may execute "
+            "the governed check."
+        ),
+        "target": "GitHub-hosted `ubuntu-latest` Actions runners",
+        "rule": (
+            "Never dispatch this repository to a self-hosted runner; hosted "
+            "verification must never reach a personal machine."
+        ),
+    },
+}
+
+# Explicit account policy. An account absent from this table has no profile and
+# is refused; there is no default and no cross-account fallback.
+ACCOUNT_RUNNER_PROFILES = {
+    "gillella": "self-hosted-mac",
+    "unum-inc": "github-hosted",
+}
+
+SCAFFOLD_TOKEN = re.compile(r"__ARU_[A-Z0-9_]+__")
+
 
 class BootstrapError(RuntimeError):
     pass
+
+
+def profile_spec(profile: object) -> dict[str, str]:
+    if not isinstance(profile, str) or profile not in RUNNER_PROFILES:
+        raise BootstrapError(f"unknown runner profile: {profile!r}")
+    return RUNNER_PROFILES[profile]
+
+
+def account_runner_profile(owner: str) -> str:
+    profile = ACCOUNT_RUNNER_PROFILES.get(owner.casefold())
+    if profile is None:
+        raise BootstrapError(f"no runner profile is assigned to account: {owner}")
+    return profile
+
+
+def resolve_runner_profile(owner: str | None, declared: str | None) -> str:
+    """Select exactly one profile from the account policy and any declaration."""
+    if declared is not None:
+        profile_spec(declared)
+    if owner is None:
+        if declared is None:
+            raise BootstrapError("--owner or --runner-profile must select a runner profile")
+        return declared
+    assigned = account_runner_profile(owner)
+    if declared is not None and declared != assigned:
+        raise BootstrapError(
+            f"account {owner} is assigned the {assigned} runner profile, not {declared}"
+        )
+    return assigned
+
+
+def render_profile(content: str, profile: str) -> str:
+    spec = profile_spec(profile)
+    for token, value in (
+        ("__ARU_RUNNER_PROFILE__", profile),
+        ("__ARU_RUNS_ON__", spec["runs_on"]),
+        ("__ARU_TRUST_STEP__", spec["trust_step"]),
+        ("__ARU_TRUST_MESSAGE__", spec["trust_message"]),
+        ("__ARU_RUNNER_TARGET__", spec["target"]),
+        ("__ARU_RUNNER_RULE__", spec["rule"]),
+    ):
+        content = content.replace(token, value)
+    unresolved = SCAFFOLD_TOKEN.search(content)
+    if unresolved:
+        raise BootstrapError(f"unresolved scaffold token: {unresolved.group(0)}")
+    return content
 
 
 def command(
@@ -140,22 +227,27 @@ def contained_git_hooks(destination: Path) -> Path:
     return configured
 
 
-def scaffold(name: str, directory: Path) -> list[str]:
+def scaffold(name: str, directory: Path, *, runner_profile: str) -> list[str]:
     safe_name(name)
+    profile_spec(runner_profile)
     destination = directory.expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
     framework = Path(__file__).resolve().parents[1]
     outputs = {
-        "AGENTS.md": (framework / "templates" / "AGENTS.md").read_text(encoding="utf-8"),
+        "AGENTS.md": render_profile(
+            (framework / "templates" / "AGENTS.md").read_text(encoding="utf-8"),
+            runner_profile,
+        ),
         ".github/ISSUE_TEMPLATE/governed-task.yml": (
             framework / "templates" / "issue.yml"
         ).read_text(encoding="utf-8"),
         ".github/PULL_REQUEST_TEMPLATE.md": (
             framework / "templates" / "pull_request.md"
         ).read_text(encoding="utf-8"),
-        ".github/workflows/governed-pr.yml": (
-            framework / "templates" / "governed-pr.yml"
-        ).read_text(encoding="utf-8"),
+        ".github/workflows/governed-pr.yml": render_profile(
+            (framework / "templates" / "governed-pr.yml").read_text(encoding="utf-8"),
+            runner_profile,
+        ),
         ".aru/verify.sh": (framework / "templates" / "verify.sh").read_text(
             encoding="utf-8"
         ),
@@ -254,7 +346,10 @@ def provision_ruleset(slug: str, directory: Path) -> dict[str, object] | str:
             temporary.unlink(missing_ok=True)
 
 
-def github_setup(name: str, directory: Path, private: bool) -> dict[str, object]:
+def github_setup(
+    name: str, directory: Path, private: bool, *, runner_profile: str
+) -> dict[str, object]:
+    profile_spec(runner_profile)
     visibility = "--private" if private else "--public"
     command(
         [
@@ -276,6 +371,14 @@ def github_setup(name: str, directory: Path, private: bool) -> dict[str, object]
         json_output=True,
     )
     slug = view["nameWithOwner"]
+    # The scaffolded workflow is already bound to one profile. Refuse the rest of
+    # provisioning when the account it actually landed in is assigned another.
+    created_owner = slug.split("/", 1)[0]
+    if account_runner_profile(created_owner) != runner_profile:
+        raise BootstrapError(
+            f"{slug} belongs to {created_owner}, which is not assigned the "
+            f"{runner_profile} runner profile of the scaffolded workflow"
+        )
     for label, (color, description) in LABELS.items():
         command(
             [
@@ -365,17 +468,22 @@ def main() -> int:
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--github", action="store_true")
     parser.add_argument("--private", action="store_true")
+    parser.add_argument("--owner", help="GitHub account that will own the repository")
+    parser.add_argument("--runner-profile", choices=sorted(RUNNER_PROFILES))
     args = parser.parse_args()
     try:
-        written = scaffold(args.name, args.directory)
+        profile = resolve_runner_profile(args.owner, args.runner_profile)
+        written = scaffold(args.name, args.directory, runner_profile=profile)
         remote = (
-            github_setup(args.name, args.directory.resolve(), args.private)
+            github_setup(
+                args.name, args.directory.resolve(), args.private, runner_profile=profile
+            )
             if args.github
             else None
         )
     except BootstrapError as exc:
         parser.error(str(exc))
-    print(f"bootstrapped {args.directory.resolve()} ({len(written)} files)")
+    print(f"bootstrapped {args.directory.resolve()} ({len(written)} files, {profile})")
     if remote:
         print(remote)
     return 0

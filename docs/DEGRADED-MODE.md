@@ -28,10 +28,15 @@ blocked. A later event or ten-minute recovery heartbeat rereads GitHub; only
 valid current evidence permits another bounded action. No degraded state
 authorizes new scope, account takeover, review bypass or deployment.
 
-If every `aru-ci` self-hosted Mac is offline, leave `aru-governed-pr` queued and
-restore runner availability. Do not change the workflow to a GitHub-hosted
+If every `aru-ci` self-hosted Mac is offline, a `self-hosted-mac` repository
+leaves `aru-governed-pr` queued while runner availability is restored. Do not
+switch it to the `github-hosted` profile, change the workflow to a hosted
 label, waive the required check, or treat an ad hoc terminal run as server
-evidence.
+evidence. A personal-pool outage is not a hosted-capacity event, and the
+reverse is equally forbidden: a `github-hosted` repository whose Actions
+capacity is degraded waits for GitHub, and is never dispatched to a personal
+Mac. Restoring a profile means fixing that profile's compute, never
+re-scaffolding the repository onto the other one to get a green check.
 
 ## Optional Hermes Driver recovery
 

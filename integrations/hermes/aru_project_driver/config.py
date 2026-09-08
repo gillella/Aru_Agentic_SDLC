@@ -6,6 +6,8 @@ import json
 import re
 from pathlib import Path
 
+from .kernel import RUNNER_PROFILES, runner_profile_for_account
+
 
 class DriverError(RuntimeError):
     """An action cannot safely proceed."""
@@ -101,6 +103,7 @@ class Config:
             value = project.get(key, default)
             if type(value) is not int or not 1 <= value <= 32:
                 raise DriverError(f"{repo}: {key} must be between 1 and 32")
+        self._runner_profile(repo, project.get("runner_profile"))
         if type(project.get("auto_triage", False)) is not bool:
             raise DriverError("auto_triage must explicitly be true or false")
         routes = project.get("webhook_subscriptions", [])
@@ -115,6 +118,19 @@ class Config:
                 or any(target not in self.projects for target in handoff_to)
                 or repo in handoff_to):
             raise DriverError("handoff_to must name distinct configured projects other than itself")
+
+    def _runner_profile(self, repo: str, declared: object) -> None:
+        """Refuse a declaration that is unknown or contradicts the account policy."""
+        if declared is None:
+            return
+        if declared not in RUNNER_PROFILES:
+            raise DriverError(f"{repo}: unknown runner_profile: {declared!r}")
+        assigned = runner_profile_for_account(repo)
+        if assigned is not None and declared != assigned:
+            raise DriverError(
+                f"{repo}: runner_profile {declared} contradicts the {assigned} "
+                "profile assigned to its account"
+            )
 
     def _lane(self, identity: str, lane: dict) -> None:
         if not re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,62}", identity):
@@ -143,6 +159,19 @@ class Config:
         if repo not in self.projects:
             raise DriverError("repository is not configured for this Driver")
         return self.projects[repo]
+
+    def runner_profile(self, repo: str) -> str:
+        """Return the one profile this repository verifies on, or refuse.
+
+        A declaration is optional but, when present, has already been validated
+        against the account policy. An account with neither is refused rather
+        than defaulted onto another account's runners.
+        """
+        declared = self.project(repo).get("runner_profile")
+        profile = declared or runner_profile_for_account(repo)
+        if profile is None:
+            raise DriverError(f"{repo}: no runner profile is declared or assigned to its account")
+        return profile
 
     def lane(self, repo: str, identity: str) -> dict:
         project = self.project(repo)

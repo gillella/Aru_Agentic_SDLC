@@ -13,10 +13,10 @@ agent-global instructions.
 3. Claim before editing and work only in the issue's isolated worktree.
 4. Keep the change inside `touches:` and run useful local preflight as needed.
 5. Open the PR through `create_pr.py` with `Closes #N`. Require the exact-head
-   `aru-governed-pr` check: GitHub Actions orchestrates it exclusively on an
-   operator-owned `[self-hosted, macOS, ARM64, aru-ci]` runner, where it runs
-   the consumer's `.aru/verify.sh` and validates `touches:` against the actual
-   diff. Never fall back to a GitHub-hosted runner.
+   `aru-governed-pr` check: GitHub Actions orchestrates it on the one runner
+   profile the repository's account is assigned, where it runs the consumer's
+   `.aru/verify.sh` and validates `touches:` against the actual diff. Never
+   fall back to another profile's runners.
 6. Resolve every finding and thread. Tier 0 documentation and Tier 1 ordinary
    code do not wait for authoritative review; Tier 2 sensitive/contract and
    Tier 3 production/destructive changes require exactly one current-head
@@ -28,6 +28,25 @@ Any missing, stale, partial, contradictory, or unreadable authority blocks the
 transition. Never push directly to `main` or `master`, review your own PR,
 hand-edit review authority, create a second lifecycle store, or guess during a
 GitHub outage.
+
+## Consumer runner profiles
+
+A governed repository verifies on exactly one profile, selected by its account:
+
+| Profile | `runs-on` | Account |
+| --- | --- | --- |
+| `self-hosted-mac` | `[self-hosted, macOS, ARM64, aru-ci]` | `gillella` personal repositories, including Aru itself |
+| `github-hosted` | `ubuntu-latest` | `Unum-Inc` repositories |
+
+There is no default: an account outside that table has no profile and stays
+blocked. The scaffolded workflow declares its profile in an
+`# aru-runner-profile:` marker, and `.aru/verify.sh` refuses a workflow whose
+marker and `runs-on:` disagree, an unknown marker, or a `github-hosted`
+workflow that mentions `self-hosted`. A `self-hosted-mac` outage never falls
+back to hosted runners, and a `github-hosted` repository never reaches a
+personal Mac. The profile chooses compute only; the check name, exact-head
+checkout, read-only permissions, event provenance and actual-diff `touches:`
+enforcement are identical for both. Verification is not deployment.
 
 ## Workflow routing
 

@@ -8,8 +8,8 @@ add merge gates.
 
 The stable v1 public API is the five lifecycle statuses, the issue contract,
 the `touches:` write boundary, the eleven supported lifecycle commands named
-below, the six installed skills, the `aru-governed-pr` check name and
-`[self-hosted, macOS, ARM64, aru-ci]` runner contract, the path-derived risk
+below, the six installed skills, the `aru-governed-pr` check name and the
+`self-hosted-mac` / `github-hosted` runner-profile contract, the path-derived risk
 tiers, the `review-policy:*`, `reviewer-registered:*`, `reviewer-binding:*`,
 `review:*`, and `agent:*` label contracts, and the seven operating documents.
 
@@ -45,8 +45,8 @@ operational receipts never authorize a claim, review, merge or issue closure.
 One open issue with a valid contract moves through `Backlog`, `Ready`,
 `In Progress`, `In Review`, and `Done`. It has one exclusive writer, one
 declared write boundary, one isolated worktree, one exact-current-head server
-verification check executed only by an operator-owned `aru-ci` self-hosted Mac,
-risk-tiered independent review, and one governed mechanical merge through
+verification check executed only on the repository's one assigned runner
+profile, risk-tiered independent review, and one governed mechanical merge through
 `scripts/merge_pr.py --expected-head`.
 
 The issue contract is:
@@ -63,12 +63,12 @@ The issue contract is:
 4. Create and use one `.worktrees/<branch>` checkout.
 5. Make the smallest change inside `touches:`. Local focused checks are useful
    preflight and audit evidence; the same local compute becomes merge authority
-   only when GitHub Actions dispatches the exact-head governed job to a
-   repository-level `[self-hosted, macOS, ARM64, aru-ci]` runner.
+   only when GitHub Actions dispatches the exact-head governed job to the
+   repository's one assigned runner profile.
 6. Open a PR containing `Closes #N`. The consumer-owned `aru-governed-pr`
-   workflow checks out the exact PR head on that self-hosted pool, runs the
+   workflow checks out the exact PR head on that profile's runners, runs the
    repository-defined `.aru/verify.sh`, and validates `touches:` against the
-   actual diff. It has no GitHub-hosted fallback. A GitHub merge queue reruns
+   actual diff. It has no cross-profile fallback. A GitHub merge queue reruns
    verification on its merge-group revision.
 7. Require that exact-head server check and resolve every current-head finding.
    Tier 2-3 changes also require one assigned authoritative reviewer distinct
@@ -182,26 +182,57 @@ controls, but they do not rewrite the Kernel's path-derived tier. The Kernel
 requires at most one authoritative review and no serial review rounds.
 Deployment is never implied by merge.
 
-## Self-hosted verification budget and trust boundary
+## Runner profiles, verification budget, and trust boundary
 
-GitHub Actions is the orchestration and check identity; operator-owned Macs
-supply the compute. Every required Kernel job targets exactly
-`[self-hosted, macOS, ARM64, aru-ci]`. A missing or offline runner leaves the
-check queued and blocks merge; it must never fall back to a GitHub-hosted
-runner. The default workflow does not upload artifacts or use Actions caches.
-Any storage-producing step is an explicit consumer policy choice.
+GitHub Actions is the orchestration and check identity. Which machines supply
+the compute is one **runner profile**, selected by the repository's account:
 
-Runners are repository-level, maintained and patched by the operator, and used
-only for trusted governed repositories. Before checkout, every job rejects a
-cross-repository fork PR and proves that Python 3.11+, pip, and `gh` are on the
-runner. Workflows retain read-only permissions, never use
-`pull_request_target`, and do not expose deployment secrets. Machine
-availability, electricity, storage, operating-system maintenance, and physical
-security are operator-owned costs and responsibilities.
+| Profile | `runs-on` | Assigned account |
+| --- | --- | --- |
+| `self-hosted-mac` | `[self-hosted, macOS, ARM64, aru-ci]` | `gillella` personal repositories, including Aru itself |
+| `github-hosted` | `ubuntu-latest` | `Unum-Inc` repositories |
+
+The account table is exhaustive and has no default. An account outside it
+resolves to no profile, so bootstrap refuses to scaffold it and Driver
+admission stays blocked rather than borrowing another account's runners. A
+consumer may also declare its profile explicitly; a declaration that names an
+unknown profile, or contradicts its account's assignment, is refused.
+
+The profile chooses compute and its diagnostics only. Every required Kernel
+job, under either profile, keeps the `aru-governed-pr` check name, the
+exact-head checkout with `persist-credentials: false`, read-only permissions,
+the same `pull_request` head-repository provenance condition, `.aru/verify.sh`,
+and actual-diff `touches:` enforcement.
+
+The scaffolded workflow records its profile in a single `# aru-runner-profile:`
+marker, and `.aru/verify.sh` requires exactly one marker, a known profile, and
+the exact `runs-on:` value that profile mandates. There is no cross-profile
+fallback in either direction: a `self-hosted-mac` repository whose Macs are all
+offline leaves `aru-governed-pr` queued and merge blocked, never rerouting to
+hosted runners, and a `github-hosted` repository is refused if its workflow so
+much as names `self-hosted`, so hosted verification never reaches a personal
+machine. Under both profiles the workflow rejects `pull_request_target`,
+Actions caches, artifact uploads, `environment:`, deployment secrets, and write
+permissions. Any storage-producing step is an explicit consumer policy choice.
+
+Self-hosted runners are repository-level, maintained and patched by the
+operator, and used only for trusted governed repositories; their availability,
+electricity, storage, operating-system maintenance, and physical security are
+operator-owned costs. GitHub publishes no comparable machine inventory for
+hosted runners, so a hosted repository's verification capacity is proven from
+the bounded evidence GitHub does publish — one active governed workflow plus
+the queued-run depth — and is never fabricated. Under either profile, evidence
+that is missing, unreadable, or malformed leaves capacity unknown and blocks
+admission. Before checkout, every job rejects a cross-repository fork PR and
+proves that Python 3.11+, pip, and `gh` are present.
+
+A profile is a verification decision, not a deployment decision. Neither
+profile authorizes a release, a deployment, or production access; those remain
+consumer-owned and are never implied by merge.
 
 The portable bootstrap ruleset has no configured bypass actors and requires
 the `aru-governed-pr` context from the GitHub Actions App. That workflow is
-scaffolded for the dedicated self-hosted runner pool. It does not make
+scaffolded for the account's assigned profile. It does not make
 `merge_pr.py` the only technically possible GitHub merge path, condition
 server-side review on a path tier, or pin the repository-owned workflow outside
 the repository. Helper-only merge is a Kernel process rule. Consumers needing
