@@ -62,7 +62,18 @@ class Config:
             self._project(repo, project)
         for identity, lane in self.lanes.items():
             self._lane(identity, lane)
+        self._sessions_agree()
         self._bind()
+
+    def _sessions_agree(self) -> None:
+        # Every lane on one subscription must agree on how many managed sessions
+        # that subscription may run; a disagreement would let the larger value win.
+        sessions_by_account: dict[str, set[int]] = {}
+        for lane in self.lanes.values():
+            sessions_by_account.setdefault(lane["capacity_key"], set()).add(lane.get("max_sessions", 1))
+        for account, values in sessions_by_account.items():
+            if len(values) != 1:
+                raise DriverError(f"lanes sharing capacity_key {account} declare different max_sessions")
 
     def _bind(self) -> None:
         from .state import State, read_json, write_json
@@ -156,6 +167,9 @@ class Config:
         timeout = lane.get("execution_timeout_seconds", 3600)
         if type(timeout) is not int or not 1 <= timeout <= 86400:
             raise DriverError(f"{identity}: execution_timeout_seconds must be between 1 and 86400")
+        sessions = lane.get("max_sessions", 1)
+        if type(sessions) is not int or not 1 <= sessions <= 8:
+            raise DriverError(f"{identity}: max_sessions must be between 1 and 8")
         allowed = lane.get("projects")
         if not isinstance(allowed, list) or not allowed or any(
             not isinstance(repo, str) or repo not in self.projects for repo in allowed

@@ -19,6 +19,7 @@
     "codex-primary": {
       "family": "openai-codex",
       "execution_timeout_seconds": 3600,
+      "max_sessions": 1,
       "capacity_key": "openai-subscription-primary",
       "projects": ["example/project"],
       "command": [
