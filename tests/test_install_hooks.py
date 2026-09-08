@@ -24,11 +24,7 @@ def install(target: Path) -> None:
 
 def install_result(target: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(INSTALLER)],
-        cwd=target,
-        check=False,
-        capture_output=True,
-        text=True,
+        [str(INSTALLER)], cwd=target, check=False, capture_output=True, text=True,
     )
 
 
@@ -74,19 +70,29 @@ def test_installer_preserves_and_chains_a_user_owned_hook(push_repo, old_backup)
         assert "0" * 40 in (target / "prior-input").read_text()
 
 
-@pytest.mark.parametrize("modified_history", [False, True])
-def test_installer_refuses_ambiguous_custom_hooks_without_changes(tmp_path, modified_history):
-    target, hooks = repository(tmp_path)
+@pytest.mark.parametrize("state", ["two-custom", "modified-pair", "modified-current", "modified-backup"])
+def test_installer_refuses_ambiguous_custom_hooks_without_changes(push_repo, state):
+    target, hooks, remote = push_repo
+    install(target)
     current = b"#!/usr/bin/env bash\necho custom\n"
-    if modified_history:
-        current += subprocess.check_output(["git", "show", "4393d3c:hooks/pre-push"], cwd=ROOT)
+    if state != "two-custom":
+        current = subprocess.check_output(["git", "show", "a1559da:hooks/pre-push"], cwd=ROOT)
+        guard = b'\nprintf "call\\n" >> hook-calls\n[[ $(wc -l < hook-calls) -lt 3 ]] || exit 73\n'
+        current = current.replace(b"\n", guard, 1)
     (hooks / "pre-push").write_bytes(current)
-    (hooks / "pre-push.pre-aru").write_text("other user hook\n")
+    if state != "two-custom":
+        assert invoke_hook(target, hooks, remote, "0" * 40).returncode == 0
+        assert (target / "hook-calls").read_text() == "call\n"
+    if state in {"two-custom", "modified-pair"}:
+        (hooks / "pre-push.pre-aru").write_text("other user hook\n")
+    elif state == "modified-backup":
+        (hooks / "pre-push.pre-aru").write_bytes(current)
+        (hooks / "pre-push.pre-aru").chmod(0o755)
+        (hooks / "pre-push").write_bytes((ROOT / "hooks/pre-push").read_bytes())
+    snapshot = {path.name: path.read_bytes() for path in hooks.iterdir() if path.is_file()}
     result = install_result(target)
     assert result.returncode != 0 and "operator review" in result.stderr
-    assert (hooks / "pre-push").read_bytes() == current
-    assert (hooks / "pre-push.pre-aru").read_text() == "other user hook\n"
-    assert not (hooks / "enforce_touches.py").exists()
+    assert {path.name: path.read_bytes() for path in hooks.iterdir() if path.is_file()} == snapshot
 
 
 def test_installer_refuses_external_core_hooks_path(tmp_path):

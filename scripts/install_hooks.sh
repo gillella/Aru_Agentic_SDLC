@@ -36,9 +36,13 @@ historical = {
     "289bf4c31078ca5aa0fc994a56a0f914f610e92c598b79aeebefbff71ae35d38",  # a1559da
 }
 managed = content.splitlines()[1:2] == [marker] or hashlib.sha256(content).hexdigest() in historical
+# Custom references to the reserved backup may become self-calls after relocation.
+# Refuse ambiguity; a text match must never authorize deleting a custom hook.
+if not managed and b"pre-push.pre-aru" in content:
+    sys.exit("error: custom hook references reserved backup path; operator review required")
 print("managed" if managed else "custom")
 PY
-)" || { echo "error: cannot read hook ownership: $1" >&2; exit 1; }
+)" || { echo "error: cannot safely identify hook ownership: $1" >&2; exit 1; }
   [[ "${ownership}" == managed ]]
 }
 
