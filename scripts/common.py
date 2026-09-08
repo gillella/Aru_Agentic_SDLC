@@ -703,6 +703,7 @@ def _preflight_status_transition(
                     f"({project_status!r}) must both equal expected {expected_current!r}"
                 )
         if current == status:
+            board_edit(number, status, expected_current=status, cwd=cwd)
             return current, None
         edit = board_edit(number, status, expected_current=expected_current, cwd=cwd)
         final_current = status_of(issue(number, cwd=cwd))
@@ -711,6 +712,7 @@ def _preflight_status_transition(
                 f"issue #{number} status ({final_current!r}) does not equal expected {expected_current!r}"
             )
         if final_current == status:
+            board_edit(number, status, expected_current=status, cwd=cwd)
             return final_current, None
         return final_current, edit
     except StatusPreconditionError:
