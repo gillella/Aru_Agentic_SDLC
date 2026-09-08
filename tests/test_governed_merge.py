@@ -490,7 +490,7 @@ def test_semantic_drift_never_reaches_merge_command(
     else:
         assert merge_pr.merge(10, HEAD)["merged"] is True
         assert commands == [[
-            "gh", "pr", "merge", "10", "--merge", "--delete-branch",
+            "gh", "pr", "merge", "10", "--merge",
             "--match-head-commit", HEAD,
         ]]
         assert events.count("ci") == 2
@@ -573,7 +573,7 @@ def test_final_pending_request_reread(monkeypatch, configured, mutation):
         assert merge_pr.merge(10, HEAD)["merged"] is True
         assert commands == [[
             "gh", "pr", "merge", "10", *([] if configured else ["--merge"]),
-            "--delete-branch", "--match-head-commit", HEAD,
+            "--match-head-commit", HEAD,
         ]]
         assert events[-4:] == ["pr", "issue", "queue", "pr"]
     else:

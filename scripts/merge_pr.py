@@ -680,7 +680,7 @@ def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str
     command = ["gh", "pr", "merge", str(number)]
     if not gates["merge_queue"]:
         command.append("--merge")
-    command.extend(["--delete-branch", "--match-head-commit", expected_head])
+    command.extend(["--match-head-commit", expected_head])
     # One bounded semantic reread after CI/review reads, immediately before
     # submission. Separate GitHub metadata reads and merge remain non-atomic.
     final_pr = pull_request(number)
