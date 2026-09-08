@@ -81,17 +81,11 @@ def rollback_claim(number: int, claim_label: str) -> None:
     current = status_of(live)
     if claim_label not in owners:
         return
-    remove_assignee = owners == [claim_label]
     if current == "In Progress" and owners == [claim_label]:
         set_status(number, "Ready", expected_current="In Progress")
-    elif current == "In Progress" and len(owners) > 1:
-        remove_assignee = False
-    elif current != "Ready":
+    elif current not in {"Ready", "In Progress"}:
         raise KernelError("claim rollback found an unsafe lifecycle state")
-    command = ["gh", "issue", "edit", str(number), "--remove-label", claim_label]
-    if remove_assignee:
-        command.extend(["--remove-assignee", "@me"])
-    run(command)
+    run(["gh", "issue", "edit", str(number), "--remove-label", claim_label])
     settled = issue(number)
     if claim_label in claimants(settled):
         raise KernelError("claim rollback did not settle")
@@ -115,8 +109,8 @@ def claim(number: int, agent: str) -> dict[str, object]:
 
     claim_label = AGENT_PREFIX + agent
     ensure_label(claim_label, color="1d76db", description=f"Claimed by {agent}")
-    run(["gh", "issue", "edit", str(number), "--add-label", claim_label, "--add-assignee", "@me"])
     try:
+        run(["gh", "issue", "edit", str(number), "--add-label", claim_label])
         reread = issue(number)
         owners = claimants(reread)
         if owners != [claim_label]:
@@ -191,16 +185,23 @@ def restore_released_claim(number: int, claim_label: str) -> None:
     record = issue(number)
     if status_of(record) != "Ready" or claimants(record):
         raise KernelError("release race could not safely restore the claim")
-    run(
-        [
-            "gh", "issue", "edit", str(number), "--add-label", claim_label,
-            "--add-assignee", "@me",
-        ]
-    )
-    set_status(number, "In Progress", expected_current="Ready")
-    settled = issue(number)
-    if status_of(settled) != "In Progress" or claimants(settled) != [claim_label]:
-        raise KernelError("release race claim restoration did not settle")
+    try:
+        run(["gh", "issue", "edit", str(number), "--add-label", claim_label])
+        set_status(
+            number, "In Progress", expected_current="Ready",
+            pre_mutation_check=lambda: require_claim_state(number, claim_label, "Ready"),
+        )
+        settled = issue(number)
+        if status_of(settled) != "In Progress" or claimants(settled) != [claim_label]:
+            raise KernelError("release race claim restoration did not settle")
+    except KernelError as restore_error:
+        try:
+            rollback_claim(number, claim_label)
+        except KernelError as rollback_error:
+            raise KernelError(
+                f"{rollback_error}; original restoration failure: {restore_error}"
+            ) from rollback_error
+        raise
 
 
 def release(number: int, agent: str) -> dict[str, object]:
@@ -222,18 +223,7 @@ def release(number: int, agent: str) -> dict[str, object]:
         pre_mutation_check=lambda: require_releasable(number, claim_label),
     )
     try:
-        run(
-            [
-                "gh",
-                "issue",
-                "edit",
-                str(number),
-                "--remove-label",
-                claim_label,
-                "--remove-assignee",
-                "@me",
-            ]
-        )
+        run(["gh", "issue", "edit", str(number), "--remove-label", claim_label])
     except KernelError as release_error:
         try:
             set_status(number, "In Progress", expected_current="Ready")
