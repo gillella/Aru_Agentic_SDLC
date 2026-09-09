@@ -1478,6 +1478,14 @@ head `b1ac3902ace4f19570b23810abfa1254b471f767` had passing required CI and
 pending review at this observation. Fixtures #7 and #8 remained Backlog,
 dependent on open setup issue #5.
 
+Setup subsequently completed at 05:53:36 UTC: PR #6 merged exact head
+`e349ba608c31fa49f71a7014274bf6f1e5774a79` as
+`6c7c66e21d7e2bac880679ed41f15db9eb5f82c6` after passing CI and a distinct
+current-head review. Setup issue #5 is Closed/Done. Both demo checkouts were
+fast-forwarded and their canonical hooks installed; only the completed setup
+author worktree was removed. The fixture issues remain Backlog, and this setup
+completion does not establish any live canary result.
+
 The Mini kernel checkout was updated to
 `dadf1c1fec5021f1a22ce1e268ec7a937836d2ee`; every installed Driver Python module
 hash matched that source. Existing custom operator notes in the installed
