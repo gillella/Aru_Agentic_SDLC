@@ -227,16 +227,29 @@ ticks do not run these model probes.
 
 ## Bounded refill canary
 
-`canary.py` is the scripted form of the live acceptance exercise in
-[Aru #557](https://github.com/gillella/Aru_Agentic_SDLC/issues/557). It drives
-only the installed Driver entrypoints (`start`, `status`, `event`, `stop`) and
-`gh`, never edits labels or authority by hand, and writes one JSON evidence file
-(`aru.canary/v1`) with a timestamp, exact identifiers and a pass/failed/unproven
-verdict per step: fixture creation, first dispatch, completion and PR, automatic
-refill of the next fixture, duplicate delivery suppression, Stop with a live
-worker preserved, and restart without a duplicate heartbeat or claim. A step that
-is not observed within `--bound-seconds` (default 900) is `unproven`, never pass,
-and the canary always leaves the project stopped.
+`canary.py` collects bounded observations for
+[Aru #557](https://github.com/gillella/Aru_Agentic_SDLC/issues/557) through the
+installed Driver entrypoints (`start`, `status`, `event`, `stop`) and `gh`.
+Its JSON evidence (`aru.canary/v1`) records timestamps and exact observed issue,
+worker, PR/head and job/event identifiers. It validates fresh running receipts
+and response shapes, retains earlier evidence after a later command failure,
+and distinguishes a worker exit plus a PR candidate from governed completion.
+
+The command does **not** establish canonical fixture readiness/claims,
+exact-head CI/review and confirmed merge/Done, automatic dispatch after that
+completion, stale delivery, lost-worker recovery, or suppression of later
+dispatch while stopped. Those checks remain explicitly `unproven`, even when
+every available observation succeeds. It cannot currently return overall
+`pass` or close #557/#607; both `unproven` and `failed` return exit code 1.
+A duplicate CLI event and immediate Stop/restart snapshots are limited
+observations, not proof of those broader acceptance criteria.
+
+`--bound-seconds` (default 900) is one monotonic budget for the **whole run**,
+including fixture creation, subprocess timeouts, waits and sleeps. No further
+test action starts after it expires. Final Stop and its status readback share
+an additional **30-second** cleanup allowance; a failed Stop is recorded as
+`failed` with partial evidence retained. Stop closes dispatch and pauses owned
+jobs without killing existing workers or removing claims, worktrees or PRs.
 
 ```sh
 /absolute/path/hermes-python /absolute/path/Aru_Agentic_SDLC/integrations/hermes/canary.py \
@@ -244,10 +257,16 @@ and the canary always leaves the project stopped.
   --evidence /absolute/path/canary-evidence.json --dry-run
 ```
 
-`--dry-run` substitutes a deterministic fake Driver and `gh`, so the sequence is
-testable offline. Running without `--dry-run` creates real fixture issues and
-dispatches real workers; do that only under the operator-approved scope recorded
-in the dependent live-run issue.
+`--dry-run` substitutes a fake Driver and `gh`; its output is marked
+`dry_run: true`, `evidence_kind: simulation` and remains `unproven`, never live
+acceptance. Running without it creates real Backlog fixture issues and starts
+the configured project. It does not add Project cards or perform canonical
+Ready triage itself. Before an approved live run, the target must have current
+governance and required CI runners, working repository/Project authentication,
+an explicit fixture preparation/selection plan that protects existing work,
+and approved non-employer lanes and worker permissions. Preserve the separate
+operator-approved scope recorded in [#607](https://github.com/gillella/Aru_Agentic_SDLC/issues/607);
+this source correction authorizes no installation, target setup or live run.
 
 ## Install separately; activate deliberately
 
