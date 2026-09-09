@@ -144,6 +144,16 @@ upgrade.
 
 ### 2. Bootstrap a new local project
 
+With Hermes, request `Hermes Project Driver Setup OWNER/REPO` for first-time
+adoption or `Hermes Project Driver Update OWNER/REPO` for an existing governed
+project. These are requests to Hermes using the existing helpers. They apply
+only to the named repository, or the repository already confirmed for that
+conversation. Updating this shared Aru source does not update or enroll other
+projects. `Hermes Project Driver Loop OWNER/REPO` explicitly starts continuation;
+`Status` inspects it and `Stop` disables future dispatch while preserving workers.
+See the [project command guide](docs/OPERATIONS.md#project-commands) for each
+command's scope and the separate shared-adapter installation step.
+
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
   --name my-project \
@@ -199,13 +209,14 @@ requiring the check. Customize the verification commands and branch rules for
 the consumer's risk policy. The workflow deliberately has no cross-profile
 fallback and does not upload artifacts or use Actions caches by default.
 
-An existing governed consumer adopts this by restaging with the `--owner` its
-repository actually lives under and copying the regenerated
-`.github/workflows/governed-pr.yml`, `AGENTS.md`, and `.aru/verify.sh` onto a
-normal project branch. The three must move together: `.aru/verify.sh` refuses a
-workflow whose `# aru-runner-profile:` marker and `runs-on:` disagree, so a
-half-applied update fails closed instead of silently changing where the check
-runs.
+An existing governed consumer updates by restaging with the `--owner` its
+repository actually lives under and reconciling changed Aru files on a normal
+project branch. Preserve its working verification commands and product rules;
+never replace `.aru/verify.sh` with the generated fail-closed placeholder.
+Keep the workflow's `# aru-runner-profile:` marker, `runs-on:`, and verification
+expectations consistent. Identical files need no replacement. Changing
+`ARU_SDLC_HOME` alone does not refresh copied `.aru/`, `.github/`, or guidance
+files. Follow the [existing-project procedure](docs/OPERATIONS.md#7-adopt-aru-in-an-existing-project).
 
 ### 4. Run one governed unit of work
 

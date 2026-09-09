@@ -32,9 +32,46 @@ files under `kernel_root/skills/`. Those current files control lifecycle,
 picker, review, and helper behavior. `reconcile` owns configured worker launch;
 do not expand historical factory instructions or arrange a second launcher.
 
-Repository Setup/Create uses the canonical bootstrap path; Update refreshes
-approved integration source without starting the Loop. Installing this
-adapter does not authorize runtime activation or change the configured model.
+## Setup and Update
+
+Recognize `Hermes Project Driver Setup OWNER/REPO` (or Create),
+`Hermes Project Driver Update OWNER/REPO`, `Hermes Project Driver Loop OWNER/REPO`,
+`Hermes Project Driver Status OWNER/REPO`, and `Hermes Project Driver Stop OWNER/REPO`.
+These are requests to Hermes using existing helpers, not additional `driver.py`
+subcommands. Use a confirmed conversation binding when the target is omitted;
+ask only for missing details needed for the requested action.
+
+Setup and Update apply only to that target. Updating the shared Aru framework
+does not authorize discovering, enrolling, or updating consumer projects. Do
+not add other projects merely because they are in a local directory, board, or
+configuration. Leave existing Loop activation unchanged during Update.
+
+- **Setup/Create:** read `kernel_root/skills/init-agent-project/SKILL.md` and
+  `kernel_root/docs/OPERATIONS.md` sections 6-7. For a new empty destination,
+  use `init_project.py --name NAME --directory PATH --owner OWNER`; use
+  `--github` only when GitHub repository creation was requested. For an existing
+  repository, generate outside it, compare, and reconcile the selected files.
+  Preserve product rules and supply meaningful consumer verification before
+  declaring adoption complete. Configure only the selected project's binding
+  within the requested installation scope. First setup does not start a Loop.
+- **Update:** compare the requested Aru revision with the target's guidance,
+  `.github/` templates/workflow, `.aru/verify.sh`, shared parser, and hooks.
+  Use the existing-project staged migration in operations section 7 and, for
+  an already governed repository, its issue and isolated worktree. Preserve
+  working consumer verification and custom policy; never replace verification
+  with the scaffold's fail-closed placeholder. Keep the runner profile marker,
+  `runs-on:`, and verification expectations consistent. Apply actual differences
+  only; report a no-op when the target already matches.
+
+The installed Hermes adapter is shared. A project Setup/Update does not
+implicitly upgrade that runtime or migrate webhook routes. When adapter
+installation is explicitly in scope, follow
+`kernel_root/integrations/hermes/README.md` and preview `install.py` against the
+specified configuration/home before applying it. Preserve other project
+bindings. Installing the adapter does not start projects or change the model.
+Report source revision, target changes, and any concrete remaining setup
+blocker separately from Loop state; do not run a live canary or start a Loop
+as an unrequested completion check.
 
 ## Loop and Stop
 

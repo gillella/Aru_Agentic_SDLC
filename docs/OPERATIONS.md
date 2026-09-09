@@ -327,12 +327,42 @@ test -x "$ARU_SDLC_HOME/scripts/init_project.py"
 
 ## 6. Adopt Aru in a new project
 
+### Project commands
+
+Use these requests with Hermes and the existing Aru helpers; they are not new
+`driver.py` subcommands. Supply a literal `OWNER/REPO` unless this conversation
+already has a user-confirmed repository binding. Ask only for missing target,
+checkout, or configuration details needed to carry out the requested action.
+
+| Request | Scope and result |
+| --- | --- |
+| `Hermes Project Driver Setup OWNER/REPO` | First-time adoption for that repository. Bootstrap a new empty destination as below; for an existing repository, use the staged migration in section 7. Configure its Driver binding only within the requested installation scope. Leave the Loop stopped until explicitly started. |
+| `Hermes Project Driver Update OWNER/REPO` | Compare the selected Aru revision with that repository's copied governance files and reconcile the differences using section 7. Preserve consumer verification and product rules. Leave Loop activation unchanged. |
+| `Hermes Project Driver Loop OWNER/REPO` | Start continuation for that configured project using the installed Driver's `start` entrypoint. |
+| `Hermes Project Driver Status OWNER/REPO` | Inspect that project's Driver state and report remaining setup or operational blockers. |
+| `Hermes Project Driver Stop OWNER/REPO` | Disable that project's future dispatch and pause its owned jobs. Preserve workers already finishing, claims, worktrees, and PRs. |
+
+Maintaining this shared Aru repository does not authorize enrolling or updating
+consumer projects. Setup and Update apply only to the requested target; do not
+scan for additional projects to adopt or turn an update into a Loop command.
+An already configured project needs Update only for actual differences, not a
+fresh installation each time. Report which files changed and which source
+revision they came from.
+
+The separately installed Hermes adapter is shared by its configured projects.
+A repository Setup/Update does not implicitly upgrade that adapter, edit other
+project bindings, or migrate webhook routes. When the request includes shared
+adapter installation, use the explicit configuration and Hermes home with the
+[installer preview/apply procedure](../integrations/hermes/README.md#install-separately-activate-deliberately).
+Installing source and starting a Loop remain separate actions.
+
 ### Create only the local scaffold
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
   --name example-app \
-  --directory /path/to/example-app
+  --directory /path/to/example-app \
+  --owner gillella
 ```
 
 The helper creates:
@@ -419,6 +449,13 @@ passes.
 `init_project.py` refuses to overwrite conflicting files. That is a safety
 feature, not a migration engine.
 
+Use this same staged comparison for `Hermes Project Driver Update OWNER/REPO`.
+Changing the canonical checkout or `ARU_SDLC_HOME` alone does not refresh the
+copies in a consumer repository. For an already governed project, track the
+selected update in that project's issue and isolated worktree. First adoption
+uses the bootstrap workflow. Preserve unrelated changes and apply only the
+differences needed for the requested Aru update.
+
 ### Safe migration pattern
 
 1. Start from a clean project branch or worktree.
@@ -426,9 +463,11 @@ feature, not a migration engine.
 3. Compare each generated file with the project's current governance and
    verification policy.
 4. Merge only the rules and hooks the project can actually support.
-5. Customize `.aru/verify.sh`, enable `aru-governed-pr` in branch rules, and —
-   on `self-hosted-mac` — register an `aru-ci` self-hosted runner before
-   validating adoption on a pull request.
+5. On first adoption, replace the fail-closed `.aru/verify.sh` placeholder
+   with consumer commands. On Update, preserve existing verification and merge
+   only applicable framework fixes. Ensure `aru-governed-pr` is required in
+   branch rules and an `aru-ci` runner is registered for `self-hosted-mac`
+   before validating adoption on a pull request; reuse existing valid setup.
 
 Generate the comparison scaffold with the account the repository actually lives
 under, so the staged workflow carries that account's runner profile:
@@ -449,11 +488,17 @@ Reconcile these surfaces deliberately:
 | Issue template | Keep required acceptance criteria and `touches:` input |
 | PR template | Keep `Closes #N`, the server-authority explanation, and surface-change evidence |
 | `.github/workflows/governed-pr.yml` | Keep the account's `# aru-runner-profile:` marker and matching `runs-on:`, exact-head checkout, `.aru/verify.sh`, and actual-diff `touches:` enforcement |
-| `.aru/verify.sh` | Replace the fail-closed placeholder with risk-appropriate consumer commands |
+| `.aru/verify.sh` | On first adoption, replace the fail-closed placeholder with consumer commands. On Update, preserve existing verification and merge applicable framework fixes; never copy the placeholder over working checks |
 | `.aru/lib/touches.py` | Retain the shared parser used by the server and local hook |
 | `.gitignore` | Merge entries; do not overwrite project-specific ignores |
 | `.aru/hooks/` | Retain versioned hook sources for the consumer project |
 | `.git/hooks/` | Install after reviewing any existing user-owned hooks |
+
+Keep the workflow profile marker, `runs-on:`, and verification expectations
+consistent; update the affected surfaces together when their contract changes.
+Files that already match need no replacement, and an unchanged hook needs no
+reinstallation. Consumer acceptance, release, and production settings remain
+owned by the target project.
 
 Install the canonical hooks from inside the consumer repository when ready:
 
