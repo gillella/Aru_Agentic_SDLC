@@ -3,8 +3,10 @@
 Uses actual PluginManager discovery and PTB Application.process_update. Fake
 Telegram HTTP responses and MCP calls are fixtures, not live integration proof.
 """
+import argparse
 import asyncio
 import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -12,11 +14,29 @@ import sys
 from unittest.mock import patch
 
 
-def main():  # noqa: C901 -- bounded offline compatibility probe
+def discover_plugin():
     home = Path(os.environ['HERMES_HOME'])
     if home != Path(os.environ['HOME']) or not (home / 'OFFLINE_FIXTURE').is_file():
         raise RuntimeError('Probe requires an explicitly marked temporary home.')
     from hermes_cli.plugins import PluginManager
+
+    manager = PluginManager()
+    manager.discover_and_load()
+    factories = [factory for factory, name in manager.get_telegram_handler_factories()
+                 if name == 'chopin-pilot']
+    assert len(factories) == 1, 'Actual Telegram factory registration missing or duplicated'
+    for name in ('plan_status', 'plan_compile'):
+        assert 'context is required' in manager._plugin_commands[name]['handler']('arbitrary')
+    print('Actual Hermes PluginManager registration: passed', flush=True)
+    return factories[0]
+
+
+def probe_telegram(factory):  # noqa: C901 -- bounded offline command fixture
+    # Only the absence of the top-level optional extra permits an unavailable
+    # result. A broken installed module or incompatible API is a hard failure.
+    if importlib.util.find_spec('telegram') is None:
+        print('TELEGRAM_EXTRA_UNAVAILABLE: selected Hermes installation lacks telegram')
+        return 77
     from telegram import Update
     from telegram.ext import Application, ExtBot
     from telegram.request import BaseRequest
@@ -45,14 +65,7 @@ def main():  # noqa: C901 -- bounded offline compatibility probe
                 raise AssertionError('Unexpected Telegram operation')
             return 200, json.dumps({'ok': True, 'result': result}).encode()
 
-    manager = PluginManager()
-    manager.discover_and_load()
-    factories = manager.get_telegram_handler_factories()
-    factory = next(factory for factory, name in factories if name == 'chopin-pilot')
     module = importlib.import_module(factory.__module__)
-    # Real loaded fallback callbacks receive only raw args and must stay inert.
-    for name in ('plan_status', 'plan_compile'):
-        assert 'context is required' in manager._plugin_commands[name]['handler']('arbitrary')
     bot = ExtBot('123456:OFFLINE_FIXTURE_ONLY', request=FixtureHTTP(), get_updates_request=FixtureHTTP())
     app = Application.builder().bot(bot).build()
     factory(app, None)
@@ -93,11 +106,20 @@ def main():  # noqa: C901 -- bounded offline compatibility probe
     with patch.object(module, 'create_plan', create), patch.object(module, 'status', status):
         asyncio.run(exercise())
     print('Actual Hermes discovery + PTB command dispatch: 5 cases passed; all network is fixture-only.')
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--telegram', action='store_true', help='Also exercise real PTB command dispatch')
+    args = parser.parse_args()
+    factory = discover_plugin()
+    return probe_telegram(factory) if args.telegram else 0
 
 
 if __name__ == '__main__':
     try:
-        main()
+        raise SystemExit(main())
     except Exception as exc:
         # This probe has exclusively dummy fixtures, no live secrets.
         print(type(exc).__name__ + ': ' + str(exc), file=sys.stderr)

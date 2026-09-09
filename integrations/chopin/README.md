@@ -66,8 +66,8 @@ operational deduplication, never another lifecycle or consensus store.
 ## Prepare the private configuration
 
 Run commands from the reviewed Aru feature worktree. Nothing below is performed
-automatically. The supplied absolute paths match this Mini; edit the copied JSON
-for another host. Check that names/paths are dedicated and the pinned upstream
+automatically. The supplied absolute paths match this Mini; edit the generated
+private JSON for another host. Check that names/paths are dedicated and the pinned upstream
 checkout has no tracked changes or runtime dotenv files. The helper refuses
 ambient dotenv without reading it. If present, prepare a separate clean checkout
 at the pin; do not delete or source existing secrets.
@@ -75,13 +75,12 @@ at the pin; do not delete or source existing secrets.
 ```sh
 umask 077
 mkdir -p /Users/gillella/.hermes/workspace/chopin-pilot/operator
-python3 - <<'PY'
-from pathlib import Path
-from integrations.chopin.private import write_new
-write_new(Path('/Users/gillella/.hermes/workspace/chopin-pilot/operator/config.json'),
-          Path('integrations/chopin/config.example.json').read_bytes())
-PY
+python3 -m integrations.chopin.example_config --output /Users/gillella/.hermes/workspace/chopin-pilot/operator/config.json
 ```
+
+The generator in `example_config.py` retains the explicit pilot defaults and
+`chopin-pilot/v1` runtime JSON format; it creates a new private file without
+overwriting one. No runtime JSON is tracked in Git.
 
 Edit `operator/config.json` in an editor. It must stay 0600, in its 0700 directory;
 symlinks and overwrites are refused. It contains paths and explicit admission,
@@ -110,10 +109,15 @@ and 600-second expiry protect this operation. The credential destination is
 reserved exclusively; conversion failure consumes the attempt and leaves the
 destination for operator inspection rather than risking a second conversion.
 
-Loopback alternative: change `setup_origin` to `http://127.0.0.1:8766`, and on the
+Loopback alternative: use a **clean/private browser profile** for the entire
+registration flow. Browser cookies ignore ports, and the setup callback intentionally
+requires exactly its own cookie; an unrelated localhost cookie causes refusal.
+Then change `setup_origin` to `http://127.0.0.1:8766`, and on the
 MacBook run `ssh -N -L 8766:127.0.0.1:8766 gillella@aravinds-mac-mini-1` (substitute
 the operator's existing SSH host alias if needed). Open the printed loopback URL
-in that same browser while the SSH forward stays open. Exact Host remains
+in that same clean browser profile while the SSH forward stays open. GitHub acceptance
+of the tailnet HTTP manifest redirect remains unverified; use this loopback alternative
+if GitHub refuses it. Exact Host remains
 `127.0.0.1:8766`. Never route this listener through Funnel or bind `0.0.0.0`.
 
 The App manifest requests read-only contents, pull_requests, checks, statuses,
@@ -183,7 +187,11 @@ plist in private state and exclusively hard-links it to
 `~/Library/LaunchAgents/local.chopin.catalog-pilot.plist`, then bootstraps the
 current GUI domain. ProgramArguments directly invoke the pinned absolute Bun,
 absolute `--env-file`, and `apps/server/src/main.ts` with absolute cwd. Runtime.env
-is parsed as strict data, never shell-sourced. KeepAlive and RunAtLoad are both
+is parsed as strict data, never shell-sourced. Bun 1.3.2 gives inherited environment
+values precedence over its env file, verified with isolated dummy data. The private
+plist deliberately retains explicit runtime values to prevent ambient credentials
+or database settings from overriding that file. Keep the plist 0600 and never share
+`launchctl print` output. KeepAlive and RunAtLoad are both
 true, including restart after clean exit; the agent starts only **after user
 login**, not at unattended pre-login boot. Failed bootstrap leaves the file for
 inspection; do not blindly overwrite/retry a collision. All log paths remain
@@ -262,15 +270,35 @@ does not change that restriction.
 /Users/gillella/.hermes/hermes-agent/venv/bin/python -m ruff check integrations/chopin tests/test_chopin_integration.py
 ```
 
-The repository's existing governed job runs pytest discovery over `tests/`, so
-this file is exercised without CI edits. Its Hermes compatibility case requires
-an actual installation: `HERMES_TEST_PYTHON` overrides the default
-`~/.hermes/hermes-agent/venv/bin/python`. The test **fails**, rather than skips,
-if absent. It loads the real PluginManager and executes real PTB commands with
-fixture HTTP in an explicitly marked temporary HOME/HERMES_HOME. It never reads
-live Hermes configuration or invokes polling. The separate `contract_probe.ts`
-checks generated fixture payloads against the pinned upstream creation parser and
-MDX canonicalizer; it is not a live MCP/OAuth/canvas test.
+The repository's governed job discovers the one-line
+`tests/test_chopin_integration.py` import bridge; every test and fixture lives visibly
+under `integrations/chopin/tests/test_pilot.py`. This follows the optional integration
+boundary and keeps tracked kernel test LOC at 9,000 without changing testpaths,
+budgets or exemptions. Direct discovery and bridge discovery must collect the same
+cases; run either path (not both together, which would execute each case twice).
+
+The real-Hermes compatibility case always loads the actual installed PluginManager,
+imports this plugin and verifies its command/factory registration in a marked temporary
+HOME/HERMES_HOME. `HERMES_TEST_PYTHON` explicitly selects the installation; the default
+is `~/.hermes/hermes-agent/venv/bin/python`. Missing Hermes or incompatible installed
+APIs fail, never skip. A **separate** PTB test runs real Application.process_update
+with fixture HTTP. Only `find_spec('telegram') is None` in that selected installation
+returns the explicit unavailable result; broken imports or command failures fail.
+An absent Telegram extra may skip that test on the governed runner, and such a run
+proves plugin registration compatibility only, not Telegram readiness.
+
+Pilot-local release readiness on the Mini requires the full path, with **no Telegram
+skip permitted**. Run explicitly against its real Hermes installation:
+
+```sh
+CHOPIN_REQUIRE_TELEGRAM=1 HERMES_TEST_PYTHON=/Users/gillella/.hermes/hermes-agent/venv/bin/python /Users/gillella/.hermes/hermes-agent/venv/bin/python -m pytest tests/test_chopin_integration.py tests/test_surface.py -o addopts= -q -rs
+```
+
+`CHOPIN_REQUIRE_TELEGRAM=1` turns actual Telegram-extra absence into a failure. Neither
+mode installs packages, reads live Hermes configuration, starts polling, or claims
+Telegram E2E success. The separate `contract_probe.ts` checks generated fixture
+payloads against the pinned upstream creation parser and MDX canonicalizer; it is not
+a live MCP/OAuth/canvas test.
 
 Still unverified: browser App approval and settings, real OAuth exchange,
 role/database/migration execution, launchd restart, public routing, MCP user bearer

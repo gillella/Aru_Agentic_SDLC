@@ -199,13 +199,13 @@ def create_plan(config: dict, topic: str) -> str:
         created = client.call('create_document', payload)
         validate_document(created)
         readback = client.read(created['id'])
-        path = created.get('url', '')
+        document_path = created.get('url', '')
         # Pinned hosted.ts returns protocol/document-url.ts documentPath, a
         # relative /documents/owner/repository/slug path, not a channel URL.
         prefix = '/documents/' + config['repository'] + '/'
-        if not canonical_path(path, prefix):
+        if not canonical_path(document_path, prefix):
             raise PilotError('Server returned a noncanonical repository document path.')
-        url = config['public_origin'] + path
+        url = config['public_origin'] + document_path
         if readback['revision'] < created['revision']:
             raise PilotError('Readback revision is older than creation.')
         return f"Draft confirmed: {readback['title']}\n{url}\nRevision {readback['revision']}. No consensus claimed. Compilation disabled."
@@ -215,7 +215,10 @@ def canonical_path(path, prefix):
     if not isinstance(path, str) or not path.startswith(prefix):
         return False
     slug = path[len(prefix):]
-    decoded = unquote(slug, errors='strict')
+    try:
+        decoded = unquote(slug, errors='strict')
+    except UnicodeDecodeError:
+        raise PilotError('Server returned an invalid UTF-8 document path.') from None
     return bool(decoded and len(decoded) <= 100 and all(c.isalnum() or c == '-' or unicodedata.category(c).startswith('M') for c in decoded)
                 and quote(decoded, safe='-') == slug)
 
