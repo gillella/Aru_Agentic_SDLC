@@ -306,6 +306,34 @@ restores this installation's earlier writes; a concurrent writer's changes are
 preserved and any incomplete rollback reports the retained backup location.
 Keep the Driver stopped during installation: multiple file replacements are
 not an atomic runtime upgrade, and a host crash may require backup restoration.
+Upgrading the Stop fence requires a quiescent maintenance window: already
+running coordinators and queued supervisors loaded from older source do not
+honor the new fence. Finish or safely quiesce those old entrypoints before
+replacing the shared installation, preserving active worker children and their
+claims. A source merge alone does not establish installed Stop behavior. A
+shared installation affects all configured projects, so the maintenance window
+must account for each project's existing coordinators and workers.
+
+Rollback to a version that does not honor the Stop fence requires the same
+quiescent maintenance window. Complete Stop and scheduler cleanup for every
+affected project, and keep all event, coordinator and other project-state
+writers quiescent throughout restoration. Preserve active worker children,
+claims, worktrees and receipts. A successful new-version Stop alone is
+insufficient: older source ignores its nonce and may still read `enabled: true`
+from the project journal.
+
+Before restoring older source, use the currently installed `State` API under
+its coordination lock followed by the project control lock
+(`with state.lock(), state.project_lock(repo):`). Load the latest state with
+`state.project(repo)`, require its effective `enabled` value to be false, set
+`enabled=False`, and persist that same record with `state.save(repo, data)`.
+Verify the stored project JSON also contains `enabled: false`. Preserve the
+latest journal and delivery history; never restore a historical state snapshot.
+Keep these operations within the authorized maintenance deadline. After file
+restoration, verify disabled state using the restored version's `State` API
+for every affected project before admitting any callbacks or coordinators.
+If migration, quiescence or disabled readback cannot be proven, refuse the
+downgrade and keep admission blocked; restoring files alone is not safe rollback.
 
 Existing authenticated Hermes webhook routes can be explicitly listed in the
 project's optional `webhook_subscriptions` array. Add `--update-webhooks` to
@@ -329,8 +357,8 @@ configuration path for every command. For example:
 | Subcommand after `--config CONFIG` | Effect |
 | --- | --- |
 | `start --project OWNER/REPO` | Enable continuation, ensure one native ten-minute heartbeat, and request an immediate activation |
-| `stop --project OWNER/REPO` | Disable future dispatch and pause this project's owned scheduler jobs |
-| `status --project OWNER/REPO` | Inspect project and operational state |
+| `stop --project OWNER/REPO [--timeout-seconds SECONDS]` | Persist dispatch-disabled intent, settle in-flight admission, and pause this project's owned scheduler jobs within the supplied budget (default 20 seconds) |
+| `status --project OWNER/REPO [--timeout-seconds SECONDS]` | Inspect project and operational state within the supplied budget (default 20 seconds) |
 | `tick --project OWNER/REPO` | Read current conditions and return the native `wakeAgent` gate; no new writer dispatch |
 | `reconcile --project OWNER/REPO` | Resume managed work, promote if explicitly enabled, claim and launch eligible writers; return PR actions for Hermes |
 | `event --project OWNER/REPO --event-id ID --reason event` | Deduplicate a trusted event receipt and request a native immediate wake |
@@ -346,6 +374,34 @@ Stop preserves live writers, their claims, worktrees and PRs. It does not kill
 processes, free their accounts prematurely, or cancel unrelated jobs. On
 restart the Driver rereads GitHub and process evidence. An unfamiliar existing
 claim is reported for explicit adoption rather than stolen.
+
+Stop writes and syncs a project-specific nonce without acquiring the shared
+coordination lock, then settles the project's spawn and control locks and the
+native scheduler lock. Ordinary saves cannot erase the fence. Start
+may acknowledge only the nonce it observed before its coordinating wait; an
+intervening Stop defeats that Start. Each prepared supervisor also carries its
+admission nonce, so Stop followed by explicit Start cannot revive an old queued
+worker. Final supervisor and child creation use a short project spawn barrier.
+Scheduler producers recheck the fence under the native scheduler lock; Stop
+settles producers already in that lock before reporting completed cleanup.
+
+`status: stopped` from Stop means the fence was persisted, the spawn barrier
+was crossed, and owned scheduler cleanup/readback completed. Any timeout or
+failure returns `status: partial` and a nonzero exit, with separate
+`stop_intent_persisted`, `spawn_barrier_verified`, and `scheduler.verified`
+evidence. A persisted fence alone does not prove an in-flight spawn has settled
+or that scheduler cleanup completed. Partial Status preserves observed project
+fields while marking scheduler readback unverified. These bounded operations
+require the POSIX main thread and exclusive SIGALRM ownership; an active caller
+timer or blocked/pending SIGALRM returns partial without taking over that state.
+They interrupt the native operation itself and leave no background cleanup
+running after a timeout.
+
+The caller owns a combined cleanup deadline. For a 30-second Stop plus Status
+allowance, pass Stop its remaining budget and then pass Status only the time
+left after Stop; do not give each command a fresh 30 seconds. Retain partial
+evidence and report failed cleanup if the total budget expires. These local
+operational records do not replace GitHub issue or Project lifecycle authority.
 
 Authenticated worker-completion, review, check, merge and dependency events
 provide the fast path. Native event session metadata supplies delivery IDs;
@@ -409,7 +465,7 @@ start two configured projects, and record sanitized route IDs, event IDs,
 target issue/Project acknowledgments, worker receipts, exact PR heads and
 Stop/restart results. The canary must cover one completion-to-next-dispatch,
 one cross-project handoff plus dependency return wake, duplicate and stale
-deliveries, unavailable capacity, and a stopped target. A failed canary rolls
-back by stopping the project, restoring the install backup, and preserving all
-GitHub claims and worktrees for review. Source merge, a green test suite, or a
+deliveries, unavailable capacity, and a stopped target. A failed canary uses
+the quiescent rollback and disabled-state migration procedure above, preserving
+all GitHub claims and worktrees for review. Source merge, a green test suite, or a
 healthy listener is not live acceptance evidence.

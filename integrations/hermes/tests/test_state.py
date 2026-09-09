@@ -215,3 +215,86 @@ def test_capacity_holder_identifies_current_lock_and_ignores_stale_file_contents
         assert State(state.root).capacity_holder("shared-account") == "new-worker"
     assert path.read_text() == "new-worker\n"
     assert state.capacity_holder("shared-account") is None
+
+
+def test_stop_fence_survives_stale_save_and_only_matching_start_acknowledges(state):
+    repo = "owner/repo"
+    initial = state.project(repo)
+    initial["enabled"] = True
+    state.save(repo, initial)
+    stale = state.project(repo)
+    nonce = state.request_stop(repo)
+    state.save(repo, stale)
+    assert not State(state.root).project(repo)["enabled"]
+    assert State(state.root).stop_nonce(repo) == nonce
+    stale.update(acknowledged_stop=nonce, enabled=True)
+    state.save(repo, stale)
+    assert state.project(repo)["enabled"]
+    state.request_stop(repo)
+    state.save(repo, stale)
+    assert not state.project(repo)["enabled"]
+
+
+@pytest.mark.parametrize("bad", [{}, {"nonce": "x"}, {"repo": "other/repo", "nonce": "a" * 32, "stopped_at": 1}])
+def test_existing_malformed_stop_intent_never_becomes_legacy_absence(state, bad):
+    from aru_project_driver.state import write_json
+
+    repo = "owner/repo"
+    data = state.project(repo)
+    data["enabled"] = True
+    state.save(repo, data)
+    write_json(state.root / "stops" / f"{key(repo)}.json", bad)
+    with pytest.raises(DriverError, match="Stop intent"):
+        state.project(repo)
+
+
+def test_acknowledged_but_missing_stop_intent_blocks_reads_and_admission(state):
+    repo = "owner/repo"
+    data = state.project(repo)
+    nonce = state.request_stop(repo)
+    data.update(enabled=True, acknowledged_stop=nonce)
+    state.save(repo, data)
+    state.require_admission(repo, nonce)
+    (state.root / "stops" / f"{key(repo)}.json").unlink()
+    with pytest.raises(DriverError, match="Stop intent is missing"):
+        state.project(repo)
+    with pytest.raises(DriverError, match="Stop intent is missing"):
+        state.require_admission(repo, state.stop_nonce(repo))
+
+
+def test_concurrent_stop_writers_have_independent_atomic_temporary_files(state, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    repo = "owner/repo"
+    data = state.project(repo)
+    data["enabled"] = True
+    state.save(repo, data)
+    opened = threading.Barrier(2)
+    original = json.dump
+    def overlapping_dump(*args, **kwargs):
+        # Both writers must own an open temp file before either may replace.
+        opened.wait(timeout=3)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(json, "dump", overlapping_dump)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(state.request_stop, repo)
+        second = pool.submit(state.request_stop, repo)
+        nonces = {first.result(timeout=5), second.result(timeout=5)}
+    assert len(nonces) == 2 and state.stop_nonce(repo) in nonces
+    assert not state.project(repo)["enabled"]
+    assert list((state.root / "stops").glob(".*.tmp")) == []
+
+
+def test_stop_preserves_events_and_other_project_bytes(state):
+    repo, other = "owner/repo", "owner/other"
+    for name in (repo, other):
+        data = state.project(name)
+        data["enabled"] = True
+        state.save(name, data)
+        state.event(name, "delivery", "event")
+    before = state.project_path(other).read_bytes()
+    state.request_stop(repo)
+    assert state.has_event(repo, "delivery")
+    assert state.project_path(other).read_bytes() == before
+    assert state.project(other)["enabled"]

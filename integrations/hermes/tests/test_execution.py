@@ -459,3 +459,55 @@ def test_session_slots_bound_reservations_on_one_subscription(setup, monkeypatch
             execution.launch(config, "owner/repo", "model-two", 3, str(worktree))
     finally:
         os.close(descriptor)
+
+
+def test_stop_between_prepared_receipt_and_supervisor_creation_preserves_failed_receipt(setup, monkeypatch):
+    config, state, worktree = setup
+    original = execution.write_json
+    def fence_on_receipt(path, record):
+        original(path, record)
+        if record.get("state") == "launching":
+            state.request_stop("owner/repo")
+    monkeypatch.setattr(execution, "write_json", fence_on_receipt)
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("supervisor crossed Stop"))
+    with pytest.raises(DriverError, match="claim and worktree preserved"):
+        execution.launch(config, "owner/repo", "model-one", 1, str(worktree))
+    receipts = state.workers("owner/repo")
+    assert len(receipts) == 1 and receipts[0]["state"] == "launch_failed"
+    assert "stopped" in receipts[0]["reason"]
+    assert not state.capacity_busy("same-subscription")
+    assert worktree.is_dir()
+
+
+def test_pre_stop_supervisor_cannot_start_child_after_explicit_restart(setup, monkeypatch):
+    from aru_project_driver import driver
+
+    config, state, worktree = setup
+    descriptor, record = reserve_worker(config, state, worktree)
+    record["admission_stop"] = state.stop_nonce("owner/repo")
+    write_json(state.worker_path(record["id"]), record)
+    state.request_stop("owner/repo")
+    monkeypatch.setattr(scheduler, "ensure_heartbeat", lambda *a, **k: {"heartbeat_job_id": "one"})
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: {})
+    driver.start(config, "owner/repo")
+    assert state.project("owner/repo")["enabled"]
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("old queued child revived"))
+    assert execution.worker_main(config, record["id"], descriptor) == 1
+    receipt = state.worker(record["id"])
+    assert receipt["state"] == "exited" and "predates Stop" in receipt["reason"]
+    assert not state.capacity_busy("same-subscription")
+    assert worktree.is_dir()
+
+
+def test_stop_during_review_revalidation_prevents_child_without_holding_spawn_barrier(setup, monkeypatch):
+    config, state, worktree = setup
+    descriptor, record = reserve_worker(config, state, worktree)
+    def revalidate(*a):
+        # This represents the slow authority read while the global lock is held.
+        state.request_stop("owner/repo")
+        with state.project_lock("owner/repo", spawn=True):
+            pass  # Stop can cross its spawn barrier while this read is in flight.
+    monkeypatch.setattr(execution, "_revalidate_review_worker", revalidate)
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("child crossed Stop"))
+    assert execution.worker_main(config, record["id"], descriptor) == 1
+    assert "stopped" in state.worker(record["id"])["reason"]
