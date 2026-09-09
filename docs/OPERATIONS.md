@@ -1496,6 +1496,11 @@ configuration. This contention exceeds the cleanup allowance. It does not
 establish an attempted or failed active-worker Stop test, and later lock
 acquisition does not establish bounded Stop.
 
+The source correction is tracked in [#622](https://github.com/gillella/Aru_Agentic_SDLC/issues/622).
+Installing that correction requires existing coordinators to be quiescent:
+already-running old code cannot honor a new dispatch fence. Source completion
+and any separately approved installation do not establish live canary acceptance.
+
 Final demo readback was `enabled: false`, zero workers and zero enabled
 heartbeat, wake and review-wake jobs. There are no live-run IDs and no rollback
 was performed. Existing demo issues #1/#2, PR #3, fixture issues and other
