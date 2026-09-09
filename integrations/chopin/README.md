@@ -73,6 +73,8 @@ original commit/payload/key after duplicate delivery or network ambiguity. A new
 meeting needs a distinct topic (e.g. append the meeting date); do not delete a
 receipt to retry. A failed response confirms no document name/URL. Receipts are
 operational deduplication, never another lifecycle or consensus store.
+Server deduplication relies on the pinned hosted implementation and its stored
+creation metadata; live retry behavior remains unverified.
 
 ## Prepare the private configuration
 
@@ -119,6 +121,10 @@ The initiating browser cookie, exact Host/path, capability, state, one-shot lock
 and 600-second expiry protect this operation. The credential destination is
 reserved exclusively; conversion failure consumes the attempt and leaves the
 destination for operator inspection rather than risking a second conversion.
+Stop the helper and inspect the destination and GitHub App state. After resolving
+any ambiguous App creation, remove a confirmed empty destination with `rmdir` and
+start a fresh setup flow; never reuse the consumed callback code. Preserve any
+nonempty destination.
 
 Loopback alternative: use a **clean/private browser profile** for the entire
 registration flow. Browser cookies ignore ports, and the setup callback intentionally

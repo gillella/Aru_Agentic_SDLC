@@ -38,7 +38,7 @@ def probe_telegram(factory):  # noqa: C901 -- bounded offline command fixture
         print('TELEGRAM_EXTRA_UNAVAILABLE: selected Hermes installation lacks telegram')
         return 77
     from telegram import Update
-    from telegram.ext import Application, ExtBot
+    from telegram.ext import Application, ApplicationHandlerStop, ExtBot
     from telegram.request import BaseRequest
 
     sent = []
@@ -82,30 +82,51 @@ def probe_telegram(factory):  # noqa: C901 -- bounded offline command fixture
     async def exercise():
         await app.initialize()
         try:
-            cases = [('/plan catalog', -5325492504, 6431233670, True),
-                     ('/plan_status doc1', -5325492504, 6431233670, True),
-                     ('/plan_compile doc1', -5325492504, 6431233670, True),
-                     ('/plan catalog', -5325492504, 99999, False),
-                     ('/plan catalog', -99, 6431233670, False)]
-            for index, (text, chat, user, allowed) in enumerate(cases):
-                event = Update.de_json({'update_id': index, 'message': {
+            cases = [('/plan catalog', -5325492504, 6431233670, 'create', 'Fixture draft confirmed'),
+                     ('/plan_status doc1', -5325492504, 6431233670, 'status', 'authoritative comments/decisions unavailable'),
+                     ('/plan_compile doc1', -5325492504, 6431233670, None, 'Compilation disabled'),
+                     ('/plan catalog', -5325492504, 99999, None, 'context is required'),
+                     ('/plan catalog', -99, 6431233670, None, 'context is required'),
+                     ('/Plan_compile doc1', -5325492504, 6431233670, None, 'Compilation disabled'),
+                     ('/PLAN_COMPILE@fixture_bot doc1', -5325492504, 6431233670, None, 'Compilation disabled'),
+                     ('/Plan_status doc1', -5325492504, 6431233670, 'status', 'authoritative comments/decisions unavailable'),
+                     ('/PLAN_STATUS@fixture_bot doc1', -5325492504, 6431233670, 'status', 'authoritative comments/decisions unavailable'),
+                     ('/Plan catalog', -5325492504, 6431233670, 'create', 'Fixture draft confirmed')]
+
+            def update(index, text, chat=-5325492504, user=6431233670):
+                return Update.de_json({'update_id': index, 'message': {
                     'message_id': index + 1, 'date': 1, 'chat': {'id': chat, 'type': 'group'},
                     'from': {'id': user, 'is_bot': False, 'first_name': 'Fixture'}, 'text': text,
                     'entities': [{'type': 'bot_command', 'offset': 0, 'length': len(text.split()[0])}]}}, bot)
-                await app.process_update(event)
-                assert sent, 'Real command invocation did not produce a response'
-                if not allowed:
-                    assert 'context is required' in sent[-1]
-            assert len(calls) == 2, calls
-            assert calls[0] == ('create', 'gillella/unum-catalog', 'catalog')
-            assert 'Compilation disabled' in sent[2]
-            assert len(sent) == 5
+
+            for index, (text, chat, user, operation, response) in enumerate(cases):
+                before_calls, before_sent = len(calls), len(sent)
+                await app.process_update(update(index, text, chat, user))
+                expected = [(operation, 'gillella/unum-catalog', text.partition(' ')[2])] if operation else []
+                assert calls[before_calls:] == expected, (text, calls[before_calls:])
+                assert len(sent) == before_sent + 1, 'Real command invocation did not produce exactly one response'
+                assert response in sent[-1], (text, sent[-1])
+
+            # Real PTB ignores unknown commands. The callback must also refuse
+            # them if directly invoked or registered more broadly in the future.
+            event = update(len(cases), '/unknown catalog')
+            before_calls, before_sent = len(calls), len(sent)
+            await app.process_update(event)
+            assert len(calls) == before_calls and len(sent) == before_sent
+            try:
+                await app.handlers[-10][0].callback(event, None)
+            except ApplicationHandlerStop:
+                pass
+            else:
+                raise AssertionError('Unknown callback command did not stop handler dispatch')
+            assert len(calls) == before_calls, 'Unknown callback command invoked a reader or writer'
+            assert len(sent) == before_sent + 1 and 'unsupported command' in sent[-1]
         finally:
             await app.shutdown()
 
     with patch.object(module, 'create_plan', create), patch.object(module, 'status', status):
         asyncio.run(exercise())
-    print('Actual Hermes discovery + PTB command dispatch: 5 cases passed; all network is fixture-only.')
+    print('Actual Hermes discovery + PTB command dispatch: 12 cases passed; all network is fixture-only.')
     return 0
 
 

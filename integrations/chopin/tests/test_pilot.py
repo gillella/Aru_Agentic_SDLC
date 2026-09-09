@@ -427,7 +427,7 @@ def test_real_hermes_plugin_and_telegram_command_path(hermes_runtime):
             pytest.fail(reason)
         pytest.skip(reason)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert '5 cases passed' in result.stdout
+    assert '12 cases passed' in result.stdout
 
 
 def test_governed_discovery_includes_this_file():

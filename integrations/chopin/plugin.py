@@ -30,14 +30,16 @@ def register(ctx):
                         or not authorized(config, 'telegram', str(chat.id), str(user.id))):
                     result = NO_CONTEXT
                 else:
-                    name = update.message.text.split()[0].split('@')[0].lstrip('/')
+                    name = update.message.text.split()[0].split('@')[0].lstrip('/').lower()
                     args = update.message.text.partition(' ')[2].strip()
                     if name == 'plan_compile':
                         result = COMPILE_BLOCKED
                     elif name == 'plan_status':
                         result = await asyncio.to_thread(status, config, args)
-                    else:
+                    elif name == 'plan':
                         result = await asyncio.to_thread(create_plan, config, args)
+                    else:
+                        result = 'Chopin request refused: unsupported command.'
             except Exception:
                 result = ('Chopin request refused or unconfirmed; details suppressed. '
                           'If creation was attempted, retry the exact topic to reuse its durable payload/key. '
