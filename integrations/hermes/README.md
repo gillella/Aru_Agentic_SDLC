@@ -314,6 +314,27 @@ claims. A source merge alone does not establish installed Stop behavior. A
 shared installation affects all configured projects, so the maintenance window
 must account for each project's existing coordinators and workers.
 
+Rollback to a version that does not honor the Stop fence requires the same
+quiescent maintenance window. Complete Stop and scheduler cleanup for every
+affected project, and keep all event, coordinator and other project-state
+writers quiescent throughout restoration. Preserve active worker children,
+claims, worktrees and receipts. A successful new-version Stop alone is
+insufficient: older source ignores its nonce and may still read `enabled: true`
+from the project journal.
+
+Before restoring older source, use the currently installed `State` API under
+its coordination lock followed by the project control lock
+(`with state.lock(), state.project_lock(repo):`). Load the latest state with
+`state.project(repo)`, require its effective `enabled` value to be false, set
+`enabled=False`, and persist that same record with `state.save(repo, data)`.
+Verify the stored project JSON also contains `enabled: false`. Preserve the
+latest journal and delivery history; never restore a historical state snapshot.
+Keep these operations within the authorized maintenance deadline. After file
+restoration, verify disabled state using the restored version's `State` API
+for every affected project before admitting any callbacks or coordinators.
+If migration, quiescence or disabled readback cannot be proven, refuse the
+downgrade and keep admission blocked; restoring files alone is not safe rollback.
+
 Existing authenticated Hermes webhook routes can be explicitly listed in the
 project's optional `webhook_subscriptions` array. Add `--update-webhooks` to
 preview migration of those routes' prompts and skills; add `--apply` only when
@@ -444,7 +465,7 @@ start two configured projects, and record sanitized route IDs, event IDs,
 target issue/Project acknowledgments, worker receipts, exact PR heads and
 Stop/restart results. The canary must cover one completion-to-next-dispatch,
 one cross-project handoff plus dependency return wake, duplicate and stale
-deliveries, unavailable capacity, and a stopped target. A failed canary rolls
-back by stopping the project, restoring the install backup, and preserving all
-GitHub claims and worktrees for review. Source merge, a green test suite, or a
+deliveries, unavailable capacity, and a stopped target. A failed canary uses
+the quiescent rollback and disabled-state migration procedure above, preserving
+all GitHub claims and worktrees for review. Source merge, a green test suite, or a
 healthy listener is not live acceptance evidence.
