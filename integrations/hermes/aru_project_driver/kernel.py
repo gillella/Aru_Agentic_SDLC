@@ -243,8 +243,8 @@ class KernelAdapter:
     def next_work(self, agent: str) -> dict:
         return self._invoke("next_work", agent=agent)
 
-    def reviewer_continuation(self, number: int) -> dict:
-        return self._invoke("reviewer_continuation", number=number)
+    def reviewer_continuation(self, number: int, *, expected_head: str | None = None) -> dict:
+        return self._invoke("reviewer_continuation", number=number, expected_head=expected_head)
 
     def reviewer_status(self) -> dict:
         return self._invoke("reviewer_status")
@@ -601,7 +601,7 @@ class _Bridge:
         if operation == "next_work":
             return self.picker.select(self.claims.safe_agent(payload["agent"]))
         if operation == "reviewer_continuation":
-            return self.review.reviewer_continuation(payload["number"])
+            return self.review.reviewer_continuation(payload["number"], expected_head=payload.get("expected_head"))
         if operation == "reviewer_status":
             return self.review.reviewer_status(probe=False)
         number = payload["number"]

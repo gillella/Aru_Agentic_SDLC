@@ -61,85 +61,26 @@ def test_ready_inventory_is_paginated_and_excludes_pull_requests(monkeypatch):
     ]]
 
 
-@pytest.mark.parametrize(
-    ("feedback", "verification", "merge_state", "expected"),
-    [
-        (
-            [{"kind": "review", "id": 7}],
-            {"state": "success", "head": "feedback-head", "checks": []},
-            "CLEAN",
-            {"type": "feedback", "pr": 500, "items": [{"kind": "review", "id": 7}]},
-        ),
-        (
-            [],
-            {"state": "failure", "head": "verify-head", "checks": ["tests"]},
-            "CLEAN",
-            {
-                "type": "verification",
-                "pr": 500,
-                "head": "verify-head",
-                "checks": ["tests"],
-            },
-        ),
-        (
-            [],
-            {"state": "success", "head": "merge-head", "checks": []},
-            "CLEAN",
-            {"type": "merge", "pr": 500, "head": "merge-head"},
-        ),
-        (
-            [],
-            {"state": "pending", "head": "wait-head", "checks": []},
-            "CLEAN",
-            {
-                "type": "wait",
-                "pr": 500,
-                "head": "wait-head",
-                "verification": "pending",
-            },
-        ),
-    ],
-)
-def test_authored_pr_always_precedes_ready_inventory(
-    monkeypatch, feedback, verification, merge_state, expected
-):
-    monkeypatch.setattr(
-        fetch_next_work,
-        "authored_prs",
-        lambda _agent: [{"number": 500, "mergeStateStatus": merge_state, "labels": []}],
-    )
+@pytest.mark.parametrize("state,merge_state,feedback,expected", [
+    ("success", "CLEAN", [{"kind": "review", "id": 7}], {"type": "feedback"}),
+    ("failure", "CLEAN", [], {"type": "verification", "checks": ["tests"]}),
+    ("success", "CLEAN", [], {"type": "merge"}),
+    ("pending", "CLEAN", [], {"type": "wait", "verification": "pending"}),
+    ("failure", "DIRTY", [], {"type": "conflict", "reason": "PR merge state is DIRTY"}),
+])
+def test_authored_pr_precedes_ready_and_conflicts_precede_ci(monkeypatch, state, merge_state, feedback, expected):
+    head = "a" * 40
+    verification = {"state": state, "head": head, "checks": ["tests"]}
+    monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [
+        {"number": 500, "mergeStateStatus": merge_state, "labels": []},
+    ])
     monkeypatch.setattr(fetch_next_work, "has_review_comments", lambda _number: bool(feedback))
     monkeypatch.setattr(fetch_next_work, "fetch_feedback", lambda _number: feedback)
     monkeypatch.setattr(fetch_next_work, "ci_verdict", lambda _number: verification)
     monkeypatch.setattr(fetch_next_work, "evaluate", lambda _number, _head: None)
-    monkeypatch.setattr(
-        fetch_next_work,
-        "ready_issues",
-        lambda: (_ for _ in ()).throw(AssertionError("Ready inventory must not be read")),
-    )
-
-    assert fetch_next_work.select("codex-sol56") == expected
-
-
-def test_dirty_authored_pr_routes_conflict_before_failed_verification(monkeypatch):
-    monkeypatch.setattr(
-        fetch_next_work,
-        "authored_prs",
-        lambda _agent: [{"number": 500, "mergeStateStatus": "DIRTY", "labels": []}],
-    )
-    monkeypatch.setattr(fetch_next_work, "has_review_comments", lambda _number: False)
-    monkeypatch.setattr(
-        fetch_next_work,
-        "ci_verdict",
-        lambda _number: {"state": "failure", "head": "dirty-head", "checks": ["tests"]},
-    )
-
-    assert fetch_next_work.select("codex-sol56") == {
-        "type": "conflict",
-        "pr": 500,
-        "head": "dirty-head",
-        "reason": "PR merge state is DIRTY",
-    }
+    monkeypatch.setattr(fetch_next_work, "ready_issues", lambda: pytest.fail("Ready inventory must not be read"))
+    context = {"items": feedback} if feedback else {"head": head}
+    assert fetch_next_work.select("codex-sol56") == {"pr": 500, **context, **expected}
 
 
 def test_live_merge_state_is_fail_closed(monkeypatch):
@@ -354,3 +295,23 @@ def test_cli_is_single_lane_and_read_only(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", parser_argv)
     with pytest.raises(SystemExit):
         fetch_next_work.main()
+
+
+@pytest.mark.parametrize("ci_state", ["error", "pending"])
+def test_ci_returns_explicit_state_for_driver_review_continuation(monkeypatch, ci_state):
+    head = "a" * 40
+    pr = {"number": 9, "headRefOid": head, "mergeStateStatus": "CLEAN",
+          "labels": [{"name": "review:coderabbit"}]}
+    monkeypatch.setattr(fetch_next_work, "has_review_comments", lambda _n: False)
+    def ci(_n):
+        if ci_state == "error":
+            raise common.KernelError("CI inventory incomplete")
+        return {"head": head, "state": ci_state, "checks": []}
+    monkeypatch.setattr(fetch_next_work, "ci_verdict", ci)
+    monkeypatch.setattr(fetch_next_work, "evaluate", lambda *_a: pytest.fail("uncertain CI cannot merge"))
+    result = fetch_next_work._open_pr_work(pr)
+    assert result["type"] == ("blocked" if ci_state == "error" else "wait")
+    assert result["verification"] == ("unreadable" if ci_state == "error" else "pending")
+    assert "next_action" not in result
+    if ci_state == "error":
+        assert result["ci_error"] == "CI inventory incomplete"
