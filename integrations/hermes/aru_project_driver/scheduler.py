@@ -47,6 +47,28 @@ def deadline_after(seconds: float) -> float:
     return time.monotonic() + seconds
 
 
+def _restore_alarm(previous_handler, previous_mask) -> bool:
+    interrupted = False
+    # A Python callback queued before masking can still run during cleanup.
+    try:
+        while True:
+            try:
+                signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                interrupted |= signal.SIGALRM in signal.sigpending()
+                # SIG_IGN discards the owned alarm without a blocking sigwait.
+                signal.signal(signal.SIGALRM, signal.SIG_IGN)
+                break
+            except _DeadlineExpired:
+                interrupted = True
+    finally:
+        try:
+            signal.signal(signal.SIGALRM, previous_handler)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+    return interrupted
+
+
 @contextlib.contextmanager
 def bounded(deadline: float | None):
     """Bound POSIX CLI locking/import/native CRUD without leaving a cleanup child.
@@ -62,27 +84,40 @@ def bounded(deadline: float | None):
     remaining = deadline - time.monotonic()
     if not math.isfinite(remaining) or remaining <= 0:
         raise SchedulerError("scheduler deadline expired; cleanup/readback is unverified")
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
     previous_handler = signal.getsignal(signal.SIGALRM)
-    previous_delay, previous_interval = signal.getitimer(signal.ITIMER_REAL)
-    began = time.monotonic()
+    owned = interrupted = restored = False
 
     def expired(_signum, _frame):
         raise _DeadlineExpired()
 
     try:
-        signal.signal(signal.SIGALRM, expired)
-        signal.setitimer(signal.ITIMER_REAL, min(remaining, previous_delay) if previous_delay else remaining)
-        yield
-        if time.monotonic() >= deadline:
-            expired(None, None)
+        try:
+            signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+            if (signal.SIGALRM in previous_mask or signal.SIGALRM in signal.sigpending()
+                    or any(signal.getitimer(signal.ITIMER_REAL))):
+                raise SchedulerError("bounded scheduler operation requires exclusive SIGALRM ownership; caller state preserved")
+            owned = True
+            signal.signal(signal.SIGALRM, expired)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SchedulerError("scheduler deadline expired before native operation")
+            signal.setitimer(signal.ITIMER_REAL, remaining)
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            yield
+        finally:
+            if owned:
+                interrupted = _restore_alarm(previous_handler, previous_mask)
+                restored = True
+            else:
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
     except _DeadlineExpired:
+        # The owned one-shot can arrive before the cleanup helper enters its try.
+        if owned and not restored:
+            _restore_alarm(previous_handler, previous_mask)
         raise SchedulerError("scheduler deadline expired; cleanup/readback is unverified") from None
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous_handler)
-        if previous_delay:
-            elapsed = time.monotonic() - began
-            signal.setitimer(signal.ITIMER_REAL, max(0.000001, previous_delay - elapsed), previous_interval)
+    if interrupted or time.monotonic() >= deadline:
+        raise SchedulerError("scheduler deadline expired; cleanup/readback is unverified")
 
 
 def _require_stop_generation(hermes_home: Path, project: str, start_nonce=...):

@@ -785,7 +785,7 @@ def test_stop_during_precheck_suppresses_native_brain_even_on_failure(harness, f
     result = harness.controller.tick(REPO)
     assert result["wakeAgent"] is False
     assert not harness.state.project(REPO)["enabled"]
-    assert not harness.launched
+    assert harness.synced == []
 
 
 def test_stop_during_event_scheduling_is_not_a_delivered_wake(harness, monkeypatch):

@@ -341,46 +341,173 @@ def test_deadline_interrupts_real_scheduler_lock_and_restores_signal_state(setup
         holder.communicate(timeout=3)
 
 
-def test_bounded_operation_restores_existing_timer_with_elapsed_time():
+def test_bounded_operation_preserves_earlier_caller_timer_without_entering_body(monkeypatch):
     import signal
     import time
 
     previous_handler = signal.getsignal(signal.SIGALRM)
     previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    delivered, writes = [], []
     def handler(*_):
-        pass
+        delivered.append(True)
+    original = signal.setitimer
+    def record_timer(*args):
+        writes.append(args)
+        return original(*args)
     try:
         signal.signal(signal.SIGALRM, handler)
-        signal.setitimer(signal.ITIMER_REAL, 10)
-        with scheduler.bounded(scheduler.deadline_after(.5)):
-            time.sleep(.03)
+        signal.setitimer(signal.ITIMER_REAL, .15, .3)
+        with monkeypatch.context() as patch:
+            patch.setattr(signal, "setitimer", record_timer)
+            with pytest.raises(scheduler.SchedulerError, match="exclusive SIGALRM"):
+                with scheduler.bounded(scheduler.deadline_after(1)):
+                    pytest.fail("operation took over an earlier caller timer")
+        assert writes == []
         assert signal.getsignal(signal.SIGALRM) is handler
-        assert 9 < signal.getitimer(signal.ITIMER_REAL)[0] < 9.99
+        assert signal.getitimer(signal.ITIMER_REAL)[1] == .3
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == previous_mask
+        until = time.monotonic() + .5
+        while not delivered and time.monotonic() < until:
+            time.sleep(.01)
+        assert delivered == [True]
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
         signal.setitimer(signal.ITIMER_REAL, *previous_timer)
 
 
-def test_immediate_expiry_while_arming_timer_restores_signal_state(monkeypatch):
+@pytest.mark.parametrize("failure", ["expiry", "error"])
+def test_alarm_setup_failure_restores_signal_state(monkeypatch, failure):
     import signal
 
     previous_handler = signal.getsignal(signal.SIGALRM)
     previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
     original = signal.setitimer
     armed = []
     def expire_first_arm(*args):
         result = original(*args)
         if not armed:
             armed.append(True)
+            if failure == "error":
+                raise OSError("timer setup failed after arming")
             signal.getsignal(signal.SIGALRM)(signal.SIGALRM, None)
         return result
     monkeypatch.setattr(signal, "setitimer", expire_first_arm)
-    with pytest.raises(scheduler.SchedulerError, match="deadline"):
+    with pytest.raises(scheduler.SchedulerError if failure == "expiry" else OSError):
         with scheduler.bounded(scheduler.deadline_after(1)):
             pytest.fail("already expired operation began")
     assert signal.getsignal(signal.SIGALRM) == previous_handler
     assert signal.getitimer(signal.ITIMER_REAL) == previous_timer
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == previous_mask
+
+
+@pytest.mark.parametrize("mode", ["blocked", "pending"])
+def test_bounded_operation_preserves_blocked_or_pending_caller_alarm(monkeypatch, mode):
+    import signal
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    delivered = []
+    original = signal.pthread_sigmask
+    queued = False
+    def mask_with_pending(how, mask):
+        nonlocal queued
+        result = original(how, mask)
+        if how == signal.SIG_BLOCK and mask == {signal.SIGALRM} and not queued:
+            queued = True
+            signal.raise_signal(signal.SIGALRM)
+        return result
+    try:
+        signal.signal(signal.SIGALRM, lambda *_: delivered.append(True))
+        if mode == "blocked":
+            original(signal.SIG_BLOCK, {signal.SIGALRM})
+        else:
+            monkeypatch.setattr(signal, "pthread_sigmask", mask_with_pending)
+        expected_mask = original(signal.SIG_BLOCK, set())
+        with pytest.raises(scheduler.SchedulerError, match="exclusive SIGALRM"):
+            with scheduler.bounded(scheduler.deadline_after(1)):
+                pytest.fail("operation took over caller signal ownership")
+        assert original(signal.SIG_BLOCK, set()) == expected_mask
+        assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+        assert delivered == ([True] if mode == "pending" else [])
+    finally:
+        signal.signal(signal.SIGALRM, previous_handler)
+        original(signal.SIG_SETMASK, previous_mask)
+
+
+@pytest.mark.parametrize("mode", ["python_callback", "pending_signal", "cancel_callback"])
+def test_alarm_at_cleanup_entry_cannot_escape_or_reach_restored_caller(monkeypatch, mode):
+    import signal
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+    entry_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    delivered = []
+    original = signal.pthread_sigmask
+    original_timer = signal.setitimer
+    cleanup = False
+    def interrupt_cleanup(how, mask):
+        nonlocal cleanup
+        result = original(how, mask)
+        if cleanup and mode != "cancel_callback" and how == signal.SIG_BLOCK and mask == {signal.SIGALRM}:
+            cleanup = False
+            if mode == "python_callback":
+                signal.getsignal(signal.SIGALRM)(signal.SIGALRM, None)
+            else:
+                signal.raise_signal(signal.SIGALRM)
+        return result
+    def interrupt_cancel(*args):
+        nonlocal cleanup
+        result = original_timer(*args)
+        if cleanup and mode == "cancel_callback" and args[1] == 0:
+            cleanup = False
+            signal.getsignal(signal.SIGALRM)(signal.SIGALRM, None)
+        return result
+    def caller(*_):
+        delivered.append(True)
+    try:
+        signal.signal(signal.SIGALRM, caller)
+        monkeypatch.setattr(signal, "pthread_sigmask", interrupt_cleanup)
+        monkeypatch.setattr(signal, "setitimer", interrupt_cancel)
+        with pytest.raises(scheduler.SchedulerError, match="deadline"):
+            with scheduler.bounded(scheduler.deadline_after(1)):
+                cleanup = True
+        assert signal.getsignal(signal.SIGALRM) is caller
+        assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+        assert original(signal.SIG_BLOCK, set()) == entry_mask
+        assert signal.SIGALRM not in signal.sigpending()
+        assert delivered == []
+        signal.raise_signal(signal.SIGALRM)
+        assert delivered == [True]
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        original(signal.SIG_SETMASK, previous_mask)
+
+
+def test_alarm_before_cleanup_helper_enters_retries_complete_restoration(monkeypatch):
+    import signal
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    original = scheduler._restore_alarm
+    attempts = []
+    def interrupted_entry(*args):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise scheduler._DeadlineExpired()
+        return original(*args)
+    monkeypatch.setattr(scheduler, "_restore_alarm", interrupted_entry)
+    with pytest.raises(scheduler.SchedulerError, match="deadline"):
+        with scheduler.bounded(scheduler.deadline_after(1)):
+            pass
+    assert attempts == [True, True]
+    assert signal.getsignal(signal.SIGALRM) == previous_handler
+    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == previous_mask
+    assert signal.SIGALRM not in signal.sigpending()
 
 
 def test_bounded_operation_refuses_thread_without_starting_native_work():

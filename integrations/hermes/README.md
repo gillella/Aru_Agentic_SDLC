@@ -371,8 +371,10 @@ failure returns `status: partial` and a nonzero exit, with separate
 evidence. A persisted fence alone does not prove an in-flight spawn has settled
 or that scheduler cleanup completed. Partial Status preserves observed project
 fields while marking scheduler readback unverified. These bounded operations
-require the POSIX main thread and interrupt the native operation itself;
-they do not leave background cleanup running after a timeout.
+require the POSIX main thread and exclusive SIGALRM ownership; an active caller
+timer or blocked/pending SIGALRM returns partial without taking over that state.
+They interrupt the native operation itself and leave no background cleanup
+running after a timeout.
 
 The caller owns a combined cleanup deadline. For a 30-second Stop plus Status
 allowance, pass Stop its remaining budget and then pass Status only the time

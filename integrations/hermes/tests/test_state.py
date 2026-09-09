@@ -248,6 +248,44 @@ def test_existing_malformed_stop_intent_never_becomes_legacy_absence(state, bad)
         state.project(repo)
 
 
+def test_acknowledged_but_missing_stop_intent_blocks_reads_and_admission(state):
+    repo = "owner/repo"
+    data = state.project(repo)
+    nonce = state.request_stop(repo)
+    data.update(enabled=True, acknowledged_stop=nonce)
+    state.save(repo, data)
+    state.require_admission(repo, nonce)
+    (state.root / "stops" / f"{key(repo)}.json").unlink()
+    with pytest.raises(DriverError, match="Stop intent is missing"):
+        state.project(repo)
+    with pytest.raises(DriverError, match="Stop intent is missing"):
+        state.require_admission(repo, state.stop_nonce(repo))
+
+
+def test_concurrent_stop_writers_have_independent_atomic_temporary_files(state, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    repo = "owner/repo"
+    data = state.project(repo)
+    data["enabled"] = True
+    state.save(repo, data)
+    opened = threading.Barrier(2)
+    original = json.dump
+    def overlapping_dump(*args, **kwargs):
+        # Both writers must own an open temp file before either may replace.
+        opened.wait(timeout=3)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(json, "dump", overlapping_dump)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(state.request_stop, repo)
+        second = pool.submit(state.request_stop, repo)
+        nonces = {first.result(timeout=5), second.result(timeout=5)}
+    assert len(nonces) == 2 and state.stop_nonce(repo) in nonces
+    assert not state.project(repo)["enabled"]
+    assert list((state.root / "stops").glob(".*.tmp")) == []
+
+
 def test_stop_preserves_events_and_other_project_bytes(state):
     repo, other = "owner/repo", "owner/other"
     for name in (repo, other):

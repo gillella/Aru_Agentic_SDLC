@@ -24,7 +24,7 @@ def key(value: str) -> str:
 
 def write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(descriptor, "w") as stream:
@@ -189,6 +189,8 @@ class State:
             raise DriverError("project operational identity is invalid")
         _validate_project(result)
         stop = self.stop_intent(repo)
+        if not stop and result.get("acknowledged_stop") is not None:
+            raise DriverError("acknowledged operational Stop intent is missing")
         if stop and stop["nonce"] != result.get("acknowledged_stop"):
             result.update(enabled=False, wake_pending_until=0, stopped_at=stop["stopped_at"])
         return result
