@@ -1459,15 +1459,17 @@ project with no prior error the same pair is simply a healthy run. Refill and
 active-worker Stop/restart remain unproven; see the issues decomposed from #557
 for the scripted canary and its approved live run.
 
-### Canary preparation record: 2026-09-09
+### Canary preparation and execution record: 2026-09-09
 
-The approved `gillella/aru-golden-path-demo` canary was **blocked before Start**.
+Initial preflight for the approved `gillella/aru-golden-path-demo` canary was
+**blocked before Start**.
 The [#557 preflight receipt](https://github.com/gillella/Aru_Agentic_SDLC/issues/557#issuecomment-5596233480)
 and [#607 record](https://github.com/gillella/Aru_Agentic_SDLC/issues/607#issuecomment-5596233626)
 preserve the observations; the Mini's private copy is
 `$HERMES_HOME/state/aru-driver-canary-20260909/preflight.json`.
 The approved bounds remain 30 minutes of observation plus 30 seconds for final
-Stop/readback cleanup. No live run or active-worker Stop/restart test occurred.
+Stop/readback cleanup. No live run or active-worker Stop/restart test had occurred
+at that initial observation.
 
 Preparation established the demo App repository binding and accepted
 Administration: Read-only permission. Repository runner `21`,
@@ -1519,7 +1521,7 @@ The five installed Driver modules still matched `dadf1c1`; no installation or
 gateway drain occurred. Shared-gateway maintenance requires additional approval
 beyond the recorded demo-only scope, while the live acceptance remains open.
 
-Final demo readback was `enabled: false`, zero workers and zero enabled
+The pre-Start demo readback was `enabled: false`, zero workers and zero enabled
 heartbeat, wake and review-wake jobs. There are no live-run IDs and no rollback
 was performed. Existing demo issues #1/#2, PR #3, fixture issues and other
 runner services were preserved. Governed completion/refill, active-worker
@@ -1551,9 +1553,73 @@ Canonical backups remain under
 Only demo fixtures #7/#8 were then promoted individually through the canonical
 helper with fresh contract, exact-body, claim and Project checks. The original
 bounded canary began around 07:35:32 UTC, using wake `aa4e1208680b` and heartbeat
-`6eb7ca29d7b1`. Its live results remain pending; the foreground observer retains
-them at `$HERMES_HOME/state/aru-driver-canary-20260909/evidence.json` and must
-perform final Stop/readback within the separately shared 30-second cleanup bound.
+`6eb7ca29d7b1`. Observation ended at the original 30-minute deadline. Final Stop
+and Status completed at 08:05:33 UTC in 0.434 seconds of their shared 30-second
+cleanup allowance. The demo was disabled, with zero enabled heartbeat, wake or
+review-wake jobs. Subsequent process readback found every recorded demo worker
+supervisor and CLI child absent. Factory/JMC retained one heartbeat each and the
+original gateway PID/start identity; all 57 protected/module/wrapper files still
+matched the maintenance receipt. No rollback was performed.
+JMC's later project readback recorded `GitHub API request failed` at 08:05:30
+UTC. Its heartbeat remained enabled; successful GitHub reconciliation was not
+established by that scheduling readback. The demo observer's empty error list
+does not describe every shared project's API health.
+
+The run established **governed completion followed by automatic refill**.
+Successful worker `b09e023fa7fa4d43bb5f6f2e45b24ec6` opened demo
+[PR #9](https://github.com/gillella/aru-golden-path-demo/pull/9) at head
+`432f148ad9b86fff083ed3e4361e79e9922c84e5`. Its exact-head `aru-governed-pr`
+check passed. Completion event `d1195a26e3ee6719bf5bfa27` caused wake
+`82c4f0252939`, native occurrence `48a8833294fe498aa8cd06e4f8d7748a`, and
+session `cron_82c4f0252939_20260909_035227`. That same native coordinator merged
+PR #9 through the canonical helper at 07:54:43 UTC, confirmed issue #7 Done,
+and selected, claimed and launched fixture #8 worker
+`e5ff31c0993643d1bd9a9bc121dd54e8` at 07:57:29 UTC. The observer independently
+saw the Project card Done before the second execution. No additional Loop
+command caused this continuation.
+
+Active-worker Stop preserved fixture #8's running worker and kept jobs disabled
+through the ten-second observation; the sole approved restart restored one
+heartbeat without a duplicate worker. Replaying actual consumed worker ID
+`9579db9e533e4bda9cb0f91c0fb075a8` returned `duplicate` and `wakeAgent: false`.
+This is CLI duplicate suppression, not authenticated stale-delivery evidence.
+
+Three demo-launcher setup defects were observed and corrected within the two
+fixture scope: absent Git author identity, rejection of the canonical
+`remediation` prompt, and omission of the exact `git fetch origin main` command
+needed by the pre-push hook after the first merge. The launcher now supplies
+process-local verified App-bot attribution and those exact scoped commands; its
+immutable completed issue bodies remain read-only. Native retries preserved the
+work. An earlier worker's exit zero accompanied an explicit blocker, so the
+independent completion audit binds the later successful `b09e...` worker rather
+than treating the observer's first recorded exit as task success.
+
+Fixture #8 recovery worker `701817fcdccf40659537121d24cab122` subsequently opened
+[PR #10](https://github.com/gillella/aru-golden-path-demo/pull/10) at
+`3146a31ef4d7377489662a1bfb3a20a79d813b02`; its exact-head governed check passed
+at 08:03:38 UTC. The completion event was recorded at 08:05:30 UTC, and final
+Stop paused wake `1e3004a83553` before any native execution. PR #10 remains open
+and issue #8 In Review. Both fixture author worktrees, all nine operational
+receipts, both PRs and their claims were retained. Legacy issues #1/#2 and PR #3
+retain their prior states and PR #3 head.
+
+The [complete evidence is recorded on #557](https://github.com/gillella/Aru_Agentic_SDLC/issues/557#issuecomment-5598532362).
+Private retained files under `$HERMES_HOME/state/aru-driver-canary-20260909/`
+include `evidence.json` (SHA-256
+`1c41aaea8c85f714d8f4800528a5ed3c0fdb0500073c61d25883e501c1d44dbe`),
+`closeout-summary.json`, `native-refill-chain.json` and `postrun-preservation.json`.
+The raw observer result remains `unproven`; the separate native-session audit
+establishes the narrower completion/refill result without rewriting that receipt.
+
+The existing [PR #619 review](https://github.com/gillella/Aru_Agentic_SDLC/pull/619#pullrequestreview-5150944512)
+also proves unavailable-CodeRabbit fallback followed by actual independent
+current-head coding review under legitimately retained authority. Its native
+reviewer launch was manual; it does not prove an automatic review-to-refill
+chain. That full chain, authenticated stale-event delivery, lost-worker recovery,
+and the missing-routing/capacity plus ten-minute recovery/quiet-idle scenarios
+remain unproven. #557 keeps those four combined criteria open. Closing #607
+records the completed bounded attempt and its evidence, not full operational
+acceptance or permission for an extended run.
 
 ### Reviewer-policy migration to v2 source
 
