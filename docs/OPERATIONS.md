@@ -1526,6 +1526,35 @@ runner services were preserved. Governed completion/refill, active-worker
 Stop/restart, duplicate/stale delivery and lost-worker recovery remain
 unproven; #607's acceptance criteria remain unchecked.
 
+The operator subsequently approved one shared-gateway maintenance attempt;
+the [authorization](https://github.com/gillella/Aru_Agentic_SDLC/issues/607#issuecomment-5597798848)
+and [completed result](https://github.com/gillella/Aru_Agentic_SDLC/issues/607#issuecomment-5598030760)
+are recorded on #607. At 07:33:29 UTC, native drain began on the existing
+gateway PID `3700`; it was cleared approximately 3.8 seconds later. The whole
+attempt, including resumed scheduler execution readback, took 21.386 seconds.
+The unchanged canonical installer replaced exactly five modules; all twelve
+installed Driver modules now match merge `4f9aedf57a5226341f5490d019c13af6059244c3`.
+All 43 protected files, two generated wrappers, historical preparation receipts
+and unrelated TUI/Webull infrastructure were preserved. No rollback was needed.
+
+Bounded Stop and Status on the disabled demo verified the stop intent, spawn
+barrier, disabled scheduler and zero workers. Factory/JMC were restored with one
+heartbeat each; their wakes `29f6f643e87f` and `bd850ce08e49` were subsequently
+claimed and started by the original gateway, with process-start fingerprint
+`178891298315`. This is scheduler-restoration evidence, not task completion.
+The durable receipt is
+`$HERMES_HOME/state/aru-driver-canary-20260909/maintenance-result-20260909.json`,
+SHA-256 `9731e69495dbd7a1859387529fa96985e4f247b0b8b97c7274dfd8cd2142d37a`.
+Canonical backups remain under
+`$HERMES_HOME/state/aru_project_driver/install-backups/0e0e5ac1f7104defbbbd5c4579942e97/`.
+
+Only demo fixtures #7/#8 were then promoted individually through the canonical
+helper with fresh contract, exact-body, claim and Project checks. The original
+bounded canary began around 07:35:32 UTC, using wake `aa4e1208680b` and heartbeat
+`6eb7ca29d7b1`. Its live results remain pending; the foreground observer retains
+them at `$HERMES_HOME/state/aru-driver-canary-20260909/evidence.json` and must
+perform final Stop/readback within the separately shared 30-second cleanup bound.
+
 ### Reviewer-policy migration to v2 source
 
 Use the verified merged source revision before updating installed integrations.
