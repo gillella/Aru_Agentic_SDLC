@@ -463,9 +463,11 @@ differences needed for the requested Aru update.
 3. Compare each generated file with the project's current governance and
    verification policy.
 4. Merge only the rules and hooks the project can actually support.
-5. Customize `.aru/verify.sh`, enable `aru-governed-pr` in branch rules, and —
-   on `self-hosted-mac` — register an `aru-ci` self-hosted runner before
-   validating adoption on a pull request.
+5. On first adoption, replace the fail-closed `.aru/verify.sh` placeholder
+   with consumer commands. On Update, preserve existing verification and merge
+   only applicable framework fixes. Ensure `aru-governed-pr` is required in
+   branch rules and an `aru-ci` runner is registered for `self-hosted-mac`
+   before validating adoption on a pull request; reuse existing valid setup.
 
 Generate the comparison scaffold with the account the repository actually lives
 under, so the staged workflow carries that account's runner profile:
