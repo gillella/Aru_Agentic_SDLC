@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable
 
+from check_ci import check_run_inventory
 from common import (
     ACTIVE_EXTERNAL_REVIEWERS,
     RETIRED_EXTERNAL_REVIEWERS,
@@ -126,15 +127,6 @@ def _statuses(pages: Any) -> list[dict[str, Any]]:
     return pages
 
 
-def _check_runs(data: Any) -> list[dict[str, Any]]:
-    if not isinstance(data, dict) or not isinstance(data.get("check_runs"), list):
-        raise KernelError("capability check inventory is malformed")
-    checks = data["check_runs"]
-    if data.get("total_count") != len(checks) or any(not isinstance(c, dict) for c in checks):
-        raise KernelError("capability check inventory is incomplete")
-    return checks
-
-
 def coderabbit_capability(head: str | None = None) -> dict[str, str]:
     """Bounded observation of CodeRabbit's authenticated activity on one head.
 
@@ -151,7 +143,7 @@ def coderabbit_capability(head: str | None = None) -> dict[str, str]:
         statuses = _statuses(gh_json([
             "api", f"repos/{slug}/commits/{head}/statuses?per_page=100",
         ], timeout=CAPABILITY_TIMEOUT_SECONDS))
-        checks = _check_runs(gh_json([
+        checks = check_run_inventory(gh_json([
             "api", f"repos/{slug}/commits/{head}/check-runs?per_page=100&filter=latest",
         ], timeout=CAPABILITY_TIMEOUT_SECONDS))
         return coderabbit_capability_state(
@@ -188,18 +180,7 @@ def external_decision(
         "api", "--paginate", "--slurp",
         f"repos/{slug}/commits/{pr['headRefOid']}/check-runs?per_page=100&filter=latest",
     ])
-    if (
-        not isinstance(pages, list)
-        or any(not isinstance(page, dict) for page in pages)
-        or any(not isinstance(page.get("check_runs"), list) for page in pages)
-    ):
-        raise KernelError("external review check-run inventory is malformed")
-    checks = [record for page in pages for record in page["check_runs"]]
-    if any(not isinstance(record, dict) for record in checks):
-        raise KernelError("external review check-run inventory is malformed")
-    totals = {page.get("total_count") for page in pages}
-    if len(totals) != 1 or totals.pop() != len(checks):
-        raise KernelError("external review check-run inventory is incomplete")
+    checks = check_run_inventory(pages, paginated=True)
     statuses = _statuses(gh_json([
         "api", "--paginate", "--slurp",
         f"repos/{slug}/commits/{pr['headRefOid']}/statuses?per_page=100",
@@ -303,7 +284,7 @@ def load_repository_review_policy() -> tuple[ReviewPolicy, tuple[str, ...]]:
 
 
 def reviewer_continuation(
-    number: int, *, now: datetime | None = None
+    number: int, *, now: datetime | None = None, expected_head: str | None = None
 ) -> dict[str, object]:
     pr = gh_json(
         [
@@ -313,6 +294,10 @@ def reviewer_continuation(
     )
     if not isinstance(pr, dict) or pr.get("number") != number:
         raise KernelError(f"pull request #{number} is unavailable")
+    if expected_head is not None and (
+        not re.fullmatch(r"[0-9a-fA-F]{40}", expected_head) or pr.get("headRefOid") != expected_head
+    ):
+        raise KernelError("review continuation head changed; cancel stale action")
     authorities = [
         name.removeprefix("review:")
         for name in label_names(pr)

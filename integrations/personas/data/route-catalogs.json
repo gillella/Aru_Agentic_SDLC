@@ -1,0 +1,419 @@
+{
+  "schema": "aru.personas.route-catalog/v1",
+  "recorded_on": "2026-09-09",
+  "source_report": "~/.hermes/reports/model-personas-revised",
+  "note": "Verbatim identifiers from the recorded report. The codex list carries the provider's own supported_reasoning_levels. The cursor list is filtered to the approved personas' model neighbourhood (223 ids recorded upstream). Catalog visibility is availability of an identifier, never proof of usable capacity.",
+  "routes": {
+    "codex": {
+      "source": "catalogs.json:codex (codex debug models)"
+    },
+    "antigravity": {
+      "source": "catalogs.json:antigravity (agy models)"
+    },
+    "cursor": {
+      "source": "catalogs.json:cursor (cursor-agent --list-models), filtered"
+    },
+    "claude-code": {
+      "source": "complete-role-map.json entries route=claude-code; the claude CLI publishes no list command"
+    }
+  },
+  "entries": [
+    {
+      "route": "codex",
+      "id": "gpt-6-astra",
+      "name": "GPT-6-Astra",
+      "category": "core",
+      "visibility": "list",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ]
+    },
+    {
+      "route": "codex",
+      "id": "gpt-reserve",
+      "name": "GPT-Reserve",
+      "category": "excluded",
+      "visibility": "hide",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "route": "codex",
+      "id": "gpt-5.6-sol",
+      "name": "GPT-5.6-Sol",
+      "category": "core",
+      "visibility": "list",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ]
+    },
+    {
+      "route": "codex",
+      "id": "gpt-5.6-terra",
+      "name": "GPT-5.6-Terra",
+      "category": "core",
+      "visibility": "list",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ]
+    },
+    {
+      "route": "codex",
+      "id": "gpt-5.6-luna",
+      "name": "GPT-5.6-Luna",
+      "category": "core",
+      "visibility": "list",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "route": "codex",
+      "id": "gpt-5.5",
+      "name": "GPT-5.5",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ]
+    },
+    {
+      "route": "codex",
+      "id": "gpt-5.3-codex-spark",
+      "name": "GPT-5.3-Codex-Spark",
+      "category": "core",
+      "visibility": "list",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ]
+    },
+    {
+      "route": "codex",
+      "id": "codex-auto-review",
+      "name": "Codex Auto Review",
+      "category": "excluded",
+      "visibility": "hide",
+      "efforts": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ]
+    },
+    {
+      "route": "antigravity",
+      "id": "gemini-3.8-flash-high",
+      "name": "Gemini 3.8 Flash (High)",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "antigravity",
+      "id": "gemini-3.8-flash-medium",
+      "name": "Gemini 3.8 Flash (Medium)",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "antigravity",
+      "id": "gemini-3.8-flash-low",
+      "name": "Gemini 3.8 Flash (Low)",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "antigravity",
+      "id": "gemini-3.7-flash-high",
+      "name": "Gemini 3.7 Flash (High)",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "antigravity",
+      "id": "gemini-3.7-flash-medium",
+      "name": "Gemini 3.7 Flash (Medium)",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "antigravity",
+      "id": "gemini-3.7-flash-low",
+      "name": "Gemini 3.7 Flash (Low)",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "antigravity",
+      "id": "gemini-3.6-flash-high",
+      "name": "Gemini 3.6 Flash (High)",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "antigravity",
+      "id": "gemini-3.6-flash-medium",
+      "name": "Gemini 3.6 Flash (Medium)",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "antigravity",
+      "id": "gemini-3.6-flash-low",
+      "name": "Gemini 3.6 Flash (Low)",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "antigravity",
+      "id": "gemini-3.1-pro-high",
+      "name": "Gemini 3.1 Pro (High)",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "antigravity",
+      "id": "gemini-3.1-pro-low",
+      "name": "Gemini 3.1 Pro (Low)",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "antigravity",
+      "id": "claude-sonnet-4-6",
+      "name": "Claude Sonnet 4.6 (Thinking)",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "antigravity",
+      "id": "claude-opus-4-6-thinking",
+      "name": "Claude Opus 4.6 (Thinking)",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "antigravity",
+      "id": "gpt-oss-120b-medium",
+      "name": "GPT-OSS 120B (Medium)",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "auto",
+      "name": "Auto (default)",
+      "category": "excluded",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.6-high-fast",
+      "name": "Cursor Grok 4.6 Fast",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "composer-2.5",
+      "name": "Composer 2.5",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.5-high",
+      "name": "Cursor Grok 4.5",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.5-high-fast",
+      "name": "Cursor Grok 4.5 Fast",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.6-low",
+      "name": "Cursor Grok 4.6 Low",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.6-low-fast",
+      "name": "Cursor Grok 4.6 Low Fast",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.6-medium",
+      "name": "Cursor Grok 4.6 Medium",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.6-medium-fast",
+      "name": "Cursor Grok 4.6 Medium Fast",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.6-high",
+      "name": "Cursor Grok 4.6",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.6-xhigh",
+      "name": "Cursor Grok 4.6 Extra High",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.6-xhigh-fast",
+      "name": "Cursor Grok 4.6 Extra High Fast",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "composer-2.5-fast",
+      "name": "Composer 2.5 Fast",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.5-low",
+      "name": "Cursor Grok 4.5 Low",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.5-low-fast",
+      "name": "Cursor Grok 4.5 Low Fast",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.5-medium",
+      "name": "Cursor Grok 4.5 Medium",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "cursor",
+      "id": "cursor-grok-4.5-medium-fast",
+      "name": "Cursor Grok 4.5 Medium Fast",
+      "category": "legacy",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "claude-code",
+      "id": "claude-fable-5-1",
+      "model": "Claude Fable 5.1",
+      "name": "Claude Fable 5.1",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "claude-code",
+      "id": "claude-opus-5",
+      "model": "Claude Opus 5",
+      "name": "Claude Opus 5",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "claude-code",
+      "id": "claude-sonnet-5",
+      "model": "Claude Sonnet 5",
+      "name": "Claude Sonnet 5",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    },
+    {
+      "route": "claude-code",
+      "id": "claude-haiku-4-5-20251001",
+      "model": "Claude Haiku 4.5",
+      "name": "Claude Haiku 4.5",
+      "category": "core",
+      "visibility": "list",
+      "efforts": null
+    }
+  ]
+}

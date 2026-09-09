@@ -11,59 +11,35 @@ BASE = "b" * 40
 
 
 def ready_pr(**overrides):
-    record = {
-        "number": 10,
-        "body": "Closes #7",
-        "state": "OPEN",
-        "isDraft": False,
-        "headRefOid": HEAD,
-        "headRefName": "feat/issue-7-change",
-        "baseRefName": "main",
-        "baseRefOid": BASE,
-        "mergeable": "MERGEABLE",
-        "mergeStateStatus": "CLEAN",
-        "reviewDecision": None,
-        "labels": [],
-        "statusCheckRollup": [],
-    }
+    record = dict(
+        number=10, body="Closes #7", state="OPEN", isDraft=False,
+        headRefOid=HEAD, headRefName="feat/issue-7-change", baseRefName="main", baseRefOid=BASE,
+        mergeable="MERGEABLE", mergeStateStatus="CLEAN", reviewDecision=None,
+        labels=[], statusCheckRollup=[],
+    )
     record.update(overrides)
     return record
 
 
+def patch_gate(monkeypatch, **functions):
+    for name, function in functions.items():
+        monkeypatch.setattr(merge_pr, name, function)
+
+
 def install_low_risk_gate(monkeypatch, *, paths=None):
-    paths = paths or ["src/example.py"]
-    monkeypatch.setattr(merge_pr, "pull_request", lambda _number: ready_pr())
-    monkeypatch.setattr(merge_pr, "pull_changed_paths", lambda _number: paths)
-    monkeypatch.setattr(merge_pr, "review_risk_tier", lambda _paths: 1)
-    monkeypatch.setattr(
-        merge_pr,
-        "issue_gate",
-        lambda _issues, _paths, **_kw: [{"issue": 7, "criteria": 1}],
-    )
-    monkeypatch.setattr(
-        merge_pr,
-        "ci_verdict",
-        lambda _number: {
-            "head": HEAD,
-            "state": "success",
-            "checks": ["aru-governed-pr"],
-        },
-    )
-    monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _number: [])
-    monkeypatch.setattr(
-        merge_pr,
-        "merge_queue_snapshot",
-        lambda *_args: {"configured": False, "entry": None, "auto_merge": None},
+    patch_gate(
+        monkeypatch, pull_request=lambda _n: ready_pr(),
+        pull_changed_paths=lambda _n: paths or ["src/example.py"], review_risk_tier=lambda _p: 1,
+        issue_gate=lambda _issues, _paths, **_kw: [{"issue": 7, "criteria": 1}],
+        ci_verdict=lambda _n: {"head": HEAD, "state": "success", "checks": ["aru-governed-pr"]},
+        fetch_feedback=lambda _n: [],
+        merge_queue_snapshot=lambda *_a: {"configured": False, "entry": None, "auto_merge": None},
     )
 
 
 def test_tier_one_skips_authoritative_ai_review_but_keeps_server_gate(monkeypatch):
     install_low_risk_gate(monkeypatch)
-    monkeypatch.setattr(
-        merge_pr,
-        "assigned_service",
-        lambda _pr: pytest.fail("low-risk paths must not allocate a reviewer"),
-    )
+    patch_gate(monkeypatch, assigned_service=lambda _pr: pytest.fail("low-risk reviewer"))
     gates = merge_pr.evaluate(10, HEAD)
     assert gates["reviewer"] == "not-required"
     assert gates["risk_tier"] == 1
@@ -79,11 +55,7 @@ def test_tier_one_still_blocks_unresolved_threads(monkeypatch):
 
 def test_non_clean_merge_state_is_not_used_to_avoid_base_refresh(monkeypatch):
     install_low_risk_gate(monkeypatch)
-    monkeypatch.setattr(
-        merge_pr,
-        "pull_request",
-        lambda _number: ready_pr(mergeStateStatus="BEHIND"),
-    )
+    patch_gate(monkeypatch, pull_request=lambda _n: ready_pr(mergeStateStatus="BEHIND"))
     with pytest.raises(merge_pr.KernelError, match="BEHIND"):
         merge_pr.evaluate(10, HEAD)
 
@@ -102,45 +74,23 @@ def test_unsupported_merge_mode_is_refused_before_ci(monkeypatch, state, mode):
 
 
 def issue_record(touches: str):
-    return {
-        "body": (
-            "## Acceptance Criteria\n\n"
-            "- [x] exact behavior is verified\n\n"
-            "### touches:\n"
-            f"{touches}\n"
-        ),
-        "state": "OPEN",
-        "labels": [
-            {"name": "status:in-review"},
-            {"name": "agent:codex-1"},
-        ],
-    }
+    return dict(
+        body=f"## Acceptance Criteria\n\n- [x] exact behavior is verified\n\n### touches:\n{touches}\n",
+        state="OPEN", labels=[{"name": "status:in-review"}, {"name": "agent:codex-1"}],
+    )
 
 
 def test_issue_gate_checks_actual_paths_with_canonical_touches_parser(monkeypatch):
-    monkeypatch.setattr(
-        merge_state,
-        "issue",
-        lambda _number: issue_record("src/example.py, tests/**"),
-    )
+    monkeypatch.setattr(merge_state, "issue", lambda _n: issue_record("src/example.py, tests/**"))
     evidence = merge_pr.issue_gate([7], ["src/example.py", "tests/test_example.py"])
-    assert evidence == [
-        {
-            "issue": 7,
-            "criteria": 1,
-            "acceptance": [{"done": True, "text": "exact behavior is verified"}],
-            "touches": ["src/example.py", "tests/**"],
-            "claimant": "codex-1",
-        }
-    ]
+    assert evidence == [dict(
+        issue=7, criteria=1, acceptance=[{"done": True, "text": "exact behavior is verified"}],
+        touches=["src/example.py", "tests/**"], claimant="codex-1",
+    )]
 
 
 def test_issue_gate_refuses_actual_path_outside_touches(monkeypatch):
-    monkeypatch.setattr(
-        merge_state,
-        "issue",
-        lambda _number: issue_record("src/example.py"),
-    )
+    monkeypatch.setattr(merge_state, "issue", lambda _n: issue_record("src/example.py"))
     with pytest.raises(merge_pr.KernelError, match="outside.*touches"):
         merge_pr.issue_gate([7], ["src/example.py", "prod/config.yml"])
 
@@ -182,20 +132,10 @@ def test_merge_queue_snapshot_is_bound_to_exact_head(monkeypatch):
     def query(argv, *, auth):
         seen["argv"] = argv
         seen["auth"] = auth
-        return {
-            "data": {
-                "repository": {
-                    "pullRequest": {
-                        "number": 10,
-                        "headRefOid": HEAD,
-                        "baseRefOid": BASE,
-                        "mergeQueue": {"id": "queue"},
-                        "mergeQueueEntry": {"id": "entry", "state": "QUEUED"},
-                        "autoMergeRequest": None,
-                    }
-                }
-            }
-        }
+        pr = dict(number=10, headRefOid=HEAD, baseRefOid=BASE,
+                  mergeQueue={"id": "queue"}, mergeQueueEntry={"id": "entry", "state": "QUEUED"},
+                  autoMergeRequest=None)
+        return {"data": {"repository": {"pullRequest": pr}}}
 
     monkeypatch.setattr(merge_state, "gh_json", query)
     snapshot = merge_pr.merge_queue_snapshot(10, HEAD)
@@ -206,91 +146,54 @@ def test_merge_queue_snapshot_is_bound_to_exact_head(monkeypatch):
 
 
 def test_merge_stops_when_base_changes_after_evaluation(monkeypatch):
-    snapshots = iter(
-        [
-            {
-                "base_sha": BASE,
-                "issues": [{"issue": 7}],
-                "merge_queue": False,
-                "queue_entry": None,
-                "auto_merge": None,
-            },
-            {
-                "base_sha": "c" * 40,
-                "issues": [{"issue": 7}],
-                "merge_queue": False,
-                "queue_entry": None,
-                "auto_merge": None,
-            },
-        ]
-    )
-    monkeypatch.setattr(
-        merge_pr,
-        "evaluate",
-        lambda *_args: next(snapshots),
-    )
-    monkeypatch.setattr(
-        merge_pr, "run", lambda _argv: pytest.fail("merge command must not run")
-    )
+    snapshots = iter(dict(base_sha=base, issues=[{"issue": 7}], merge_queue=False,
+                          queue_entry=None, auto_merge=None) for base in (BASE, "c" * 40))
+    patch_gate(monkeypatch, evaluate=lambda *_a: next(snapshots),
+               run=lambda _a: pytest.fail("merge command must not run"))
     with pytest.raises(merge_pr.KernelError, match="authority changed"):
         merge_pr.merge(10, HEAD)
 
 
-@pytest.mark.parametrize("queued_history", [0, 1])
-def test_finalize_merged_pr_revalidates_evidence_before_close_out(monkeypatch, queued_history):
-    merged = ready_pr(
-        state="MERGED",
-        mergedAt="2026-09-01T12:00:00Z",
-        mergeCommit={"oid": "c" * 40},
-    )
-    install_low_risk_gate(monkeypatch, paths=["src/app.py"])
-    monkeypatch.setattr(merge_pr, "pull_request", lambda _number: merged)
+@pytest.mark.parametrize("mutation", ["stable", "deleted-branch", "base-moved", "queue", "feedback", "review"])
+@pytest.mark.parametrize("tier", [1, 2])
+def test_finalize_association_disappears_after_direct_merge(monkeypatch, mutation, tier):
+    import check_ci
+    from test_ci_and_feedback import historical_world
+    world, calls = historical_world(monkeypatch)
+    pr = world['pr']
+    pr.update(body="Closes #7", reviewDecision=None)
     closed = []
-    monkeypatch.setattr(
-        merge_pr,
-        "close_out",
-        lambda numbers, paths: closed.extend(numbers) or [
-            {"issue": numbers[0], "criteria": 1, "paths": paths}
-        ],
-    )
-
-    monkeypatch.setattr(merge_state, "repo_slug", lambda: "owner/repo")
-    monkeypatch.setattr(merge_state, "gh_json", lambda *_a, **_kw: {"data": {"repository": {
-        "pullRequest": {**merged, "timelineItems": {
-            "totalCount": 14, "nodes": [{"__typename": "AddedToMergeQueueEvent"}] * queued_history,
-            "pageInfo": {"hasNextPage": False},
-        }},
-    }}})
-    if queued_history:
-        with pytest.raises(merge_pr.KernelError, match="historical merge-queue work"):
-            merge_pr.finalize_queued(10, HEAD)
+    install_low_risk_gate(monkeypatch)
+    review = review_world('claude-code/attestation')
+    pr.update(author=review['pr']['author'], labels=review['pr']['labels'])
+    patch_gate(monkeypatch, review_risk_tier=lambda _p: tier, pull_reviews=lambda _n: review['reviews'])
+    monkeypatch.setattr(merge_pr, "pull_request", lambda _n: pr)
+    monkeypatch.setattr(merge_pr, "ci_verdict", check_ci.ci_verdict)
+    monkeypatch.setattr(merge_pr, "close_out", lambda numbers, _paths: closed.extend(numbers) or [{'issue': 7}])
+    pr['state'] = 'OPEN'
+    assert check_ci.ci_verdict(3)['state'] == 'success'
+    pr['state'] = 'MERGED'
+    world['run']['pull_requests'] = []
+    if mutation == 'base-moved':
+        pr['baseRefOid'] = 'd' * 40  # Never a historical merge parent.
+    if mutation == 'deleted-branch':
+        pr['headRef'] = None  # No live branch read is permitted by this fixture.
+    if mutation == 'queue':
+        world['history']['nodes'] = [{'__typename': 'AddedToMergeQueueEvent'}]
+    if mutation == 'feedback':
+        monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _n: [{'id': 1}])
+    if mutation == 'review':
+        pr['reviewDecision'] = 'CHANGES_REQUESTED' if tier == 1 else None
+        review['reviews'][0]['commit_id'] = 'd' * 40
+    if mutation in {'queue', 'feedback', 'review'}:
+        with pytest.raises(merge_pr.KernelError):
+            merge_pr.finalize_queued(3, HEAD)
         assert closed == []
-        return
-    result = merge_pr.finalize_queued(10, HEAD)
-
-    assert result["finalized"] is True
-    assert result["reviewer"] == "not-required"
-    assert closed == [7]
-    assert result["issues"] == [7]
-
-
-def test_finalize_merged_pr_leaves_issue_open_on_post_merge_feedback(monkeypatch):
-    merged = ready_pr(
-        state="MERGED",
-        mergedAt="2026-09-01T12:00:00Z",
-        mergeCommit={"oid": "c" * 40},
-    )
-    install_low_risk_gate(monkeypatch, paths=["src/app.py"])
-    monkeypatch.setattr(merge_pr, "pull_request", lambda _number: merged)
-    monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _number: [{"id": 1}])
-    monkeypatch.setattr(
-        merge_pr,
-        "close_out",
-        lambda _numbers: pytest.fail("post-merge feedback must block close-out"),
-    )
-
-    with pytest.raises(merge_pr.KernelError, match="post-merge review thread"):
-        merge_pr.finalize_queued(10, HEAD)
+    else:
+        result = merge_pr.finalize_queued(3, HEAD)
+        assert result['finalized'] and result['reviewer'] == ('claude-code' if tier == 2 else 'not-required')
+        assert result['issues'] == closed == [7]
+    assert not any('/git/ref' in str(call) for call in calls)
 
 
 def test_close_out_rechecks_contract_after_other_post_merge_network_calls(monkeypatch):
@@ -314,18 +217,7 @@ def test_close_out_rechecks_contract_after_other_post_merge_network_calls(monkey
     evidence = merge_state.close_out([7], ["src/app.py"])
 
     assert evidence == [{"issue": 7, "criteria": 1}]
-    assert gates == [
-        (
-            [7],
-            ["src/app.py"],
-            {"allow_closed": True, "allow_done": True},
-        ),
-        (
-            [7],
-            ["src/app.py"],
-            {"allow_closed": True, "allow_done": True},
-        ),
-    ]
+    assert gates == [([7], ["src/app.py"], {"allow_closed": True, "allow_done": True})] * 2
 
 
 @pytest.mark.parametrize(

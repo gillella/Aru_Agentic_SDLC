@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
-from check_ci import ci_verdict, check_name, check_state
+from check_ci import ci_verdict, finalization_verdict, check_name, check_state, check_run_inventory
 from common import (
     AUTHOR_FAMILY_PREFIX, AUTHOR_PREFIX, CODING_REVIEWERS, REVIEW_PREFIX,
     REVIEWER_ACTOR_PREFIX, REVIEWER_PREFIX, REVIEW_AUTHORITIES, REVIEW_SERVICES, RETIRED_EXTERNAL_REVIEWERS,
@@ -20,45 +20,23 @@ from common import (
 from fetch_pr_feedback import fetch_feedback
 from merge_state import (
     base_snapshot, close_out, issue_gate, linked_issues, merge_queue_snapshot,
-    pull_changed_paths, pull_request, require_direct_merge_history,
+    pull_changed_paths, pull_request,
 )
 from review_evidence import (
     UNAVAILABLE, authority_assigned_at, evidence_time, external_state,
+    EXTERNAL_APP_SLUGS as REVIEW_APP_SLUGS, _trusted_actor, check_service,
 )
 
-REVIEW_ACTORS = {
-    "coderabbit": {"coderabbitai", "coderabbitai[bot]"},
-    "sourcery": {"sourcery-ai", "sourcery-ai[bot]", "sourcery"},
-    "codeant": {"codeant-ai", "codeant-ai[bot]"},
-}
-REVIEW_APP_SLUGS = {
-    "coderabbit": {"coderabbitai"},
-    "sourcery": {"sourcery-ai", "sourcery"},
-    "codeant": {"codeant-ai", "codeant"},
-}
-CODEANT_STATUS_MARKER_RE = re.compile(
-    r"<!--\s*codeant-review-status:(.*?)-->", re.DOTALL
-)
+CODEANT_STATUS_MARKER_RE = re.compile(r"<!--\s*codeant-review-status:(.*?)-->", re.DOTALL)
 CODEANT_MARKER_PREFIX_RE = re.compile(r"<!--\s*codeant-review-status", re.IGNORECASE)
 CODEANT_STATUS_RECORD_KEYS = {"label", "commit", "started", "finished", "done"}
 CODEANT_FULL_REVIEW_LABEL = "Reviewed your PR"
 CODEANT_STATUS_LABELS = {CODEANT_FULL_REVIEW_LABEL, "Incremental review completed"}
-CODING_REVIEW_MARKER_RE = re.compile(
-    r"<!--\s*aru-coding-review:v1\s+(.*?)-->", re.DOTALL
-)
-CODING_REVIEW_MARKER_PREFIX_RE = re.compile(
-    r"<!--\s*aru-coding-review:", re.IGNORECASE
-)
+CODING_REVIEW_MARKER_RE = re.compile(r"<!--\s*aru-coding-review:v1\s+(.*?)-->", re.DOTALL)
+CODING_REVIEW_MARKER_PREFIX_RE = re.compile(r"<!--\s*aru-coding-review:", re.IGNORECASE)
 CODING_REVIEW_KEYS = {
-    "head",
-    "reviewer",
-    "family",
-    "submitted_by",
-    "verdict",
-    "summary",
-    "verification",
-    "findings",
-    "issues",
+    "head", "reviewer", "family", "submitted_by", "verdict",
+    "summary", "verification", "findings", "issues",
     "acceptance_criteria_reviewed",
     "diff_reviewed",
     "surrounding_code_reviewed",
@@ -78,15 +56,7 @@ def _parse_ts(value: Any) -> datetime | None:
 
 
 def _actor_is_trusted(actor: Any, service: str) -> bool:
-    if not isinstance(actor, dict):
-        return False
-    login = str(actor.get("login") or "").lower()
-    if login not in REVIEW_ACTORS[service]:
-        return False
-    actor_type = str(actor.get("type") or actor.get("__typename") or "")
-    if actor_type and actor_type != "Bot":
-        return False
-    return True
+    return isinstance(actor, dict) and _trusted_actor({"user": actor}, service)
 
 
 def assigned_service(pr: dict[str, Any]) -> str:
@@ -98,12 +68,8 @@ def assigned_service(pr: dict[str, Any]) -> str:
         raise KernelError("retired review authority; run create_pr.py --refresh-reviewer")
     if service not in REVIEW_AUTHORITIES:
         raise KernelError(f"unsupported review authority: {service}")
-    reviewer_labels = [
-        name for name in label_names(pr) if name.startswith(REVIEWER_PREFIX)
-    ]
-    actor_labels = [
-        name for name in label_names(pr) if name.startswith(REVIEWER_ACTOR_PREFIX)
-    ]
+    reviewer_labels = [name for name in label_names(pr) if name.startswith(REVIEWER_PREFIX)]
+    actor_labels = [name for name in label_names(pr) if name.startswith(REVIEWER_ACTOR_PREFIX)]
     if service in CODING_REVIEWERS and (len(reviewer_labels) != 1 or len(actor_labels) != 1):
         raise KernelError("coding review authority requires one reviewer identity and actor")
     if service in REVIEW_SERVICES and (reviewer_labels or actor_labels):
@@ -111,18 +77,9 @@ def assigned_service(pr: dict[str, Any]) -> str:
     return service
 
 
-def normalized(value: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", value.lower())
-
-
 def review_check_matches(record: dict[str, Any], service: str) -> bool:
-    name = normalized(check_name(record))
-    aliases = {
-        "coderabbit": ("coderabbit",),
-        "sourcery": ("sourceryreview", "sourcery"),
-        "codeant": ("codeantai", "codeant"),
-    }[service]
-    return name in aliases
+    check_name(record)  # Preserve refusal of nameless rollup/check records.
+    return check_service(record, service)
 
 
 def successful_service_check(
@@ -135,49 +92,41 @@ def successful_service_check(
     summary = pr.get("statusCheckRollup")
     if not isinstance(summary, list):
         raise KernelError("review check state is incomplete")
-    summarized = [
-        record
-        for record in summary
-        if isinstance(record, dict) and review_check_matches(record, service)
-    ]
-    if len(summarized) > 1:
-        raise KernelError("assigned review service returned ambiguous checks")
-    if len(summarized) != 1 or check_state(summarized[0]) != "success":
-        return False
-    matches = [
-        record
-        for record in checks
-        if review_check_matches(record, service)
-    ]
-    if len(matches) > 1:
-        raise KernelError("assigned review service returned ambiguous checks")
-    if len(matches) != 1:
-        return False
+    if any(not isinstance(record, dict) for record in checks):
+        raise KernelError("review check inventory is malformed")
+    for inventory in (summary, checks):
+        matches = [record for record in inventory
+                   if isinstance(record, dict) and review_check_matches(record, service)]
+        if len(matches) > 1:
+            raise KernelError("assigned review service returned ambiguous checks")
+        if len(matches) != 1 or check_state(matches[0]) != "success":
+            return False
     match = matches[0]
     app = match.get("app")
     return bool(
         isinstance(app, dict)
         and app.get("slug") in REVIEW_APP_SLUGS[service]
         and match.get("head_sha") == head
-        and check_state(match) == "success"
         and not review_evidence_unavailable(match)
         and evidence_time(match, subject="external reviewer check") >= assigned_at
     )
 
 
+def _pull_records(kind: str, number: int) -> list[dict[str, Any]]:
+    resource = "pulls" if kind == "reviews" else "issues"
+    return gh_paginated(f"repos/{repo_slug()}/{resource}/{number}/{kind}?per_page=100")
+
+
 def pull_reviews(number: int) -> list[dict[str, Any]]:
-    slug = repo_slug()
-    return gh_paginated(f"repos/{slug}/pulls/{number}/reviews?per_page=100")
+    return _pull_records("reviews", number)
 
 
 def pull_comments(number: int) -> list[dict[str, Any]]:
-    slug = repo_slug()
-    return gh_paginated(f"repos/{slug}/issues/{number}/comments?per_page=100")
+    return _pull_records("comments", number)
 
 
 def pull_events(number: int) -> list[dict[str, Any]]:
-    slug = repo_slug()
-    return gh_paginated(f"repos/{slug}/issues/{number}/events?per_page=100")
+    return _pull_records("events", number)
 
 
 def pull_review_checks(head: str) -> list[dict[str, Any]]:
@@ -187,67 +136,34 @@ def pull_review_checks(head: str) -> list[dict[str, Any]]:
             f"repos/{repo_slug()}/commits/{head}/check-runs?per_page=100&filter=latest",
         ]
     )
-    if (
-        not isinstance(pages, list)
-        or any(not isinstance(page, dict) for page in pages)
-        or any(not isinstance(page.get("check_runs"), list) for page in pages)
-    ):
-        raise KernelError("review check-run inventory is malformed")
-    checks = [record for page in pages for record in page["check_runs"]]
-    totals = {page.get("total_count") for page in pages}
-    if (
-        any(not isinstance(record, dict) for record in checks)
-        or len(totals) != 1
-        or totals.pop() != len(checks)
-    ):
-        raise KernelError("review check-run inventory is incomplete")
-    return checks
+    return check_run_inventory(pages, paginated=True)
 
 
-def _successful_service_review(
-    reviews: list[dict[str, Any]], head: str, service: str, assigned_at: datetime
-) -> bool:
-    approved = []
+def _service_reviews(reviews: list[dict], head: str, service: str):
+    """Share actor/head validation without treating stale records as approval."""
     for review in reviews:
         if not isinstance(review, dict):
             raise KernelError("review evidence is malformed")
         actor = review.get("user") or review.get("author")
         commit_id = review.get("commit_id") or (review.get("commit") or {}).get("oid")
         if _actor_is_trusted(actor, service) and commit_id == head:
-            state = str(review.get("state") or "").upper()
-            if state == "CHANGES_REQUESTED":
-                return False
-            if (
-                state == "APPROVED"
-                and not review_evidence_unavailable(review)
-                and evidence_time(review, subject="external reviewer evidence")
-                >= assigned_at
-            ):
-                approved.append(review)
-    return bool(approved)
+            yield review
 
 
-def _trusted_changes_requested_at_head(
-    reviews: list[dict[str, Any]],
-    head: str,
-    service: str,
-    assigned_at: datetime,
-) -> bool:
-    for review in reviews:
-        if not isinstance(review, dict):
-            raise KernelError("review evidence is malformed")
-        actor = review.get("user") or review.get("author")
-        commit_id = review.get("commit_id") or (review.get("commit") or {}).get("oid")
-        state = str(review.get("state") or "").upper()
-        if (
-            _actor_is_trusted(actor, service)
-            and commit_id == head
-            and evidence_time(review, subject="external reviewer evidence")
-            >= assigned_at
-        ):
-            if state == "CHANGES_REQUESTED":
-                return True
-    return False
+def _successful_service_review(reviews: list[dict], head: str, service: str, assigned_at: datetime) -> bool:
+    records = list(_service_reviews(reviews, head, service))
+    if any(str(record.get("state") or "").upper() == "CHANGES_REQUESTED" for record in records):
+        return False
+    return any(str(record.get("state") or "").upper() == "APPROVED"
+               and not review_evidence_unavailable(record)
+               and evidence_time(record, subject="external reviewer evidence") >= assigned_at
+               for record in records)
+
+
+def _trusted_changes_requested_at_head(reviews: list[dict], head: str, service: str, assigned_at: datetime) -> bool:
+    return any(evidence_time(record, subject="external reviewer evidence") >= assigned_at
+               and str(record.get("state") or "").upper() == "CHANGES_REQUESTED"
+               for record in _service_reviews(reviews, head, service))
 
 
 def trusted_codeant_review_history(
@@ -283,29 +199,29 @@ def _valid_codeant_record(record: Any) -> bool:
         return False
     return isinstance(record.get("done"), bool)
 
-def parse_codeant_status_payload(
-    comment: dict[str, Any],
-) -> tuple[bool, list[dict[str, Any]] | None]:
-    actor = comment.get("user") or comment.get("author")
-    if not _actor_is_trusted(actor, "codeant"):
-        return True, None
-    body = comment.get("body")
+def _marker_payload(body: Any, prefix: re.Pattern, pattern: re.Pattern, validate) -> tuple:
+    """Share strict marker cardinality, JSON and schema validation."""
     if not isinstance(body, str):
         return False, None
-    if not CODEANT_MARKER_PREFIX_RE.search(body):
+    if not prefix.search(body):
         return True, None
-    matches = CODEANT_STATUS_MARKER_RE.findall(body)
+    matches = pattern.findall(body)
     if len(matches) != 1:
         return False, None
     try:
         payload = json.loads(matches[0].strip())
     except (json.JSONDecodeError, ValueError):
         return False, None
-    if not isinstance(payload, list):
-        return False, None
-    if any(not _valid_codeant_record(record) for record in payload):
-        return False, None
-    return True, payload
+    return (True, payload) if validate(payload) else (False, None)
+
+
+def parse_codeant_status_payload(comment: dict[str, Any]) -> tuple[bool, list[dict[str, Any]] | None]:
+    if not _actor_is_trusted(comment.get("user") or comment.get("author"), "codeant"):
+        return True, None
+    return _marker_payload(
+        comment.get("body"), CODEANT_MARKER_PREFIX_RE, CODEANT_STATUS_MARKER_RE,
+        lambda payload: isinstance(payload, list) and all(_valid_codeant_record(r) for r in payload),
+    )
 
 def validate_codeant_status_comments(
     comments: list[dict[str, Any]], head: str, assigned_at: datetime
@@ -358,6 +274,10 @@ def _one_identity_label(pr: dict[str, Any], prefix: str) -> str | None:
     return values[0] if len(values) == 1 else None
 
 
+def _text(value: Any, minimum: int = 1) -> bool:
+    return isinstance(value, str) and len(value.strip()) >= minimum
+
+
 def _valid_finding(finding: Any) -> bool:
     if not isinstance(finding, dict) or set(finding) != CODING_FINDING_KEYS:
         return False
@@ -370,11 +290,8 @@ def _valid_finding(finding: Any) -> bool:
     summary = finding.get("summary")
     return (
         finding.get("severity") in CODING_FINDING_SEVERITIES
-        and isinstance(line, int)
-        and not isinstance(line, bool)
-        and line > 0
-        and isinstance(summary, str)
-        and len(summary.strip()) >= 10
+        and type(line) is int and line > 0
+        and _text(summary, 10)
         and isinstance(finding.get("resolved"), bool)
     )
 
@@ -386,62 +303,38 @@ def _valid_coding_payload(payload: Any) -> bool:
     if not isinstance(head, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", head):
         return False
     for key in ("reviewer", "family", "submitted_by"):
-        if not isinstance(payload.get(key), str) or not payload[key].strip():
+        if not _text(payload.get(key)):
             return False
     verdict = payload.get("verdict")
     if verdict not in {"APPROVE", "REQUEST_CHANGES"}:
         return False
     summary = payload.get("summary")
-    if not isinstance(summary, str) or len(summary.strip()) < 40:
+    if not _text(summary, 40):
         return False
     if re.sub(r"\s+", " ", summary.strip().lower()) in GENERIC_APPROVALS:
         return False
     verification = payload.get("verification")
-    if (
-        not isinstance(verification, list)
-        or not verification
-        or any(not isinstance(item, str) or len(item.strip()) < 10 for item in verification)
-    ):
+    if (not isinstance(verification, list) or not verification
+            or any(not _text(item, 10) for item in verification)):
         return False
     findings = payload.get("findings")
     if not isinstance(findings, list) or any(not _valid_finding(item) for item in findings):
         return False
     issues = payload.get("issues")
-    if (
-        not isinstance(issues, list)
-        or not issues
-        or any(not isinstance(item, int) or isinstance(item, bool) or item <= 0 for item in issues)
-        or issues != sorted(set(issues))
-    ):
+    if (not isinstance(issues, list) or not issues
+            or any(type(item) is not int or item <= 0 for item in issues)
+            or issues != sorted(set(issues))):
         return False
-    return all(
-        payload.get(key) is True
-        for key in (
-            "acceptance_criteria_reviewed",
-            "diff_reviewed",
-            "surrounding_code_reviewed",
-        )
-    )
+    return all(payload[key] is True for key in CODING_REVIEW_KEYS if key.endswith("_reviewed"))
 
 
 def parse_coding_review(review: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
-    body = review.get("body")
-    if body is None:
+    if review.get("body") is None:
         return True, None
-    if not isinstance(body, str):
-        return False, None
-    if not CODING_REVIEW_MARKER_PREFIX_RE.search(body):
-        return True, None
-    matches = CODING_REVIEW_MARKER_RE.findall(body)
-    if len(matches) != 1:
-        return False, None
-    try:
-        payload = json.loads(matches[0].strip())
-    except (json.JSONDecodeError, ValueError):
-        return False, None
-    if not _valid_coding_payload(payload):
-        return False, None
-    return True, payload
+    return _marker_payload(
+        review["body"], CODING_REVIEW_MARKER_PREFIX_RE, CODING_REVIEW_MARKER_RE,
+        _valid_coding_payload,
+    )
 
 
 def _current_coding_attestation(
@@ -540,26 +433,17 @@ def exact_head_review(
     issue_numbers: list[int] | None = None,
 ) -> bool:
     head = str(pr["headRefOid"])
+    reviews = pull_reviews(number)
     if service in CODING_REVIEWERS:
         return successful_coding_agent_review(
-            pr,
-            pull_reviews(number),
-            service,
-            issue_numbers or linked_issues(str(pr.get("body") or "")),
+            pr, reviews, service, issue_numbers or linked_issues(str(pr.get("body") or "")),
         )
-    reviews = pull_reviews(number)
     comments = pull_comments(number)
     events = pull_events(number)
     checks = pull_review_checks(head)
     assigned_at = authority_assigned_at(pr, events, service)
-    if external_state(
-        service,
-        reviews=reviews,
-        comments=comments,
-        checks=checks,
-        head=head,
-        since=assigned_at,
-    ) == UNAVAILABLE:
+    if external_state(service, reviews=reviews, comments=comments, checks=checks,
+                      head=head, since=assigned_at) == UNAVAILABLE:
         return False
     if _trusted_changes_requested_at_head(reviews, head, service, assigned_at):
         return False
@@ -601,41 +485,43 @@ def evaluate(number: int, expected_head: str) -> dict[str, object]:
     risk_tier = review_risk_tier(changed_paths)
     issues = linked_issues(str(pr.get("body") or ""))
     issue_evidence = issue_gate(issues, changed_paths)
-    ci = ci_verdict(number)
+    ci, service = require_ci_review(pr, number, head, issues, risk_tier)
+    return {
+        "pr": number, "head": head, "branch": pr["headRefName"],
+        "base": pr["baseRefName"], "base_sha": base_sha,
+        "issues": issue_evidence, "changed_paths": changed_paths, "risk_tier": risk_tier,
+        "ci": ci["checks"], "reviewer": service or "not-required", "feedback": 0,
+        "merge_queue": queue["configured"],
+        "queue_entry": queue["entry"], "auto_merge": queue["auto_merge"],
+    }
+
+
+def require_ci_review(pr: dict, number: int, head: str, issues: list[int], risk_tier: int, *, context: str = "", finalizing: bool = False) -> tuple:
+    """Admission and close-out consume the same CI, thread and verdict gates."""
+    ci = finalization_verdict(pr) if finalizing else ci_verdict(number)
     if ci["head"] != head or ci["state"] != "success":
         raise KernelError("exact-current-head required GitHub checks are not successful")
     feedback = fetch_feedback(number)
     if feedback:
-        raise KernelError(f"{len(feedback)} unresolved review thread(s)")
+        raise KernelError(f"{len(feedback)} unresolved {context}review thread(s)")
     if pr.get("reviewDecision") == "CHANGES_REQUESTED":
-        raise KernelError("a submitted review still requests changes")
-    service: str | None = None
-    if risk_tier >= 2:
-        service = assigned_service(pr)
-        if service in CODING_REVIEWERS:
-            verdict = coding_review_verdict(pr, pull_reviews(number), service, issues)
-            if verdict == "REQUEST_CHANGES":
-                raise KernelError(f"{service} exact-head authoritative review requested changes")
-            if verdict != "APPROVE":
-                raise KernelError(f"{service} has no successful exact-head verdict")
-        elif not exact_head_review(pr, number, service, issues):
-            raise KernelError(f"{service} has no successful exact-head verdict")
-    return {
-        "pr": number,
-        "head": head,
-        "base": pr["baseRefName"],
-        "base_sha": base_sha,
-        "branch": pr["headRefName"],
-        "issues": issue_evidence,
-        "changed_paths": changed_paths,
-        "risk_tier": risk_tier,
-        "ci": ci["checks"],
-        "reviewer": service or "not-required",
-        "feedback": 0,
-        "merge_queue": queue["configured"],
-        "queue_entry": queue["entry"],
-        "auto_merge": queue["auto_merge"],
-    }
+        raise KernelError(f"a submitted {context}review still requests changes")
+    service = assigned_service(pr) if risk_tier >= 2 else None
+    if service:
+        require_review_verdict(pr, number, service, issues, context=f" ({context.strip()})" if context else "")
+    return ci, service
+
+
+def require_review_verdict(pr: dict, number: int, service: str, issues: list[int], *, context: str = "") -> None:
+    if service in CODING_REVIEWERS:
+        verdict = coding_review_verdict(pr, pull_reviews(number), service, issues)
+        if verdict == "REQUEST_CHANGES":
+            raise KernelError(f"{service} exact-head authoritative review requested changes")
+        valid = verdict == "APPROVE"
+    else:
+        valid = exact_head_review(pr, number, service, issues)
+    if not valid:
+        raise KernelError(f"{service} has no successful exact-head verdict{context}")
 
 
 def revalidate_review(pr: dict[str, Any], number: int, gates: dict[str, Any], issues: list[int]) -> None:
@@ -644,15 +530,7 @@ def revalidate_review(pr: dict[str, Any], number: int, gates: dict[str, Any], is
         service = assigned_service(pr)
         if service != gates["reviewer"]:
             raise KernelError("review authority changed before merge submission")
-        if service in CODING_REVIEWERS:
-            verdict = coding_review_verdict(pr, pull_reviews(number), service, issues)
-            if verdict == "REQUEST_CHANGES":
-                raise KernelError(f"{service} exact-head authoritative review requested changes")
-            valid = verdict == "APPROVE"
-        else:
-            valid = exact_head_review(pr, number, service, issues)
-        if not valid:
-            raise KernelError(f"{service} has no successful exact-head verdict before merge submission")
+        require_review_verdict(pr, number, service, issues, context=" before merge submission")
     feedback = fetch_feedback(number)
     if feedback:
         raise KernelError(f"{len(feedback)} unresolved review thread(s) before merge submission")
@@ -702,40 +580,15 @@ def finalize_queued(number: int, expected_head: str) -> dict[str, object]:
         raise KernelError("PR has not merged yet")
     if pr.get("headRefOid") != expected_head:
         raise KernelError("expected head does not match the merged PR head")
-    merge_commit = (pr.get("mergeCommit") or {}).get("oid")
-    if not isinstance(merge_commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", merge_commit):
-        raise KernelError("merged PR has no exact merge commit")
     changed_paths = pull_changed_paths(number)
     numbers = linked_issues(str(pr.get("body") or ""))
-    issue_gate(
-        numbers, changed_paths, allow_closed=True, allow_done=True
-    )
-    ci = ci_verdict(number)
-    if ci["head"] != expected_head or ci["state"] != "success":
-        raise KernelError("exact-head required GitHub checks are not successful")
-    feedback = fetch_feedback(number)
-    if feedback:
-        raise KernelError(f"{len(feedback)} unresolved post-merge review thread(s)")
-    if pr.get("reviewDecision") == "CHANGES_REQUESTED":
-        raise KernelError("a submitted post-merge review requests changes")
+    issue_gate(numbers, changed_paths, allow_closed=True, allow_done=True)
     risk_tier = review_risk_tier(changed_paths)
-    service: str | None = None
-    if risk_tier >= 2:
-        service = assigned_service(pr)
-        if service in CODING_REVIEWERS:
-            verdict = coding_review_verdict(pr, pull_reviews(number), service, numbers)
-            if verdict != "APPROVE":
-                raise KernelError(f"{service} post-merge exact-head review is not approved")
-        elif not exact_head_review(pr, number, service, numbers):
-            raise KernelError(f"{service} post-merge exact-head review is not approved")
-    require_direct_merge_history(number, expected_head, merge_commit)
+    _ci, service = require_ci_review(pr, number, expected_head, numbers, risk_tier, context="post-merge ", finalizing=True)
     evidence = close_out(numbers, changed_paths)
     return {
-        "merged": True,
-        "finalized": True,
-        "pr": number,
-        "head": expected_head,
-        "merge_commit": merge_commit,
+        "merged": True, "finalized": True, "pr": number, "head": expected_head,
+        "merge_commit": pr["mergeCommit"]["oid"],
         "issues": [int(item["issue"]) for item in evidence],
         "risk_tier": risk_tier,
         "reviewer": service or "not-required",
