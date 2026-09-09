@@ -248,3 +248,109 @@ def test_workflow_inventory_and_reread_conflicts_block(monkeypatch, change):
     monkeypatch.setattr(check_ci, "gh_json", inventory)
     with pytest.raises(check_ci.KernelError):
         check_ci.ci_verdict(3)
+
+
+def historical_world(monkeypatch):
+    """Fake only authenticated reads; use real CI, parent and queue validators."""
+    import merge_state
+    import subprocess
+    monkeypatch.setattr(subprocess, 'run', lambda *_a, **_kw: pytest.fail('unexpected external call'))
+    pr = dict(PR, state='MERGED', mergedAt='2026-09-09T15:00:00Z', mergeCommit={'oid': 'c' * 40})
+    rest = dict(number=3, state='closed', merged=True, merged_at=pr['mergedAt'],
+                created_at=PR['createdAt'], merge_commit_sha='c' * 40,
+                head=dict(ref=PR['headRefName'], sha=HEAD, repo={'full_name': SLUG}),
+                base=dict(ref='main', sha='b' * 40, repo={'full_name': SLUG}))
+    run, check = workflow_run(), check_run('aru-governed-pr')
+    run.update(run_started_at=run['created_at'], updated_at='2026-09-09T14:59:00Z')
+    check.update(started_at=run['created_at'], completed_at=run['updated_at'])
+    world = dict(pr=pr, rest=rest, run=run, check=check,
+                 commit=dict(sha='c' * 40, parents=[{'sha': 'b' * 40}, {'sha': HEAD}]),
+                 history=dict(nodes=[], pageInfo={'hasNextPage': False}))
+    world.update(checks=[check], runs=[run])
+    calls = install_checks(monkeypatch, world['checks'], workflows=world['runs'])
+    ordinary = check_ci.gh_json
+    def read(argv, **kwargs):
+        if argv[:2] == ['pr', 'view']:
+            return deepcopy(world['pr'])
+        if argv[:2] == ['api', 'graphql']:
+            assert kwargs['auth'] == merge_state.REPOSITORY_AUTH
+            return {'data': {'repository': {'pullRequest': {
+                **world['pr'], 'timelineItems': world['history']}}}}
+        if argv[-1].endswith('/pulls/3'):
+            return deepcopy(world['rest'])
+        if argv[-1].endswith('/commits/' + 'c' * 40):
+            return deepcopy(world['commit'])
+        return ordinary(argv)
+    monkeypatch.setattr(check_ci, 'gh_json', read)
+    monkeypatch.setattr(merge_state, 'gh_json', read)
+    monkeypatch.setattr(merge_state, 'repo_slug', lambda: SLUG)
+    return world, calls
+
+
+@pytest.mark.parametrize('target,field,value', [
+    ('pr', 'state', 'OPEN'), ('pr', 'state', 'CLOSED'), ('pr', 'mergedAt', None),
+    ('pr', 'headRefOid', 'd' * 40), ('pr', 'mergeCommit', {'oid': 'd' * 40}),
+    ('rest', 'merged', False), ('rest', 'merged', None), ('rest', 'number', 4),
+    ('rest', 'merge_commit_sha', 'd' * 40), ('rest', 'created_at', None),
+    ('rest', 'head', None), ('rest', 'base', {'sha': 'b' * 40}),
+    ('commit', 'sha', 'd' * 40), ('commit', 'parents', None),
+    ('commit', 'parents', [{'sha': HEAD}]),
+    ('commit', 'parents', [{'sha': HEAD}, {'sha': 'b' * 40}]),
+    ('commit', 'parents', [{'sha': 'd' * 40}, {'sha': HEAD}]),
+    ('commit', 'parents', [{'sha': 'b' * 40}, {'sha': 'd' * 40}]),
+    ('history', 'nodes', [{'__typename': 'AddedToMergeQueueEvent'}]),
+    ('history', 'pageInfo', {'hasNextPage': True}), ('history', 'nodes', None),
+    ('run', 'pull_requests', None), ('run', 'pull_requests', [None]),
+    ('run', 'pull_requests', 'MISSING'), ('run', 'pull_requests', {}), ('run', 'pull_requests', [{'number': 4}]),
+    ('run', 'event', 'merge_group'), ('run', 'head_sha', 'd' * 40),
+    ('run', 'head_repository', {'full_name': 'evil/fork'}),
+    ('run', 'created_at', '2026-09-09T14:00:00Z'), ('run', 'run_started_at', None),
+    ('run', 'run_started_at', '2026-09-09T15:01:00Z'),
+    ('run', 'updated_at', '2026-09-09T15:01:00Z'),
+    ('check', 'completed_at', '2026-09-09T15:01:00Z'), ('check', 'started_at', None),
+    ('check', 'app', {'id': 999, 'slug': 'github-actions'}),
+    ('check', 'check_suite', {'id': 999}), ('check', 'conclusion', 'FAILURE'),
+    ('run', 'status', 'in_progress'), ('run', 'conclusion', 'failure'),
+])
+def test_finalization_historical_proof_refuses_conflicts(monkeypatch, target, field, value):
+    world, _ = historical_world(monkeypatch)
+    world['run']['pull_requests'] = []
+    if value == 'MISSING':
+        world[target].pop(field)
+    else:
+        world[target][field] = value
+    with pytest.raises(check_ci.KernelError):
+        check_ci.finalization_verdict(world['pr'])
+
+
+@pytest.mark.parametrize('association', [[], None, [None]])
+def test_missing_association_never_becomes_premerge_authority(monkeypatch, association):
+    world, _ = historical_world(monkeypatch)
+    world['run']['pull_requests'] = association
+    for state in ('OPEN', 'CLOSED', 'MERGED'):
+        world['pr']['state'] = state
+        with pytest.raises(check_ci.KernelError, match='association|bound'):
+            check_ci.ci_verdict(3)
+
+
+@pytest.mark.parametrize('state', ['success', 'pending', 'failure'])
+@pytest.mark.parametrize('associated', [False, True])
+def test_finalization_cannot_select_green_over_other_current_work(monkeypatch, state, associated):
+    world, _ = historical_world(monkeypatch)
+    if not associated:
+        world['run']['pull_requests'] = []
+    extra = dict(world['run'], id=30, check_suite_id=130)
+    check = check_run('aru-governed-pr', run_id=30)
+    check.update(started_at=world['check']['started_at'], completed_at=world['check']['completed_at'])
+    if state != 'success':
+        extra.update(status='queued' if state == 'pending' else 'completed',
+                     conclusion=None if state == 'pending' else 'failure')
+        check.update(status=extra['status'], conclusion=extra['conclusion'])
+    world['runs'].append(extra)
+    if state != 'pending':
+        world['checks'].append(check)
+    if state == 'success':
+        assert check_ci.finalization_verdict(world['pr'])['state'] == 'success'
+    else:
+        with pytest.raises(check_ci.KernelError, match='pre-merge lifetime'):
+            check_ci.finalization_verdict(world['pr'])
