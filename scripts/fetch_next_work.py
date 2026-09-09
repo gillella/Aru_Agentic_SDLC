@@ -241,45 +241,36 @@ def _open_pr_work(pr: dict) -> dict[str, object]:
         if feedback:
             return {"type": "feedback", "pr": number, "items": feedback}
 
-    verification = ci_verdict(number)
+    try:
+        verification = ci_verdict(number)
+    except KernelError as exc:
+        return {"type": "blocked", "pr": number, "head": pr.get("headRefOid"),
+                "verification": "unreadable", "ci_error": str(exc),
+                "reason": "CI inspection is unreadable; merge is blocked"}
+    return _verified_pr_work(pr, verification)
+
+
+def _verified_pr_work(pr: dict, verification: dict) -> dict[str, object]:
+    number = int(pr["number"])
     head = str(verification["head"])
+    context = {"pr": number, "head": head}
     merge_state = pr.get("mergeStateStatus")
     if not isinstance(merge_state, str) or not merge_state:
         merge_state = _pr_live_merge_state(number, head)
     elif merge_state not in _MERGE_STATE_STATUSES:
         raise KernelError(f"GitHub returned malformed pull request snapshot for #{number}")
     if merge_state == "DIRTY":
-        return {
-            "type": "conflict",
-            "pr": number,
-            "head": head,
-            "reason": "PR merge state is DIRTY",
-        }
+        return {**context, "type": "conflict", "reason": "PR merge state is DIRTY"}
     if verification["state"] == "failure":
-        return {
-            "type": "verification",
-            "pr": number,
-            "head": head,
-            "checks": verification["checks"],
-        }
+        return {**context, "type": "verification", "checks": verification["checks"]}
     if verification["state"] == "success":
         try:
             evaluate(number, head)
         except KernelError as exc:
             reason = str(exc)
             if reason == "PR merge state is DIRTY":
-                return {
-                    "type": "conflict",
-                    "pr": number,
-                    "head": head,
-                    "reason": reason,
-                }
-            result: dict[str, object] = {
-                "type": "wait",
-                "pr": number,
-                "head": head,
-                "reason": reason,
-            }
+                return {**context, "type": "conflict", "reason": reason}
+            result = {**context, "type": "wait", "reason": reason}
             if "requests changes" in reason or "requested changes" in reason:
                 result["next_action"] = "address-review-feedback"
             elif (
@@ -289,13 +280,8 @@ def _open_pr_work(pr: dict) -> dict[str, object]:
             ):
                 result.update(reviewer_continuation(number))
             return result
-        return {"type": "merge", "pr": number, "head": head}
-    return {
-        "type": "wait",
-        "pr": number,
-        "head": head,
-        "verification": verification["state"],
-    }
+        return {**context, "type": "merge"}
+    return {**context, "type": "wait", "verification": verification["state"]}
 
 
 def _ready_candidates(
