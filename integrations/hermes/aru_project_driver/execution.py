@@ -169,6 +169,7 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
            head: str | None = None, review: dict | None = None) -> dict:
     """Caller holds State.lock and has just revalidated the live kernel claim."""
     state = State(config.state_dir)
+    admission_stop = state.stop_nonce(repo)
     if not state.project(repo)["enabled"]:
         raise DriverError("project stopped before worker launch")
     lane = config.lane(repo, identity)
@@ -204,7 +205,7 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
         "kind": kind, "pr": pr, "head": head, "worktree": str(directory),
         "review": review,
         "capacity_key": lane["capacity_key"], "capacity_slot": slot, "started_at": time.time(),
-        "state": "launching", "pid": None,
+        "state": "launching", "pid": None, "admission_stop": admission_stop,
         "prompt": prompt_for(repo, issue, identity, config.kernel_root, str(directory),
                              kind, pr, head, review),
     }
@@ -213,17 +214,20 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
     log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
         with os.fdopen(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
-            # Fixed supervised entrypoint and generated identifiers, without a shell.
-            process = subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
-                [sys.executable, str(Path(__file__).with_name("driver.py")),
-                 "--config", str(config.path), "_worker", "--worker-id", worker_id,
-                 "--capacity-fd", str(descriptor)],
-                cwd=directory, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
-                start_new_session=True, pass_fds=(descriptor,), shell=False,
-                env=worker_environment(kind, review),
-            )
-    except OSError as exc:
-        record.update(state="launch_failed", error=type(exc).__name__)
+            with state.project_lock(repo, spawn=True):
+                state.require_admission(repo, admission_stop)
+                # Fixed supervised entrypoint and generated identifiers, without a shell.
+                process = subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+                    [sys.executable, str(Path(__file__).with_name("driver.py")),
+                     "--config", str(config.path), "_worker", "--worker-id", worker_id,
+                     "--capacity-fd", str(descriptor)],
+                    cwd=directory, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
+                    start_new_session=True, pass_fds=(descriptor,), shell=False,
+                    env=worker_environment(kind, review),
+                )
+    except (OSError, DriverError) as exc:
+        record.update(state="launch_failed", error=type(exc).__name__,
+                      reason=str(exc) if isinstance(exc, DriverError) else "worker launch failed")
         write_json(state.worker_path(worker_id), record)
         raise DriverError("worker launch failed; existing claim and worktree preserved") from exc
     finally:
@@ -246,6 +250,16 @@ def _revalidate_review_worker(config: Config, record: dict) -> None:
         raise DriverError("review worktree changed before child execution")
 
 
+def _start_agent(state: State, record: dict, argv: list[str], descriptor: int):
+    # Only local gate reads and process creation occur under this barrier.
+    with state.project_lock(record["repo"], spawn=True):
+        state.require_admission(record["repo"], record.get("admission_stop"))
+        return subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+            argv, cwd=record["worktree"], stdin=subprocess.DEVNULL,
+            pass_fds=(descriptor,), shell=False, start_new_session=True,
+        )
+
+
 def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
     """Child retains the account lock even if the initiating Hermes session exits."""
     state = State(config.state_dir)
@@ -263,18 +277,14 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
         write_json(path, record)
         argv = [part.replace("{prompt}", record["prompt"]) for part in lane["command"]]
         process = None
-        # Wait for the launching reconciliation to release its lock, then make
-        # the final stop check and process creation atomic with Stop.
+        # Review revalidation can be slow; keep it outside the short spawn
+        # barrier. Stop fences this worker without waiting for coordination.
         with state.lock(blocking=True):
             if not state.project(record["repo"])["enabled"]:
                 record["reason"] = "project stopped before child execution"
             else:
                 _revalidate_review_worker(config, record)
-                # Operator-owned command array; the prompt remains one literal argument.
-                process = subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
-                    argv, cwd=record["worktree"], stdin=subprocess.DEVNULL,
-                    pass_fds=(descriptor,), shell=False, start_new_session=True,
-                )
+                process = _start_agent(state, record, argv, descriptor)
                 record["child_pid"] = process.pid
                 write_json(path, record)
         if process is not None:

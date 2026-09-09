@@ -314,3 +314,251 @@ def test_wake_gate_probe_accepts_the_definition_in_any_cron_module(tmp_path, fil
         with pytest.raises(scheduler.SchedulerError, match="lacks script wake gates"):
             scheduler._require_wake_gate(tmp_path)
 
+
+
+def test_deadline_interrupts_real_scheduler_lock_and_restores_signal_state(setup):
+    import signal
+    import time
+
+    home, project, _, _, api = setup
+    lock = home / "state" / "aru_project_driver" / "scheduler.lock"
+    lock.parent.mkdir(parents=True)
+    script = "import fcntl,sys; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('locked',flush=True); sys.stdin.read()"
+    holder = subprocess.Popen([sys.executable, "-c", script, str(lock)], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, text=True)
+    assert holder.stdout.readline().strip() == "locked"
+    previous = signal.getsignal(signal.SIGALRM)
+    try:
+        began = time.monotonic()
+        with pytest.raises(scheduler.SchedulerError, match="deadline"):
+            with scheduler.bounded(scheduler.deadline_after(.1)):
+                scheduler.stop_project(home, project, cron_api=api)
+        assert time.monotonic() - began < 1
+        assert holder.poll() is None
+        assert signal.getsignal(signal.SIGALRM) == previous
+        assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+    finally:
+        holder.communicate(timeout=3)
+
+
+def test_bounded_operation_preserves_earlier_caller_timer_without_entering_body(monkeypatch):
+    import signal
+    import time
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    delivered, writes = [], []
+    def handler(*_):
+        delivered.append(True)
+    original = signal.setitimer
+    def record_timer(*args):
+        writes.append(args)
+        return original(*args)
+    try:
+        signal.signal(signal.SIGALRM, handler)
+        signal.setitimer(signal.ITIMER_REAL, .15, .3)
+        with monkeypatch.context() as patch:
+            patch.setattr(signal, "setitimer", record_timer)
+            with pytest.raises(scheduler.SchedulerError, match="exclusive SIGALRM"):
+                with scheduler.bounded(scheduler.deadline_after(1)):
+                    pytest.fail("operation took over an earlier caller timer")
+        assert writes == []
+        assert signal.getsignal(signal.SIGALRM) is handler
+        assert signal.getitimer(signal.ITIMER_REAL)[1] == .3
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == previous_mask
+        until = time.monotonic() + .5
+        while not delivered and time.monotonic() < until:
+            time.sleep(.01)
+        assert delivered == [True]
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
+@pytest.mark.parametrize("failure", ["expiry", "error"])
+def test_alarm_setup_failure_restores_signal_state(monkeypatch, failure):
+    import signal
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    original = signal.setitimer
+    armed = []
+    def expire_first_arm(*args):
+        result = original(*args)
+        if not armed:
+            armed.append(True)
+            if failure == "error":
+                raise OSError("timer setup failed after arming")
+            signal.getsignal(signal.SIGALRM)(signal.SIGALRM, None)
+        return result
+    monkeypatch.setattr(signal, "setitimer", expire_first_arm)
+    with pytest.raises(scheduler.SchedulerError if failure == "expiry" else OSError):
+        with scheduler.bounded(scheduler.deadline_after(1)):
+            pytest.fail("already expired operation began")
+    assert signal.getsignal(signal.SIGALRM) == previous_handler
+    assert signal.getitimer(signal.ITIMER_REAL) == previous_timer
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == previous_mask
+
+
+@pytest.mark.parametrize("mode", ["blocked", "pending"])
+def test_bounded_operation_preserves_blocked_or_pending_caller_alarm(monkeypatch, mode):
+    import signal
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    delivered = []
+    original = signal.pthread_sigmask
+    queued = False
+    def mask_with_pending(how, mask):
+        nonlocal queued
+        result = original(how, mask)
+        if how == signal.SIG_BLOCK and mask == {signal.SIGALRM} and not queued:
+            queued = True
+            signal.raise_signal(signal.SIGALRM)
+        return result
+    try:
+        signal.signal(signal.SIGALRM, lambda *_: delivered.append(True))
+        if mode == "blocked":
+            original(signal.SIG_BLOCK, {signal.SIGALRM})
+        else:
+            monkeypatch.setattr(signal, "pthread_sigmask", mask_with_pending)
+        expected_mask = original(signal.SIG_BLOCK, set())
+        with pytest.raises(scheduler.SchedulerError, match="exclusive SIGALRM"):
+            with scheduler.bounded(scheduler.deadline_after(1)):
+                pytest.fail("operation took over caller signal ownership")
+        assert original(signal.SIG_BLOCK, set()) == expected_mask
+        assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+        assert delivered == ([True] if mode == "pending" else [])
+    finally:
+        signal.signal(signal.SIGALRM, previous_handler)
+        original(signal.SIG_SETMASK, previous_mask)
+
+
+@pytest.mark.parametrize("mode", ["python_callback", "pending_signal", "cancel_callback"])
+def test_alarm_at_cleanup_entry_cannot_escape_or_reach_restored_caller(monkeypatch, mode):
+    import signal
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGUSR1})
+    entry_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    delivered = []
+    original = signal.pthread_sigmask
+    original_timer = signal.setitimer
+    cleanup = False
+    def interrupt_cleanup(how, mask):
+        nonlocal cleanup
+        result = original(how, mask)
+        if cleanup and mode != "cancel_callback" and how == signal.SIG_BLOCK and mask == {signal.SIGALRM}:
+            cleanup = False
+            if mode == "python_callback":
+                signal.getsignal(signal.SIGALRM)(signal.SIGALRM, None)
+            else:
+                signal.raise_signal(signal.SIGALRM)
+        return result
+    def interrupt_cancel(*args):
+        nonlocal cleanup
+        result = original_timer(*args)
+        if cleanup and mode == "cancel_callback" and args[1] == 0:
+            cleanup = False
+            signal.getsignal(signal.SIGALRM)(signal.SIGALRM, None)
+        return result
+    def caller(*_):
+        delivered.append(True)
+    try:
+        signal.signal(signal.SIGALRM, caller)
+        monkeypatch.setattr(signal, "pthread_sigmask", interrupt_cleanup)
+        monkeypatch.setattr(signal, "setitimer", interrupt_cancel)
+        with pytest.raises(scheduler.SchedulerError, match="deadline"):
+            with scheduler.bounded(scheduler.deadline_after(1)):
+                cleanup = True
+        assert signal.getsignal(signal.SIGALRM) is caller
+        assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+        assert original(signal.SIG_BLOCK, set()) == entry_mask
+        assert signal.SIGALRM not in signal.sigpending()
+        assert delivered == []
+        signal.raise_signal(signal.SIGALRM)
+        assert delivered == [True]
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        original(signal.SIG_SETMASK, previous_mask)
+
+
+def test_alarm_before_cleanup_helper_enters_retries_complete_restoration(monkeypatch):
+    import signal
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    original = scheduler._restore_alarm
+    attempts = []
+    def interrupted_entry(*args):
+        attempts.append(True)
+        if len(attempts) == 1:
+            raise scheduler._DeadlineExpired()
+        return original(*args)
+    monkeypatch.setattr(scheduler, "_restore_alarm", interrupted_entry)
+    with pytest.raises(scheduler.SchedulerError, match="deadline"):
+        with scheduler.bounded(scheduler.deadline_after(1)):
+            pass
+    assert attempts == [True, True]
+    assert signal.getsignal(signal.SIGALRM) == previous_handler
+    assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+    assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == previous_mask
+    assert signal.SIGALRM not in signal.sigpending()
+
+
+def test_bounded_operation_refuses_thread_without_starting_native_work():
+    def attempt():
+        with pytest.raises(scheduler.SchedulerError, match="main thread"):
+            with scheduler.bounded(scheduler.deadline_after(1)):
+                pytest.fail("unsupported bounded native operation began")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(attempt).result(timeout=3)
+
+
+def test_stop_waits_out_existing_producer_then_prevents_late_job_recreation(setup, monkeypatch):
+    import threading
+    import time
+    from types import SimpleNamespace
+    from aru_project_driver import driver as entry
+    from aru_project_driver.state import State
+
+    home, project, config_path, driver_path, api = setup
+    state = State(home / "state" / "aru_project_driver")
+    config = SimpleNamespace(state_dir=state.root, hermes_home=home, hermes_repo=home,
+                             path=config_path, project=lambda _: {})
+    entered, release = threading.Event(), threading.Event()
+    original = api.create_job
+    def slow_create(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=3)
+        return original(*args, **kwargs)
+    api.create_job = slow_create
+    monkeypatch.setattr(scheduler, "_load_api", lambda *a: api)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        producer = pool.submit(scheduler.ensure_heartbeat, home, project, config_path, driver_path)
+        assert entered.wait(timeout=3)
+        def release_after_fence():
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and state.stop_nonce(project) is None:
+                time.sleep(.01)
+            assert state.stop_nonce(project) is not None
+            release.set()
+        releaser = pool.submit(release_after_fence)
+        stopped = entry.stop(config, project, timeout_seconds=2)
+        releaser.result(timeout=3)
+        initial = producer.result(timeout=3)
+    assert stopped["status"] == "stopped"
+    assert not any(j["enabled"] for j in api.jobs)
+    with pytest.raises(scheduler.SchedulerError, match="stopped"):
+        scheduler.schedule_wake(home, project, config_path, driver_path, event_key="late")
+    with pytest.raises(scheduler.SchedulerError, match="stopped"):
+        scheduler.ensure_heartbeat(home, project, config_path, driver_path)
+    with pytest.raises(scheduler.SchedulerError, match="stopped"):
+        scheduler.sync_review_wakes(home, project, config_path, driver_path, [])
+    restarted = entry.start(config, project)
+    assert restarted["heartbeat"]["heartbeat_job_id"] == initial["heartbeat_job_id"]
+    assert state.project(project)["enabled"]
