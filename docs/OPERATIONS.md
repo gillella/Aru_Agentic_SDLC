@@ -1509,6 +1509,16 @@ Installing that correction requires existing coordinators to be quiescent:
 already-running old code cannot honor a new dispatch fence. Source completion
 and any separately approved installation do not establish live canary acceptance.
 
+The correction subsequently merged in [PR #623](https://github.com/gillella/Aru_Agentic_SDLC/pull/623)
+at 06:41:50 UTC: exact head `e6a1d78205200e419870cc4428819e40b8f7e1eb`,
+merge `4f9aedf57a5226341f5490d019c13af6059244c3`. Its exact-head governed
+check and distinct coding review passed, including the corrected rollback
+procedure that preserves disabled state under older source. Issue #622 is
+Closed/Done, and both kernel checkouts were fast-forwarded to the merge.
+The five installed Driver modules still matched `dadf1c1`; no installation or
+gateway drain occurred. Shared-gateway maintenance requires additional approval
+beyond the recorded demo-only scope, while the live acceptance remains open.
+
 Final demo readback was `enabled: false`, zero workers and zero enabled
 heartbeat, wake and review-wake jobs. There are no live-run IDs and no rollback
 was performed. Existing demo issues #1/#2, PR #3, fixture issues and other
