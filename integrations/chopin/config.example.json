@@ -1,0 +1,22 @@
+{
+  "schema": "chopin-pilot/v1",
+  "app_name": "Chopin Catalog Pilot gillella",
+  "app_owner": "gillella",
+  "app_browser_settings_verified": false,
+  "public_origin": "https://aravinds-mac-mini-1.tail3df1c1.ts.net:8443",
+  "setup_origin": "http://100.95.239.18:8766",
+  "setup_ttl_seconds": 600,
+  "credentials_dir": "/Users/gillella/.hermes/credentials/chopin-catalog-pilot",
+  "state_dir": "/Users/gillella/.hermes/workspace/chopin-pilot/runtime",
+  "receipts_dir": "/Users/gillella/.hermes/workspace/chopin-pilot/receipts",
+  "source_dir": "/Users/gillella/services/chopin",
+  "repository": "gillella/unum-catalog",
+  "base_branch": "main",
+  "allowed_users": ["gillella"],
+  "telegram": {"platform": "telegram", "chat_id": "-5325492504", "user_id": "6431233670"},
+  "mcp_bearer": {"file": "/Users/gillella/.hermes/credentials/chopin-mcp/bearer"},
+  "github_app_wrapper": "/Users/gillella/.local/bin/aru-code-factory-app-run",
+  "database": {"host": "127.0.0.1", "port": 5432, "name": "chopin_catalog_pilot", "role": "chopin_catalog_pilot", "admin_user": "gillella"},
+  "psql": "/opt/homebrew/opt/postgresql@17/bin/psql",
+  "pg_dump": "/opt/homebrew/opt/postgresql@17/bin/pg_dump"
+}
