@@ -770,3 +770,31 @@ def test_shared_subscription_with_two_sessions_admits_two_lanes_and_counts_both(
     assert len(result["launched"]) == 2 and {item["capacity_key"] for item in harness.launched} == {shared}
     assert {item["capacity_slot"] for item in harness.launched} == {0, 1}
     assert harness.controller._worker_count(REPO) == 2  # two live reservations on one account
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_stop_during_precheck_suppresses_native_brain_even_on_failure(harness, failure):
+    original = harness.controller._plan
+    def plan(repo):
+        result = original(repo)
+        harness.state.request_stop(repo)
+        if failure:
+            raise DriverError("in-flight authority read failed")
+        return result
+    harness.controller._plan = plan
+    result = harness.controller.tick(REPO)
+    assert result["wakeAgent"] is False
+    assert not harness.state.project(REPO)["enabled"]
+    assert not harness.launched
+
+
+def test_stop_during_event_scheduling_is_not_a_delivered_wake(harness, monkeypatch):
+    from aru_project_driver import scheduler
+
+    def schedule(*a, **k):
+        harness.state.request_stop(REPO)
+        return {"wake_job_id": "already-admitted"}
+    monkeypatch.setattr(scheduler, "schedule_wake", schedule)
+    result = harness.controller.event(REPO, "interrupted-event", "event")
+    assert result["status"] == "stopped" and not result["wakeAgent"]
+    assert not harness.state.has_event(REPO, "interrupted-event")

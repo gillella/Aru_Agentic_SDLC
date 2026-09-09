@@ -314,3 +314,124 @@ def test_wake_gate_probe_accepts_the_definition_in_any_cron_module(tmp_path, fil
         with pytest.raises(scheduler.SchedulerError, match="lacks script wake gates"):
             scheduler._require_wake_gate(tmp_path)
 
+
+
+def test_deadline_interrupts_real_scheduler_lock_and_restores_signal_state(setup):
+    import signal
+    import time
+
+    home, project, _, _, api = setup
+    lock = home / "state" / "aru_project_driver" / "scheduler.lock"
+    lock.parent.mkdir(parents=True)
+    script = "import fcntl,sys; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('locked',flush=True); sys.stdin.read()"
+    holder = subprocess.Popen([sys.executable, "-c", script, str(lock)], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, text=True)
+    assert holder.stdout.readline().strip() == "locked"
+    previous = signal.getsignal(signal.SIGALRM)
+    try:
+        began = time.monotonic()
+        with pytest.raises(scheduler.SchedulerError, match="deadline"):
+            with scheduler.bounded(scheduler.deadline_after(.1)):
+                scheduler.stop_project(home, project, cron_api=api)
+        assert time.monotonic() - began < 1
+        assert holder.poll() is None
+        assert signal.getsignal(signal.SIGALRM) == previous
+        assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+    finally:
+        holder.communicate(timeout=3)
+
+
+def test_bounded_operation_restores_existing_timer_with_elapsed_time():
+    import signal
+    import time
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    def handler(*_):
+        pass
+    try:
+        signal.signal(signal.SIGALRM, handler)
+        signal.setitimer(signal.ITIMER_REAL, 10)
+        with scheduler.bounded(scheduler.deadline_after(.5)):
+            time.sleep(.03)
+        assert signal.getsignal(signal.SIGALRM) is handler
+        assert 9 < signal.getitimer(signal.ITIMER_REAL)[0] < 9.99
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+
+
+def test_immediate_expiry_while_arming_timer_restores_signal_state(monkeypatch):
+    import signal
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    original = signal.setitimer
+    armed = []
+    def expire_first_arm(*args):
+        result = original(*args)
+        if not armed:
+            armed.append(True)
+            signal.getsignal(signal.SIGALRM)(signal.SIGALRM, None)
+        return result
+    monkeypatch.setattr(signal, "setitimer", expire_first_arm)
+    with pytest.raises(scheduler.SchedulerError, match="deadline"):
+        with scheduler.bounded(scheduler.deadline_after(1)):
+            pytest.fail("already expired operation began")
+    assert signal.getsignal(signal.SIGALRM) == previous_handler
+    assert signal.getitimer(signal.ITIMER_REAL) == previous_timer
+
+
+def test_bounded_operation_refuses_thread_without_starting_native_work():
+    def attempt():
+        with pytest.raises(scheduler.SchedulerError, match="main thread"):
+            with scheduler.bounded(scheduler.deadline_after(1)):
+                pytest.fail("unsupported bounded native operation began")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(attempt).result(timeout=3)
+
+
+def test_stop_waits_out_existing_producer_then_prevents_late_job_recreation(setup, monkeypatch):
+    import threading
+    import time
+    from types import SimpleNamespace
+    from aru_project_driver import driver as entry
+    from aru_project_driver.state import State
+
+    home, project, config_path, driver_path, api = setup
+    state = State(home / "state" / "aru_project_driver")
+    config = SimpleNamespace(state_dir=state.root, hermes_home=home, hermes_repo=home,
+                             path=config_path, project=lambda _: {})
+    entered, release = threading.Event(), threading.Event()
+    original = api.create_job
+    def slow_create(*args, **kwargs):
+        entered.set()
+        assert release.wait(timeout=3)
+        return original(*args, **kwargs)
+    api.create_job = slow_create
+    monkeypatch.setattr(scheduler, "_load_api", lambda *a: api)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        producer = pool.submit(scheduler.ensure_heartbeat, home, project, config_path, driver_path)
+        assert entered.wait(timeout=3)
+        def release_after_fence():
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and state.stop_nonce(project) is None:
+                time.sleep(.01)
+            assert state.stop_nonce(project) is not None
+            release.set()
+        releaser = pool.submit(release_after_fence)
+        stopped = entry.stop(config, project, timeout_seconds=2)
+        releaser.result(timeout=3)
+        initial = producer.result(timeout=3)
+    assert stopped["status"] == "stopped"
+    assert not any(j["enabled"] for j in api.jobs)
+    with pytest.raises(scheduler.SchedulerError, match="stopped"):
+        scheduler.schedule_wake(home, project, config_path, driver_path, event_key="late")
+    with pytest.raises(scheduler.SchedulerError, match="stopped"):
+        scheduler.ensure_heartbeat(home, project, config_path, driver_path)
+    with pytest.raises(scheduler.SchedulerError, match="stopped"):
+        scheduler.sync_review_wakes(home, project, config_path, driver_path, [])
+    restarted = entry.start(config, project)
+    assert restarted["heartbeat"]["heartbeat_job_id"] == initial["heartbeat_job_id"]
+    assert state.project(project)["enabled"]

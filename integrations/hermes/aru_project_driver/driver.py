@@ -23,55 +23,84 @@ from .state import State
 def start(config: Config, repo: str) -> dict:
     config.project(repo)
     state = State(config.state_dir)
-    with state.lock():
+    observed_stop = state.stop_nonce(repo)  # Capture before any coordinating wait.
+    with state.lock(), state.project_lock(repo):
+        if state.stop_nonce(repo) != observed_stop:
+            raise DriverError("Start was superseded by Stop")
         data = state.project(repo)
-        # The persistent stop gate stays closed until the native scheduler
-        # proves it created the recurring recovery path.
+        # Start alone may acknowledge this Stop generation, after the native
+        # heartbeat exists. A later Stop nonce always defeats this snapshot.
         heartbeat = scheduler.ensure_heartbeat(
             config.hermes_home, repo, config.path, Path(__file__).resolve(),
-            hermes_repo=config.hermes_repo,
+            hermes_repo=config.hermes_repo, start_nonce=observed_stop,
         )
+        if state.stop_nonce(repo) != observed_stop:
+            raise DriverError("Start was superseded by Stop")
         was_enabled = data["enabled"]
-        data.update(enabled=True, wake_pending_until=0, cooldown_until=0,
+        data.update(enabled=True, acknowledged_stop=observed_stop,
+                    wake_pending_until=0, cooldown_until=0,
                     started_at=data.get("started_at", time.time()))
         if not was_enabled:
             data["generation"] += 1
         state.save(repo, data)
-        # A failed immediate wake still leaves the verified heartbeat available.
         wake = scheduler.schedule_wake(
             config.hermes_home, repo, config.path, Path(__file__).resolve(),
             reason="project start", event_key=f"start:{data['generation']}",
             hermes_repo=config.hermes_repo,
         )
+        state.require_admission(repo, observed_stop)
         return {"status": "started", "project": repo, "heartbeat": heartbeat, "wake": wake}
 
 
-def stop(config: Config, repo: str) -> dict:
+def stop(config: Config, repo: str, *, timeout_seconds: float = 20) -> dict:
     config.project(repo)
     state = State(config.state_dir)
-    with state.lock(blocking=True):
-        data = state.project(repo)
-        data.update(enabled=False, wake_pending_until=0, stopped_at=time.time())
-        state.save(repo, data)
-        result = scheduler.stop_project(config.hermes_home, repo, hermes_repo=config.hermes_repo)
-        return {"status": "stopped", "project": repo, "scheduler": result,
-                "workers_preserved": True}
+    deadline = scheduler.deadline_after(timeout_seconds)
+    result = {"status": "partial", "project": repo, "stop_intent_persisted": False,
+              "spawn_barrier_verified": False, "workers_preserved": True,
+              "scheduler": {"verified": False}}
+    try:
+        with scheduler.bounded(deadline):
+            state.request_stop(repo)
+            result["stop_intent_persisted"] = True
+            # An already admitted Popen may still finish while Stop is written.
+            # Crossing this short barrier settles it before acknowledging Stop.
+            with state.project_lock(repo, spawn=True):
+                result["spawn_barrier_verified"] = True
+            with state.project_lock(repo):
+                if state.project(repo)["enabled"]:
+                    raise DriverError("Stop was superseded by a later explicit Start")
+                paused = scheduler.stop_project(config.hermes_home, repo, hermes_repo=config.hermes_repo)
+                result["scheduler"] = {**paused, "verified": True}
+                if state.project(repo)["enabled"]:
+                    raise DriverError("dispatch state changed during Stop readback")
+                result.update(status="stopped", enabled=False)
+    except (DriverError, scheduler.SchedulerError, OSError, ValueError) as exc:
+        result.update(status="partial", reason=str(exc))
+    # Do not turn a deadline into another unbounded scheduler observation.
+    return result
 
 
-def status(config: Config, repo: str) -> dict:
+def status(config: Config, repo: str, *, timeout_seconds: float = 20) -> dict:
     config.project(repo)
     state = State(config.state_dir)
-    data = state.project(repo)
-    workers = [{key: r.get(key) for key in (
-        "id", "agent", "issue", "pr", "head", "state", "pid", "exit_code", "worktree",
-        "started_at", "finished_at", "wake_error",
-    )} for r in state.workers(repo)]
-    return {"project": repo, "enabled": data["enabled"],
-            "last_checked_at": data.get("last_checked_at"), "last_error": data.get("last_error"),
-            "last_observation": data.get("last_observation"), "workers": workers,
-            "scheduler": scheduler.scheduler_status(
+    result = {"project": repo}
+    try:
+        with scheduler.bounded(scheduler.deadline_after(timeout_seconds)):
+            data = state.project(repo)
+            workers = [{key: r.get(key) for key in (
+                "id", "agent", "issue", "pr", "head", "state", "pid", "exit_code", "worktree",
+                "started_at", "finished_at", "wake_error",
+            )} for r in state.workers(repo)]
+            result.update(enabled=data["enabled"], last_checked_at=data.get("last_checked_at"),
+                          last_error=data.get("last_error"), last_observation=data.get("last_observation"),
+                          workers=workers)
+            result["scheduler"] = scheduler.scheduler_status(
                 config.hermes_home, repo, hermes_repo=config.hermes_repo,
-            )}
+            )
+    except (DriverError, scheduler.SchedulerError, OSError, ValueError) as exc:
+        result.update(status="partial", reason=str(exc), scheduler={"verified": False})
+    return result
 
 
 def _honest_health(config: Config, repo: str, result: dict) -> dict:
@@ -97,6 +126,9 @@ def parser() -> argparse.ArgumentParser:
     for operation in ("start", "stop", "status", "tick", "reconcile", "event"):
         command = sub.add_parser(operation)
         command.add_argument("--project", required=True, help="literal configured owner/repository")
+        if operation in {"stop", "status"}:
+            command.add_argument("--timeout-seconds", type=float, default=20,
+                                 help="remaining wall-time budget for this operation (default 20s)")
         if operation == "event":
             command.add_argument("--event-id", required=True)
             command.add_argument("--reason", choices=("event", "worker", "review", "operator"), default="event")
@@ -131,9 +163,10 @@ def main(argv: list[str] | None = None) -> int:
             if args.operation == "tick":
                 result = _honest_health(config, args.project, result)
         else:
-            result = {"start": start, "stop": stop, "status": status}[args.operation](config, args.project)
+            options = {"timeout_seconds": args.timeout_seconds} if args.operation in {"stop", "status"} else {}
+            result = {"start": start, "stop": stop, "status": status}[args.operation](config, args.project, **options)
         print(json.dumps(result, sort_keys=True))
-        return 0
+        return 1 if result.get("status") == "partial" else 0
     except (DriverError, KernelAdapterError, scheduler.SchedulerError, OSError, ValueError) as exc:
         busy = isinstance(exc, DriverError) and str(exc).startswith("another Driver activation")
         print(json.dumps({"wakeAgent": False, "status": "busy" if busy else "error", "reason": str(exc)}))

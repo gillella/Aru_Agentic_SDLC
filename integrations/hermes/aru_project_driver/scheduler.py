@@ -12,8 +12,11 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import sys
 import tempfile
+import threading
+import time
 from typing import Any
 
 try:
@@ -32,6 +35,64 @@ except ImportError:
 
 class SchedulerError(RuntimeError):
     """The installed Hermes scheduler cannot safely fulfill the operation."""
+
+
+class _DeadlineExpired(BaseException):
+    """Do not let a native CRUD function's broad Exception handler eat expiry."""
+
+
+def deadline_after(seconds: float) -> float:
+    if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
+        raise SchedulerError("timeout must be a positive finite number of seconds")
+    return time.monotonic() + seconds
+
+
+@contextlib.contextmanager
+def bounded(deadline: float | None):
+    """Bound POSIX CLI locking/import/native CRUD without leaving a cleanup child.
+
+    Unlike a thread timeout, an interrupt ends the operation itself. Do not run
+    native scheduler operations in a background thread or swallow this deadline.
+    """
+    if deadline is None:
+        yield
+        return
+    if threading.current_thread() is not threading.main_thread():
+        raise SchedulerError("bounded scheduler operations require the POSIX main thread")
+    remaining = deadline - time.monotonic()
+    if not math.isfinite(remaining) or remaining <= 0:
+        raise SchedulerError("scheduler deadline expired; cleanup/readback is unverified")
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_delay, previous_interval = signal.getitimer(signal.ITIMER_REAL)
+    began = time.monotonic()
+
+    def expired(_signum, _frame):
+        raise _DeadlineExpired()
+
+    try:
+        signal.signal(signal.SIGALRM, expired)
+        signal.setitimer(signal.ITIMER_REAL, min(remaining, previous_delay) if previous_delay else remaining)
+        yield
+        if time.monotonic() >= deadline:
+            expired(None, None)
+    except _DeadlineExpired:
+        raise SchedulerError("scheduler deadline expired; cleanup/readback is unverified") from None
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_delay:
+            elapsed = time.monotonic() - began
+            signal.setitimer(signal.ITIMER_REAL, max(0.000001, previous_delay - elapsed), previous_interval)
+
+
+def _require_stop_generation(hermes_home: Path, project: str, start_nonce=...):
+    from .state import State
+
+    state = State(hermes_home / "state" / "aru_project_driver")
+    nonce = state.stop_nonce(project)
+    acknowledged = state.project(project).get("acknowledged_stop") if start_nonce is ... else start_nonce
+    if nonce != acknowledged:
+        raise SchedulerError("project stopped during scheduler admission")
 
 
 def _namespace(project: str) -> str:
@@ -304,13 +365,14 @@ def webhook_prompt(project: str, config_path: Path, driver_path: Path, route: st
 
 def ensure_heartbeat(
     hermes_home: Path, project: str, config_path: Path, driver_path: Path, *,
-    hermes_repo: Path | None = None, cron_api=None,
+    hermes_repo: Path | None = None, cron_api=None, start_nonce=...,
 ) -> dict:
     """Create or refresh exactly one enabled native ten-minute heartbeat."""
     hermes_home = Path(hermes_home).expanduser().resolve()
     namespace = _namespace(project)
     api = _load_api(hermes_home, hermes_repo, cron_api)
     with _locked(hermes_home):
+        _require_stop_generation(hermes_home, project, start_nonce)
         script = _wrapper(hermes_home, project, config_path, driver_path)
         name = namespace + "heartbeat"
         payload = _payload(project, Path(config_path).resolve(), Path(driver_path).resolve(), script)
@@ -345,6 +407,7 @@ def schedule_wake(
     key = event_key or reason
     name = namespace + "wake:" + hashlib.sha256(key.encode()).hexdigest()[:24]
     with _locked(hermes_home):
+        _require_stop_generation(hermes_home, project)
         matches = [j for j in _jobs(api, namespace) if j.get("name") == name]
         if matches:
             return {"project": project, "wake_job_id": matches[0]["id"], "duplicate": True}
@@ -404,6 +467,7 @@ def sync_review_wakes(
         raise SchedulerError(f"invalid pending review event: {exc}") from exc
     api = _load_api(hermes_home, hermes_repo, cron_api)
     with _locked(hermes_home):
+        _require_stop_generation(hermes_home, project)
         existing = [j for j in _jobs(api, namespace) if str(j.get("name", "")).startswith(namespace + "review:")]
         paused = []
         for job in existing:

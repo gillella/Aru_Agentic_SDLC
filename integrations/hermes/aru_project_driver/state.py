@@ -9,6 +9,7 @@ import math
 import os
 import re
 import time
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -53,6 +54,8 @@ def _timestamp(value: object) -> bool:
 
 
 def _validate_project(data: dict) -> None:
+    if data.get("acknowledged_stop") is not None and not _nonce(data["acknowledged_stop"]):
+        raise DriverError("operational Stop acknowledgment is invalid")
     if type(data.get("generation")) is not int or data["generation"] < 0:
         raise DriverError("operational project generation is invalid")
     events = data.get("events")
@@ -83,6 +86,8 @@ def _validate_project(data: dict) -> None:
 
 
 def _validate_worker(data: dict) -> None:
+    if data.get("admission_stop") is not None and not _nonce(data["admission_stop"]):
+        raise DriverError("worker Stop admission is invalid")
     if any(not isinstance(data.get(field), str) or not data[field] for field in (
         "id", "repo", "agent", "capacity_key", "state",
     )):
@@ -97,6 +102,10 @@ def _validate_worker(data: dict) -> None:
     for field in ("pid", "child_pid"):
         if data.get(field) is not None and (type(data[field]) is not int or data[field] <= 0):
             raise DriverError("operational worker process identity is invalid")
+
+
+def _nonce(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[a-f0-9]{32}", value) is not None
 
 
 class State:
@@ -119,6 +128,58 @@ class State:
     def project_path(self, repo: str) -> Path:
         return self.root / "projects" / f"{key(repo)}.json"
 
+    def stop_intent(self, repo: str) -> dict:
+        path = self.root / "stops" / f"{key(repo)}.json"
+        if not path.exists():
+            return {}
+        data = read_json(path)
+        if (data.get("repo") != repo or not _nonce(data.get("nonce"))
+                or not _timestamp(data.get("stopped_at"))):
+            raise DriverError("operational Stop intent is invalid")
+        return data
+
+    def stop_nonce(self, repo: str) -> str | None:
+        return self.stop_intent(repo).get("nonce")
+
+    def request_stop(self, repo: str) -> str:
+        """Fence dispatch without waiting for any coordinator or scheduler.
+
+        This is one operational control value, not issue lifecycle state. Start
+        acknowledges a nonce; no normal project snapshot can remove this fence.
+        """
+        nonce = uuid.uuid4().hex
+        path = self.root / "stops" / f"{key(repo)}.json"
+        write_json(path, {"repo": repo, "nonce": nonce, "stopped_at": time.time()})
+        for directory in (path.parent, self.root):
+            descriptor = os.open(directory, os.O_RDONLY)
+            try:
+                # The root sync also persists the first creation of stops/.
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        return nonce
+
+    @contextmanager
+    def project_lock(self, repo: str, *, spawn: bool = False):
+        """Local Start/Stop serialization, or the short check-and-spawn barrier.
+
+        The spawn barrier must never contain provider, GitHub or scheduler calls.
+        Bounded Stop supplies an interruptible deadline while crossing either lock.
+        """
+        directory = self.root / "project-locks"
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        suffix = "spawn" if spawn else "control"
+        with (directory / f"{key(repo)}.{suffix}.lock").open("a+") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(stream, fcntl.LOCK_UN)
+
+    def require_admission(self, repo: str, nonce: str | None) -> None:
+        if not self.project(repo)["enabled"] or self.stop_nonce(repo) != nonce:
+            raise DriverError("project stopped or worker admission predates Stop")
+
     def project(self, repo: str) -> dict:
         result = read_json(self.project_path(repo), {
             "repo": repo, "enabled": False, "generation": 0, "events": [],
@@ -127,6 +188,9 @@ class State:
         if result.get("repo") != repo or type(result.get("enabled")) is not bool:
             raise DriverError("project operational identity is invalid")
         _validate_project(result)
+        stop = self.stop_intent(repo)
+        if stop and stop["nonce"] != result.get("acknowledged_stop"):
+            result.update(enabled=False, wake_pending_until=0, stopped_at=stop["stopped_at"])
         return result
 
     def save(self, repo: str, data: dict) -> None:

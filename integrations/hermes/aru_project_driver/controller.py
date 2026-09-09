@@ -256,6 +256,8 @@ class Controller:
                 return {"wakeAgent": False, "reason": "cooldown or pending activation"}
             try:
                 plan = self._plan(repo)
+                if not self.state.project(repo)["enabled"]:
+                    return {"wakeAgent": False, "reason": "project stopped"}
                 self.sync_reviews(repo, plan["actions"])
             except (KernelAdapterError, DriverError, scheduler.SchedulerError) as exc:
                 return self._failure(repo, state, exc, precheck=True)
@@ -270,16 +272,21 @@ class Controller:
             state["last_checked_at"] = self.now()
             state["last_observation"] = {"actionable": plan["actionable"], "reasons": plan["reasons"]}
             self.state.save(repo, state)
+            if not self.state.project(repo)["enabled"]:
+                return {"wakeAgent": False, "reason": "project stopped"}
             return {"wakeAgent": bool(wake), "project": repo, "plan": plan if wake else None}
 
     def _failure(self, repo: str, state: dict, exc: Exception, *, precheck: bool) -> dict:
+        if not self.state.project(repo)["enabled"]:
+            return {"wakeAgent": False, "status": "stopped", "reason": "project stopped"}
         message = str(exc)
         changed = state.get("last_error") != message
         delay = 3600 if any(s in message.lower() for s in ("rate limit", "rate-limit", "quota")) else 600
         state.update(last_error=message, cooldown_until=self.now() + delay,
                      wake_pending_until=0, last_checked_at=self.now())
         self.state.save(repo, state)
-        return {"wakeAgent": bool(precheck and changed), "status": "degraded", "reason": message}
+        wake = precheck and changed and self.state.project(repo)["enabled"]
+        return {"wakeAgent": bool(wake), "status": "degraded", "reason": message}
 
     def _sync_reviews(self, repo: str, actions: list[dict]) -> dict:
         events = [{"pr": a.get("pr"), "head": a.get("head"),
@@ -303,10 +310,14 @@ class Controller:
             launched = []
             try:
                 plan = self._plan(repo)
+                if not self.state.project(repo)["enabled"]:
+                    return {"status": "stopped", "launched": []}
                 adapter = self.adapter(repo)
                 actions = [self._converge_review(repo, adapter, a, launched) for a in plan["actions"]]
                 timers = self.sync_reviews(repo, actions)
                 for work in plan["resumes"]:
+                    if not self.state.project(repo)["enabled"]:
+                        break
                     if self._worker_count(repo) >= self.config.project(repo).get("max_workers", 4):
                         break
                     if not self.available(self.config, repo, work["agent"], self.state).get("available"):
@@ -324,6 +335,9 @@ class Controller:
                     ))
                 for identity in plan["free_lanes"]:
                     self._fill_one(repo, adapter, identity, launched)
+                if not self.state.project(repo)["enabled"]:
+                    return {"status": "stopped", "launched": launched,
+                            "actions": [a for a in actions if a.get("execution") == "blocked"]}
                 state.update(last_fingerprint=plan["fingerprint"], wake_pending_until=0,
                              last_reconciled_at=self.now(), last_error=None,
                              handled_generation=state["generation"])
@@ -440,6 +454,8 @@ class Controller:
                 "owner": "Hermes Driver", "next_step": "Supervised worker and completion wake"}
 
     def _fill_one(self, repo: str, adapter, identity: str, launched: list) -> None:
+        if not self.state.project(repo)["enabled"]:
+            return
         if not self.available(self.config, repo, identity, self.state).get("available"):
             return
         if self._worker_count(repo) >= self.config.project(repo).get("max_workers", 4):
@@ -461,7 +477,7 @@ class Controller:
         status = "Backlog" if promote else "Ready"
         eligible = {item["number"] for item in adapter.candidates(snapshot, status=status)}
         number = candidates[0]["number"]
-        if number not in eligible:
+        if number not in eligible or not self.state.project(repo)["enabled"]:
             return
         if promote:
             adapter.promote(number)
@@ -499,10 +515,13 @@ class Controller:
                 Path(__file__).with_name("driver.py"), reason=reason, event_key=event_id,
                 hermes_repo=self.config.hermes_repo,
             )
-        self.state.event(repo, event_id, reason)
+        if not self.state.event(repo, event_id, reason):
+            return {"accepted": False, "wakeAgent": False, "project": repo, "status": "stopped"}
         data = self.state.project(repo)
         data.update(last_fingerprint=None, wake_pending_until=0)
         self.state.save(repo, data)
+        if not self.state.project(repo)["enabled"]:
+            return {"accepted": False, "wakeAgent": False, "project": repo, "status": "stopped"}
         return {"accepted": True, "wakeAgent": True, "project": repo, "status": "delivered"}
 
     def _dependency_contract(self, repo: str, source_issue: int) -> tuple[dict, dict]:

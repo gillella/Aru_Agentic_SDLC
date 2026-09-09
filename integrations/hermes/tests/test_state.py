@@ -215,3 +215,48 @@ def test_capacity_holder_identifies_current_lock_and_ignores_stale_file_contents
         assert State(state.root).capacity_holder("shared-account") == "new-worker"
     assert path.read_text() == "new-worker\n"
     assert state.capacity_holder("shared-account") is None
+
+
+def test_stop_fence_survives_stale_save_and_only_matching_start_acknowledges(state):
+    repo = "owner/repo"
+    initial = state.project(repo)
+    initial["enabled"] = True
+    state.save(repo, initial)
+    stale = state.project(repo)
+    nonce = state.request_stop(repo)
+    state.save(repo, stale)
+    assert not State(state.root).project(repo)["enabled"]
+    assert State(state.root).stop_nonce(repo) == nonce
+    stale.update(acknowledged_stop=nonce, enabled=True)
+    state.save(repo, stale)
+    assert state.project(repo)["enabled"]
+    state.request_stop(repo)
+    state.save(repo, stale)
+    assert not state.project(repo)["enabled"]
+
+
+@pytest.mark.parametrize("bad", [{}, {"nonce": "x"}, {"repo": "other/repo", "nonce": "a" * 32, "stopped_at": 1}])
+def test_existing_malformed_stop_intent_never_becomes_legacy_absence(state, bad):
+    from aru_project_driver.state import write_json
+
+    repo = "owner/repo"
+    data = state.project(repo)
+    data["enabled"] = True
+    state.save(repo, data)
+    write_json(state.root / "stops" / f"{key(repo)}.json", bad)
+    with pytest.raises(DriverError, match="Stop intent"):
+        state.project(repo)
+
+
+def test_stop_preserves_events_and_other_project_bytes(state):
+    repo, other = "owner/repo", "owner/other"
+    for name in (repo, other):
+        data = state.project(name)
+        data["enabled"] = True
+        state.save(name, data)
+        state.event(name, "delivery", "event")
+    before = state.project_path(other).read_bytes()
+    state.request_stop(repo)
+    assert state.has_event(repo, "delivery")
+    assert state.project_path(other).read_bytes() == before
+    assert state.project(other)["enabled"]
