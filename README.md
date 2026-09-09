@@ -3,9 +3,9 @@
 > A small, fail-closed rules-and-guidelines kernel that moves one approved
 > GitHub issue to one safely merged pull request.
 
-**Project status: v2.0.0 reviewer-policy source candidate
-(2026-09-01).** Future kernel improvements should originate in evidence from
-real governed consumer projects.
+**Project status: v2.0.0 is the current released version
+(released 2026-09-09).** Future kernel improvements should originate in evidence
+from real governed consumer projects.
 
 Aru helps a developer or coding agent answer four questions before changing a
 software project:
@@ -332,8 +332,7 @@ Read the **[complete developer use guide](docs/OPERATIONS.md)**. It covers:
 - recovery, rollback, and troubleshooting;
 - the boundary between Aru and the consumer project.
 
-The v0.2 feature freeze remains in force through **2026-09-26**. Publishing
-v1.0.0 promotes the already-accepted minimal kernel contract; it does not admit
-new feature work during that interval. Compatible v1.x maintenance must retain
+The v0.2 feature freeze period has concluded, and the repository again accepts
+normal feature work. Compatible v2.x maintenance must retain
 the public interfaces in the Kernel contract. Breaking contract changes require
 a new major version.

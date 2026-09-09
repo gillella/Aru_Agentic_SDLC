@@ -72,9 +72,9 @@ surfaces to restore into this repo.
 
 ## 4. How to progress
 
-1. **Freeze-compatible correctness first.** The v0.2 feature freeze lasts
-   through 2026-09-26. During it, accept only security and correctness fixes.
-   Do not start Phase 2–5 work in this repository during the freeze.
+1. **Correctness first.** The v0.2 feature freeze period has concluded, so
+   correctness work is no longer restricted to security and correctness fixes
+   only; the repository again accepts normal feature work.
 2. **Do not skip Phase 1.** A slogan that GitHub will not enforce is not a
    platform. Close the leaky-contract holes before adding intake, richer
    scaffolding, or an external loop.
@@ -103,11 +103,11 @@ Each phase has a goal, in-scope work, explicit out-of-scope, an admission
 rule, and an exit test. Later phases do not begin because someone is bored
 with the kernel. They begin when the previous phase's exit test is true.
 
-### Phase 0 — Kernel (now; freeze through 2026-09-26)
+### Phase 0 — Kernel (now)
 
-**Goal.** Keep one issue → one merge as the only in-repo product. Observe the
-feature freeze. Record the destination so later work does not treat the v0.2
-reset as the end of the story.
+**Goal.** Keep one issue → one merge as the only in-repo product. Record the
+destination so later work does not treat the v0.2 reset as the end of the
+story.
 
 **In scope.**
 
@@ -132,8 +132,8 @@ reset. HEAD at the time this file was written is the merge of PR #521
 
 **Done when.**
 
-- The freeze is observed through 2026-09-26 (no features, only
-  security/correctness).
+- The v0.2 feature freeze ran its course (security/correctness only while it
+  was in force) and has concluded.
 - This north-star file is tracked and excluded from the operating-document
   budget.
 - Factory surfaces listed in `tests/test_surface.py` remain absent.
@@ -170,11 +170,11 @@ on the v0.2 contract.
 - Treating ruleset JSON in this repo as a substitute for applying the ruleset
   on GitHub.
 
-**Admission.** Phase 0 freeze discipline is in force until 2026-09-26; items
-that are security or correctness of the *existing* claim (exclusive merge,
-path budget, parser parity, truthful docs/version) may land during the freeze.
-Do not admit Phase 1 *feature* work during the freeze. Do not start Phase 2
-because Phase 1 feels slow.
+**Admission.** Phase 1 begins only when Phase 0's exit test is true. Security
+and correctness of the *existing* claim (exclusive merge, path budget, parser
+parity, truthful docs/version) belong to Phase 0. Phase 1 *feature* work is
+not admitted until those are done. Do not start Phase 2 because Phase 1 feels
+slow.
 
 **Done when.**
 
@@ -342,8 +342,8 @@ workflow cannot carry the gate without a new kernel surface.
 
 ## 6. What this file must never become
 
-- A schedule. There are no target weeks. The freeze date 2026-09-26 is the
-  only calendar fact.
+- A schedule. There are no target weeks and no calendar gate for any phase;
+  phases advance on exit tests, not dates.
 - A backlog. File GitHub issues for work; do not grow this file into a queue.
 - A substitute for KERNEL-CONTRACT. If a rule must bind agents or merge,
   it belongs in an operating document and a test, not here.
