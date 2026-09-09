@@ -86,6 +86,25 @@ def test_bounded_preflight_timeout_and_missing_executable_fail_closed(tmp_path):
         execution.run_bounded([str(tmp_path / "missing-command")], tmp_path)
 
 
+@pytest.mark.parametrize("actor,runner_kept", [
+    ("gillella", False),  # personal login: the worker's own gh credentials submit the review
+    ("aru-code-factory-gillella[bot]", True),  # App login: keep routing gh through the App runner
+])
+def test_review_worker_runs_as_its_bound_actor(setup, monkeypatch, actor, runner_kept):
+    config, state, worktree = setup
+    monkeypatch.setenv(execution.APP_RUNNER_ENV, "/usr/local/bin/app-runner")
+    seen = {}
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: seen.update(k) or SimpleNamespace(pid=4242))
+    review = {"repo": "owner/repo", "reviewer": "model-one", "reviewer_actor": actor, "issue": 1, "pr": 9,
+              "head": "a" * 40, "authority": "openai-codex", "author": "writer", "author_actor": "gillella"}
+    execution.launch(config, "owner/repo", "model-one", 1, str(worktree), kind="review", pr=9, head="a" * 40, review=review)
+    assert (execution.APP_RUNNER_ENV in seen["env"]) is runner_kept
+    assert seen["env"]["PATH"] == os.environ["PATH"]  # everything else inherited
+    # Implementation workers always inherit the Driver environment unchanged.
+    execution.launch(config, "owner/repo", "model-two", 2, str(worktree))
+    assert seen["env"][execution.APP_RUNNER_ENV] == "/usr/local/bin/app-runner"
+
+
 def test_process_presence_is_diagnostic_not_exhaustion(monkeypatch):
     process = SimpleNamespace(returncode=0, stdout="42 /usr/local/bin/agent\n")
     monkeypatch.setattr(capacity.subprocess, "run", lambda *a, **k: process)
