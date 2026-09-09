@@ -1,6 +1,6 @@
 # Minimal Kernel Contract
 
-This is the canonical operating contract for the Aru v2.0.0 source candidate. Other documentation,
+This is the canonical operating contract for the released Aru v2.0.0. Other documentation,
 skills, and generated instructions summarize or explain this file; they do not
 add merge gates.
 

@@ -72,9 +72,9 @@ surfaces to restore into this repo.
 
 ## 4. How to progress
 
-1. **Freeze-compatible correctness first.** The v0.2 feature freeze lasts
-   through 2026-09-26. During it, accept only security and correctness fixes.
-   Do not start Phase 2–5 work in this repository during the freeze.
+1. **Correctness first.** The v0.2 feature freeze period has concluded, so
+   correctness work is no longer restricted to security and correctness fixes
+   only; the repository again accepts normal feature work.
 2. **Do not skip Phase 1.** A slogan that GitHub will not enforce is not a
    platform. Close the leaky-contract holes before adding intake, richer
    scaffolding, or an external loop.

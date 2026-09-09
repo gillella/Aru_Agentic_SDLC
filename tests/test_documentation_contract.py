@@ -58,7 +58,7 @@ def test_version_and_layer_truth_are_explicit():
     contract = text(ROOT / "docs" / "KERNEL-CONTRACT.md")
     enforcement = text(ROOT / "docs" / "ENFORCEMENT-REGISTER.md")
 
-    assert "**Project status: v2.0.0 reviewer-policy source candidate" in readme
+    assert "**Project status: v2.0.0 is the current released version" in readme
     assert "## v1.0.0 - Governed, Risk-Proportional Delivery" in changelog
     assert "v2 public API" in contract
     assert "Upgrade from v0.2.8" in changelog

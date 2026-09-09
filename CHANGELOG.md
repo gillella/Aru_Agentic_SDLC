@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased v2.0.0 — Reviewer-policy and verification migration
+## v2.0.0 - Reviewer-policy and verification migration - 2026-09-09
 
 - Withdraw the previously declared merge-queue capability: verification is
   PR-only, and configured queues or pending queue/auto-merge requests are refused
@@ -15,6 +15,56 @@
   default completion deadline; explicit failure bypasses it.
 - Reviewer discovery uses `aru.reviewer-status/v3`. Reconcile consumers from
   the merged source; this entry is not a release or installed rollout claim.
+
+## v1.0.4 - Native Hermes Event Compatibility - 2026-09-05
+
+- Fixed a live Hermes Project Driver compatibility failure discovered during
+  the v1.0.3 rollout: the deployed gateway authenticates and binds each webhook
+  session as `webhook:ROUTE:DELIVERY` but can omit the separate message-ID
+  environment export.
+- The Driver now accepts that native binding and rejects contradictory
+  identifiers, wrong routes, and malformed deliveries before dispatch.
+- Consumer scaffold artifacts are unchanged from v1.0.3; no consumer product
+  was deployed by this release.
+- Source: `8f28876698e5f74b20423e71791ccbecee7a7f90`, merged through PR #561;
+  the merged tree matches the verified PR head. Validation: 965 tests, Ruff,
+  and exact-head `aru-governed-pr` passed.
+
+## v1.0.3 - Authorization Freshness and Hermes Driver Recovery - 2026-09-05
+
+- Revalidate the linked issue, declared write scope, and completed acceptance
+  semantics immediately before merge submission, allowing benign
+  description-only edits; refuse changed or missing closing-issue authorization
+  after the final hook reread.
+- Restored separately installed Hermes Project Driver recovery: immediate
+  native events plus one ten-minute recovery heartbeat, shared-account
+  admission, bounded queues, and typed cross-project handoffs.
+- Preserved retries and duplicate suppression with atomic bounded event state,
+  validated worker receipts, reversible installation, and bounded agent
+  execution with descendant cleanup.
+- Existing v1.0.2 consumers need the updated canonical scope-enforcement hook;
+  regenerate centrally owned scaffolding and preserve your own verification
+  policy.
+- Immutable release source: `e7c66db6ace256a95f42457b697a88875fa71931`
+  (merged PRs #558 and #559). Validation on that commit: 955 tests passed;
+  Ruff, verification-script syntax, and diff hygiene passed.
+
+## v1.0.2 - Fail-Closed Merge-Group Provenance - 2026-09-02
+
+- Supersedes v1.0.1 for governed consumers using persistent self-hosted
+  runners.
+- `pull_request` runs remain admitted only with proven same-repository head
+  provenance; `merge_group` and any other event lacking trusted
+  same-repository provenance now fail closed before checkout or
+  repository-controlled execution.
+- Both the canonical template and Factory's live workflow carry the same rule
+  and are covered by drift/regression tests.
+- Consumer action: do not merge consumers generated from v1.0.1; refresh
+  `.github/workflows/governed-pr.yml` from v1.0.2, rerun exact-head governed CI
+  and authoritative review, then merge through the Factory helper. Rollback
+  baseline: v1.0.0.
+- Exact source: Factory PR #553 merge commit
+  `44da258dd547dbbbf9e7d78e092c360b07ab96f8`. Full suite: 535 passed.
 
 ## v1.0.1 - Self-Hosted Trust and Verification Hardening - 2026-09-01
 
