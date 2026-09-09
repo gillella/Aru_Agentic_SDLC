@@ -1,0 +1,36 @@
+{
+  "schema": "aru.personas.request/v1",
+  "synthetic": true,
+  "binding": "synthetic-binding.json",
+  "context": {
+    "worktree": "/synthetic/worktrees/issue-630",
+    "kernel_root": "",
+    "branch": "feat/synthetic",
+    "pr": 700,
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "request": {
+    "project": "gillella/Aru_Agentic_SDLC",
+    "issue": 630,
+    "task_class": "security_implementation",
+    "labels": [],
+    "risk_tier": null,
+    "touches": [
+      "src/main.py"
+    ],
+    "modalities": [
+      "text"
+    ],
+    "persona_override": "astra-implementer",
+    "effort_override": null,
+    "major_unresolved_decision": false,
+    "allow_optional": true,
+    "author_history": [],
+    "actor": "synthetic-author",
+    "handoff_reason": "",
+    "model_override": null,
+    "nontrivial": false,
+    "input_files": [],
+    "title": ""
+  }
+}
