@@ -22,6 +22,16 @@ means refused or malformed input. CLI output never substitutes for kernel
 verification. `list` includes every role's scope, output contract, authority
 boundary, escalation and stop criteria.
 
+CI collects the package's original test classes through the two-import bridge
+`tests/test_persona_policy.py`; `python -m pytest -q` runs them with the repository
+suite. Focused checks are `python -m pytest tests/test_surface.py
+tests/test_persona_policy.py` and `python -m integrations.personas.tests.check_examples`.
+The surface test admits only the eight named static JSON assets pinned and
+semantically validated in `tests/source_inventory.py` within this package.
+Schema/catalog/example changes require reviewing and updating that inventory.
+Historical probe observations and generated verification JSON belong outside
+Git; `VERIFICATION.md` retains human-readable author verification.
+
 | Stable persona | Default task | Approved efforts (default first) |
 | --- | --- | --- |
 | `fable-architect` | architecture_decision | high, xhigh |
@@ -90,7 +100,7 @@ from integrations.personas import (
 # The Driver creates these from trusted live issue/Git/account facts.
 request = TaskRequest(
     project="gillella/Aru_Agentic_SDLC", issue=630,
-    task_class="architecture_decision", touches=("integrations/personas/",),
+    task_class="architecture_decision", touches=("integrations/personas/**",),
     actor="codex-astra-personas",
     author_history=(AuthorIdentity(
         "opus-implementer", "claude-subscription-1", "claude-code-1"),),

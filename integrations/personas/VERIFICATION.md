@@ -1,111 +1,114 @@
-# Issue #630 source verification
+# Issue #630 / PR #634 source verification
 
-Verified 2026-09-09 in the existing isolated branch
-`feat/issue-630-feat-integration-define-and-validate-the-1`, based on
-`ebc7664a19ca0a2869b341e16fcbd3b09f8427e9`. Scope: `integrations/personas/` only.
-This report is local author verification, **not independent review or merge authority**.
-The exact resulting commit is supplied in the final handoff and Git history;
-this report does not attempt to embed its own commit hash.
+Verified 2026-09-09 by GPT-6 Astra High in the existing isolated branch
+`feat/issue-630-feat-integration-define-and-validate-the-1`, continuing from
+`276333d952b4e3501396487063ddbbd8e38a5e10`. This report is local author
+verification, **not independent review or exact-head server authority**.
+The resulting commit is identified in Git history and the final handoff.
 
-## Truthful author lineage
+## Scope and author lineage
 
-The package began with Claude Opus workers on subscriptions 1 and 3. Both
-stopped after session exhaustion. The operator preserved their partial files
-and transferred the sole claim canonically to `codex-astra-personas`, which
-completed the source implementation and tests using GPT-6 Astra High.
+The live issue was reread through the Factory App runner. It is open, In Review,
+with the sole claim `agent:codex-astra-personas`. Its corrected declaration is:
 
-**Author families: `anthropic-claude` AND `openai-codex`. Neither family may
-provide authoritative review for this implementation.** Persona changes,
-subscription changes and canonical claim transfer do not reset that history.
-No new independent authorship or review approval is claimed.
+```text
+touches: integrations/personas/**, tests/test_surface.py, tests/test_persona_policy.py
+```
 
-Live issue #630 was read with the private Factory App wrapper. Its handoff
-comments confirm both lineage and canonical release/claim; the live claim label
-was `agent:codex-astra-personas`, with `status:in-progress`. Issue checkboxes and
-statuses were not changed. The API returned an empty `projectItems` list; this
-source handoff makes no assertion about Project Board authority. Hermes must
-reread it before a governed PR/lifecycle transition.
+The actual `scripts.touches.parse_touches` and `path_allowed` functions accepted
+all 34 paths in the complete PR diff against merge base
+`a1221e573607691d84bc644923b371afd1e69fa3`, with zero scope violations.
+The local `/tmp/persona-issue-630-current.md` was also read.
 
-Read `AGENTS.md`, `docs/KERNEL-CONTRACT.md`, the live issue, both `/tmp/persona-…`
-briefs, the existing package, recorded reports and Driver source. This checkout
-has no `.aru/AGENT-WORKFLOW.md`; no substitute authority was invented. The user's
-explicit source implementation and push authorization controls this handoff;
-PR authority selection, creation and merge remain with Hermes.
+Claude Opus subscriptions 1 and 3 began this package; GPT-6 Astra High continued
+after their session exhaustion. Author families remain **`anthropic-claude` AND
+`openai-codex`**. Neither can authoritatively review this PR. Claim, persona and
+account changes do not reset authorship. No authoritative code review has
+completed. Reviewer selection and infrastructure remain with Hermes.
+
+## Reproduced failure and focused repair
+
+Exact-head server run `34377920113` failed the tracked-state surface test at the
+starting head: it rejected eleven persona JSON files. The same failure was
+reproduced locally. The original 49 unittest tests passed independently, but
+`pyproject.toml` testpaths omitted the package; the workflow's existing
+`python -m pytest -q` therefore did not collect them. This repository's workflow
+runs pytest and Ruff directly; this checkout has no `.aru/verify.sh`.
+
+Deleted the generated `VERIFICATION.json` and both real historical observation
+files, `evidence/observed-2026-09-09.json` and
+`evidence/recorded-2026-09-09.json`. The operator retains copies outside Git.
+They were not renamed or converted into another machine-readable ledger.
+
+The existing surface test now calls the explicit eight-file inventory and
+semantic validator in `integrations/personas/tests/source_inventory.py`.
+It admits only the immutable request schema, route catalog, five synthetic
+request examples and their shared synthetic binding. SHA-256 pins bind every
+byte, including nested fields; recognized names and synthetic markers alone
+cannot admit new execution history. Deliberate static changes require reviewing
+both asset semantics and inventory pins. No directory exemption was added.
+
+Six adversarial tests cover the actual surface guard, unknown JSON/JSONL/DB/
+SQLite paths (including uppercase extensions), runtime fields inserted into
+each allowed file, nested execution history and replacement by live probes.
+The two-import `tests/test_persona_policy.py` bridge collects the original test
+classes without copying tests or changing workflows/testpaths. Repository test
+source remains at its existing 9,000-line limit; no budget was raised.
 
 ## Actual local verification
 
-Runtime: `/Users/gillella/.hermes/hermes-agent/venv/bin/python` (Python 3.11.15).
-Commands run from the repository root:
+Runtime: `/Users/gillella/.hermes/hermes-agent/venv/bin/python` (Python 3.11).
+Commands below use that Python from the repository root.
 
-```sh
-/Users/gillella/.hermes/hermes-agent/venv/bin/python -m unittest discover -s integrations/personas/tests -t . -v
-/Users/gillella/.hermes/hermes-agent/venv/bin/python -m compileall -q integrations/personas
-/Users/gillella/.hermes/hermes-agent/venv/bin/python -m integrations.personas validate
-/Users/gillella/.hermes/hermes-agent/venv/bin/python -m integrations.personas list
-/Users/gillella/.hermes/hermes-agent/venv/bin/python -m integrations.personas.tests.check_examples
-git diff --cached --check
-```
-
-Results: **49 unit tests passed**, including subtest matrices for all 13 persona
-identities and all **20 approved model/effort variants**. Compile checks passed.
-Registry validation passed. The tests launched the real source CLI once for
-`list`, once for `validate`, and 13 positive `explain` calls plus an unsupported
-model refusal. Five shipped examples passed: architecture fallback selects
-Astra as Chief Architect; ordinary Astra, Sonnet review and Pro design select
-their expected roles; unsupported model exits 2 with no plan. The available
-`jsonschema` validator accepted the interface schema and all five expanded
-example envelopes. It is optional for example validation, not a package runtime
-dependency. The scoped staged diff passed whitespace checks.
-
-| Requirement | Exercised evidence |
+| Command / check | Current outcome |
 | --- | --- |
-| Exact fleet and efforts | 13 identities, 20 variants; all native prompts and output sections; unsupported IDs/efforts/fast models refused |
-| Deterministic classification | Every task family; labels versus explicit fields; title ignored; missing/contradictory/unknown risk/task/scope; kernel risk snapshot equivalence |
-| Availability fallback | Every recognized Fable failure → Astra; Fable + Astra fail → Opus; all fail; occupied/forbidden accounts; missing image capability; unsupported route effort; pinned and explicit acting-model assignments |
-| Retained role and authorship | Architect contract preserved; other fallback output contracts preserved; explicit mixed-family continuation appends rather than resets |
-| Capability/account gates | Missing/archive/stale/future/mismatched/failed/unauthenticated probes; conflicting observations; later shared-quota failure; profile digest; Unum-only sub4; shared capacity identities |
-| Reviewer independence | Current kernel assignment required; exact PR/head/account; no direct review resolution; external release required; high-risk frontier floor; family/account/actor overlap; both mixed author families excluded |
-| Compiler integrity | Every CLI effort mechanism and prompt arity; literal shell-like prose; forbidden executables/env; workspace mismatch; ordinary and rehashed payload tampering; source changes; future/expired plans; probe-bounded plan lifetime |
-| Source interface | Real list/validate/explain executions, machine schema, synthetic examples, import API and #631 integration instructions |
+| `python -m pytest tests/test_surface.py tests/test_persona_policy.py -q -o addopts=` | 66 passed; 255 subtests passed |
+| `python -m pytest --collect-only -q -o addopts=` | 1,536 tests collected |
+| `python -m pytest integrations/personas/tests --collect-only -q -o addopts=` | All 55 package tests collected; comparing class/method counters proves CI collects each exactly once, including all original 49 and six new adversarial tests |
+| `python -m pytest -q` | Passed (exit 0); all 1,536 collected tests; no failures or skips |
+| `python -m integrations.personas validate` | Valid; exactly 13 personas; zero archived observations; execution authority false |
+| `python -m integrations.personas.tests.check_examples` | All five examples passed; JSON Schema validated with installed jsonschema |
+| `python -m compileall -q integrations/personas` | Passed |
+| `python -m ruff check tests/test_surface.py tests/test_persona_policy.py integrations/personas/evidence.py integrations/personas/tests/source_inventory.py integrations/personas/tests/test_source_inventory.py` | Passed on every changed Python path |
+| `python -m ruff check scripts hooks tests integrations/hermes` | Existing server lint command passed |
+| `git diff --cached --check` | Passed |
 
-All successful probes in unit tests and examples are **explicit synthetic
-fixtures, not live capability, entitlement or modality proof**. No model
-inference or probe was performed during this author continuation. No auth,
-credits, installed runtime, kernel scripts or `integrations/hermes` were changed.
+Actual collection logs and full pytest output are outside the repository at
+`/tmp/persona-630-collection-after.txt`, `/tmp/persona-630-package-collection.txt`
+and `/tmp/persona-630-full-pytest.log`.
 
-## Catalog and CLI evidence
+Current policy source digest:
+`9b99665620a022465d40e685d5781d7d5e21a0626a66901adfcc65cac10fb09a`.
+The digest changed because `evidence.py` now truthfully documents operator-owned
+historical observations. No routing behavior or static fixture format changed.
 
-All 13 personas / 20 approved variants were compared programmatically against
-`~/.hermes/reports/model-personas-revised/catalogs.json` and the Claude entries
-in `complete-role-map.json`; every exact ID matched, and every assigned Codex
-effort appeared in `supported_reasoning_levels`. The broad catalogs contain
-additional models/efforts that this package deliberately does not assign.
+The original suite covers all 13 identities / 20 approved model-effort variants,
+risk and effort precedence, Fable → Astra → Opus fallback, account/capacity and
+modality gates, mixed authorship and independent review refusal, and plan/argv/
+prompt tampering. It exercises real CLI list/validate and explain for all 13
+personas plus unsupported-model refusal. The example runner verifies four
+successful selections (including Astra performing the architect role) and the
+expected exit-2 unsupported-model refusal, always with execution authority false.
 
-Read-only `claude --help`, `codex exec --help`, `cursor-agent --help` and
-`agy --help` were inspected. Version reads confirmed Claude 2.1.266,
-Codex CLI 0.153.4 and Cursor 2026.09.08-6caf4ff. The partial implementation's agy
-1.1.28 version is recorded metadata; its flag surface was reread here, not a
-new version or availability probe. Claude documents high and xhigh literally;
-no translation is made. Codex uses the recorded config effort mechanism.
-Cursor/Antigravity select catalog effort IDs with no contradictory extra flag.
+## Historical evidence and remaining work
 
-Historical capability archives remain non-authorizing. The earlier Opus,
-Sonnet and Haiku successes are dated observations, not a claim that a Claude
-subscription is currently usable. The later operator handoff reports all four
-Claude profiles session-limited and an Astra High success; that report was not
-converted into fabricated fresh package evidence. Date-only historical Fable
-observations explicitly identify midnight timestamps as archive date sentinels.
+The earlier source-author verification compared all 13 personas / 20 variants
+against the operator's recorded catalogs and inspected installed CLI help for
+Claude, Codex, Cursor and Antigravity. Those were dated catalog/flag observations,
+not proof of current usable capacity. They were not repeated as live capability
+probes during this repair. The historical Claude successes and later session
+limits remain operator evidence outside Git.
 
-## Remaining authority and integration work
+All successful package test/example probes are explicitly synthetic. This
+continuation made no provider inference call or installation change. The
+package remains source and an offline CLI. #631 owns actual Driver/operator
+wiring, installation/cutover, capacity supervision and live enforcement checks;
+this repair does not complete that issue. Real multimodal access remains gated
+on exact route/account/harness evidence. See `INTEGRATION.md`.
 
-The package is tested source and an offline CLI. It is not installed or wired
-into the Driver, does not enforce raw vendor CLI use, and does not establish
-actual multimodal access. The default agy binding remains text-only; Pro needs
-separate real harness and exact model image evidence. Inputs remain a trusted
-Driver boundary; Python objects, hashes and JSON do not authenticate GitHub,
-auth-profile contents, binary identity or lock ownership.
-
-Hermes owns current source verification, independent review selection, governed
-PR creation, exact-head server CI and merge. No PR was opened, reviewer assigned,
-issue checkbox changed or merge attempted here. #631 owns runtime wiring and
-real reservation/supervision integration validation. See `INTEGRATION.md`.
+The user reports that the exact Grok High CLI smoke works while the generic
+kernel reviewer availability probe refuses; Hermes owns that separate repair.
+This author continuation does not select reviewers, modify review labels,
+change issue criteria/status, merge, or claim independent approval. A push
+requires fresh exact-head server verification and independent review before
+any later governed merge.

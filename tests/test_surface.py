@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from integrations.personas.tests.source_inventory import assert_static_persona_json
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -174,12 +175,9 @@ def test_wrong_layer_surfaces_are_absent():
 def test_one_state_authority_no_tracked_runtime_ledgers():
     # A static install template contains no execution or lifecycle state.
     example = ROOT / "integrations/hermes/config.example.json"
-    tracked_state = [
-        path
-        for path in tracked_paths()
-        if path.suffix in {".json", ".db", ".sqlite"} and path != example
-    ]
-    assert tracked_state == []
+    for path in tracked_paths():
+        if path.suffix.lower() in {".json", ".jsonl", ".db", ".sqlite", ".sqlite3"} and path != example:
+            assert_static_persona_json(path, ROOT)
 
 
 def test_external_driver_is_separately_bounded_and_has_no_tracked_state():

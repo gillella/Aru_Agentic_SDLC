@@ -13,8 +13,8 @@ an operator:
 
 A failed probe is never rounded up to a success, and a success is never
 synthesised from a catalog entry, a vendor announcement or another effort level.
-Evidence shipped inside this repository is an archive: it records what was
-observed on a date and is explicitly marked as unable to authorise execution.
+Historical observations belong in operator-owned storage outside Git. The
+source examples contain explicitly synthetic probes, never live access proof.
 """
 
 from __future__ import annotations
