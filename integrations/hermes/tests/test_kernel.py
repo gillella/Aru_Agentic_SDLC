@@ -266,7 +266,7 @@ def test_reviewer_recovery_calls_only_canonical_helper_after_binding_check(revie
     calls = []
     fallback = {"pr": 9, "authority": "openai-codex", "action": "fallback", "reason": "worker lost", "reviewer": "second"}
     monkeypatch.setattr(create, "recover_coding_authority", lambda *args: calls.append(args) or fallback)
-    bridge.review = SimpleNamespace(reviewer_continuation=lambda number: {
+    bridge.review = SimpleNamespace(reviewer_continuation=lambda number, **_kw: {
         "authority": "openai-codex", "next_action": "await-authoritative-review", "retry_at": None})
     refreshed = bridge.refresh_reviewer(9, binding, "worker lost")
     assert refreshed["next_action"] == "await-authoritative-review" and refreshed["reviewer"] == "second"

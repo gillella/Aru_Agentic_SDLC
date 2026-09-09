@@ -400,3 +400,26 @@ def test_denied_coderabbit_uses_independent_coding_while_unproven_stays_eligible
         reviewer_actors={"m1": "reviewer"}, probe_runner=lambda _a: pytest.fail("unused"),
         coding_probe=lambda **_kw: ("claude-code", "m1", "reviewer"))
     assert result == expected
+
+
+@pytest.mark.parametrize("head", ["b" * 40, None, "partial"])
+def test_continuation_refuses_stale_head_before_provider_observation(monkeypatch, head):
+    monkeypatch.setattr(review_policy, "gh_json", lambda _args: {
+        "number": 9, "headRefOid": head, "labels": [{"name": "review:coderabbit"}],
+    })
+    monkeypatch.setattr(review_policy, "external_decision", lambda *_a: pytest.fail("stale authority"))
+    with pytest.raises(create_pr.KernelError, match="head changed"):
+        review_policy.reviewer_continuation(9, expected_head="a" * 40)
+
+
+def test_governed_ci_duplicates_do_not_supply_or_block_external_review_verdict(monkeypatch):
+    from test_ci_and_feedback import check_run
+    observed = datetime(2026, 9, 9, 15, tzinfo=timezone.utc)
+    pr = {"createdAt": observed.isoformat(), "headRefOid": "a" * 40}
+    checks = [check_run("aru-governed-pr", run_id=10), check_run("aru-governed-pr")]
+    monkeypatch.setattr(review_policy, "repo_slug", lambda: "owner/repo")
+    monkeypatch.setattr(review_policy, "gh_paginated", lambda _e: [])
+    monkeypatch.setattr(review_policy, "gh_json", lambda args: [] if "statuses" in args[-1]
+                        else [{"total_count": 2, "check_runs": checks}])
+    assert review_policy.external_decision(9, pr, "coderabbit", observed + timedelta(seconds=1)) == ("external-pending", 119)
+    assert review_policy.external_decision(9, pr, "coderabbit", observed + timedelta(seconds=121)) == ("external-unavailable", None)

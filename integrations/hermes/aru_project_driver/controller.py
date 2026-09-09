@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
 from datetime import datetime
@@ -141,9 +142,10 @@ class Controller:
     @staticmethod
     def _with_review_continuation(work: dict, snapshot: dict, adapter) -> dict:
         # CI and external review proceed concurrently. The single-agent picker
-        # only exposes review continuation after green CI, so observe an
-        # already assigned authority here without changing its policy.
-        if work["type"] != "wait" or work.get("next_action") or not work.get("pr") or work.get("execution"):
+        # may return an explicit CI-blocked action. Observe an already assigned
+        # authority without converting CI uncertainty into merge authorization.
+        if (work["type"] not in {"wait", "blocked"} or work.get("next_action")
+                or not work.get("pr") or work.get("execution") or work.get("review_error")):
             return work
         pr = next(item for item in snapshot["prs"] if item["number"] == work["pr"])
         authorities = [name[7:] for name in pr.get("labels", [])
@@ -151,7 +153,13 @@ class Controller:
         if len(authorities) > 1:
             raise DriverError("PR has multiple authoritative reviewers")
         if authorities:
-            return {**work, **adapter.reviewer_continuation(work["pr"])}
+            head = work.get("head")
+            if not isinstance(head, str) or not re.fullmatch(r"[a-fA-F0-9]{40}", head):
+                return {**work, "type": "blocked", "review_error": "current full PR head is unavailable"}
+            try:
+                return {**work, **adapter.reviewer_continuation(work["pr"], expected_head=head)}
+            except KernelAdapterError as exc:
+                return {**work, "type": "blocked", "review_error": str(exc)}
         return work
 
     def _admission_reasons(self, repo: str, snapshot: dict) -> list[str]:

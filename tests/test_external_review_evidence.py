@@ -42,66 +42,40 @@ def review(*, service: str, state: str = "APPROVED") -> dict:
     }
 
 
-def test_external_review_paths_preserve_authenticated_provider_evidence(monkeypatch):
-    coderabbit = review_pr(
-        "coderabbit", checks=[{"context": "CodeRabbit", "state": "SUCCESS"}]
-    )
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [])
-    monkeypatch.setattr(
-        merge_pr,
-        "pull_review_checks",
-        lambda _head: [{
-            "name": "CodeRabbit",
-            "status": "COMPLETED",
-            "conclusion": "SUCCESS",
-            "completedAt": REVIEWED,
-            "head_sha": HEAD,
-            "app": {"slug": "coderabbitai"},
-        }],
-    )
-    assert merge_pr.exact_head_review(coderabbit, 10, "coderabbit") is False
-
-    sourcery = review_pr("sourcery")
-    sourcery_approval = review(service="sourcery")
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [sourcery_approval])
-    assert merge_pr.exact_head_review(sourcery, 10, "sourcery") is True
-
-    codeant = review_pr("codeant")
-    codeant_approval = review(service="codeant")
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [codeant_approval])
-    assert merge_pr.exact_head_review(codeant, 10, "codeant") is True
-
-    human = {**codeant_approval, "user": {"login": "human", "type": "User"}}
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [human])
-    monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [])
-    assert merge_pr.exact_head_review(codeant, 10, "codeant") is False
-
-    changes = review(service="sourcery", state="CHANGES_REQUESTED")
-    monkeypatch.setattr(
-        merge_pr, "pull_reviews", lambda _number: [sourcery_approval, changes]
-    )
-    assert merge_pr.exact_head_review(sourcery, 10, "sourcery") is False
-
-
-def test_rate_limited_success_check_does_not_satisfy_coderabbit(monkeypatch):
-    pr = review_pr(
-        "coderabbit", checks=[{"context": "CodeRabbit", "state": "SUCCESS"}]
-    )
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [])
-    monkeypatch.setattr(
-        merge_pr,
-        "pull_review_checks",
-        lambda _head: [{
-            "name": "CodeRabbit",
-            "status": "COMPLETED",
-            "conclusion": "SUCCESS",
-            "completedAt": REVIEWED,
-            "head_sha": HEAD,
-            "app": {"slug": "coderabbitai"},
-            "output": {"summary": "Review rate limited"},
-        }],
-    )
-    assert merge_pr.exact_head_review(pr, 10, "coderabbit") is False
+@pytest.mark.parametrize("service,case,expected", [
+    ("coderabbit", "green-check", False), ("coderabbit", "rate-limited-check", False),
+    ("sourcery", "approval", True), ("codeant", "approval", True),
+    ("codeant", "human", False), ("sourcery", "changes", False),
+    ("sourcery", "skipped", False), ("sourcery", "reassigned", False),
+    ("sourcery", "newer-unavailable", False),
+])
+def test_external_review_requires_current_trusted_substantive_evidence(monkeypatch, service, case, expected):
+    pr = review_pr(service)
+    reviews, checks, comments, events = [], [], [], []
+    if service == "coderabbit":
+        pr["statusCheckRollup"] = [{"context": "CodeRabbit", "state": "SUCCESS"}]
+        checks = [{"name": "CodeRabbit", "status": "COMPLETED", "conclusion": "SUCCESS",
+                   "completedAt": REVIEWED, "head_sha": HEAD, "app": {"slug": "coderabbitai"}}]
+        if case == "rate-limited-check":
+            checks[0]["output"] = {"summary": "Review rate limited"}
+    else:
+        reviews = [review(service=service)]
+        if case == "human":
+            reviews[0]["user"] = {"login": "human", "type": "User"}
+        elif case == "changes":
+            reviews.append(review(service=service, state="CHANGES_REQUESTED"))
+        elif case == "skipped":
+            reviews[0]["body"] = "Review skipped because quota exhausted"
+        elif case == "reassigned":
+            events = [{"event": "labeled", "label": {"name": "review:sourcery"},
+                       "created_at": "2026-09-01T10:10:00Z"}]
+        elif case == "newer-unavailable":
+            comments = [{"body": "Review skipped because quota exhausted",
+                         "created_at": "2026-09-01T10:06:00Z", "user": reviews[0]["user"]}]
+    for name, records in (("pull_reviews", reviews), ("pull_review_checks", checks),
+                          ("pull_comments", comments), ("pull_events", events)):
+        monkeypatch.setattr(merge_pr, name, lambda _n, records=records: records)
+    assert merge_pr.exact_head_review(pr, 10, service) is expected
 
 
 SOURCERY_NOTICE = ("Hi @gillella! \U0001F44B\n\nYour private repo does not have access to Sourcery.\n\n"
@@ -126,45 +100,3 @@ def test_status_evidence_feeds_external_state_after_assignment():
     ignored = [status("error", "Review failed", "2026-09-01T09:00:00Z"),  # before assignment
                status("error", "Review failed", creator={"login": "human", "type": "User"})]  # spoofed
     assert ev.external_state("coderabbit", statuses=ignored, **base) == ev.PENDING
-
-
-def test_provider_approval_with_unavailability_text_does_not_satisfy_review(
-    monkeypatch,
-):
-    pr = review_pr("sourcery")
-    approval = review(service="sourcery")
-    approval["body"] = "Review skipped because quota exhausted"
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [approval])
-    monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [])
-    assert merge_pr.exact_head_review(pr, 10, "sourcery") is False
-
-
-def test_reassignment_cannot_reuse_pre_assignment_approval(monkeypatch):
-    pr = review_pr("sourcery")
-    approval = review(service="sourcery")
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [approval])
-    monkeypatch.setattr(
-        merge_pr,
-        "pull_events",
-        lambda _number: [{
-            "event": "labeled",
-            "label": {"name": "review:sourcery"},
-            "created_at": "2026-09-01T10:10:00Z",
-        }],
-    )
-
-    assert merge_pr.exact_head_review(pr, 10, "sourcery") is False
-
-
-def test_newer_trusted_unavailable_evidence_overrides_old_approval(monkeypatch):
-    pr = review_pr("sourcery")
-    approval = review(service="sourcery")
-    unavailable = {
-        "body": "Review skipped because quota exhausted",
-        "created_at": "2026-09-01T10:06:00Z",
-        "user": {"login": "sourcery-ai[bot]", "type": "Bot"},
-    }
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [approval])
-    monkeypatch.setattr(merge_pr, "pull_comments", lambda _number: [unavailable])
-
-    assert merge_pr.exact_head_review(pr, 10, "sourcery") is False

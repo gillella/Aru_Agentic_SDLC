@@ -79,7 +79,7 @@ class FakeKernel:
                 return {"type": "claimed_issue", "issue": record["number"]}
         return {"type": "idle"}
 
-    def reviewer_continuation(self, number):
+    def reviewer_continuation(self, number, *, expected_head=None):
         self.calls.append(("reviewer_continuation", number))
         return deepcopy(self.continuations[number])
 

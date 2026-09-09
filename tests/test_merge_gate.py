@@ -773,3 +773,22 @@ def test_codeant_blocks_on_unresolved_feedback(monkeypatch):
 
     with pytest.raises(merge_pr.KernelError, match="1 unresolved review thread"):
         merge_pr.evaluate(146, head)
+
+
+@pytest.mark.parametrize("ci_state", ["success", "pending", "failure", "untrusted"])
+def test_provenance_aware_duplicate_ci_does_not_bypass_review_or_merge(monkeypatch, ci_state):
+    import check_ci
+    from test_ci_and_feedback import PR, check_run, workflow_run, install_checks
+    install_happy_gate(monkeypatch, base_pr(**PR))
+    monkeypatch.setattr(merge_pr, "ci_verdict", check_ci.ci_verdict)
+    monkeypatch.setattr(merge_pr, "exact_head_review", lambda *_a: False)
+    old = workflow_run(10, created="2026-09-09T11:01:14Z")
+    current = workflow_run(state="success" if ci_state == "untrusted" else ci_state)
+    checks = [check_run("aru-governed-pr", run_id=10), check_run("aru-governed-pr",
+        status=current["status"], conclusion=current["conclusion"] or "")]
+    if ci_state == "untrusted":
+        checks[0]["app"]["id"] = 999
+    install_checks(monkeypatch, checks, workflows=[old, current])
+    reason = "exact-head verdict" if ci_state == "success" else "untrusted source" if ci_state == "untrusted" else "required GitHub checks"
+    with pytest.raises(merge_pr.KernelError, match=reason):
+        merge_pr.evaluate(3, "a" * 40)
