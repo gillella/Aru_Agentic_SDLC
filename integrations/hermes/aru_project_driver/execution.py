@@ -141,6 +141,29 @@ def _validate_review_lane(repo: str, identity: str, issue: int, pr: int | None,
         raise DriverError("review launch does not match its lane and assignment")
 
 
+APP_RUNNER_ENV = "ARU_GITHUB_APP_RUNNER"
+
+
+def worker_environment(kind: str, review: dict | None) -> dict[str, str]:
+    """Environment for a supervised worker and everything in its process group.
+
+    The kernel routes every repository `gh` call through the GitHub App runner
+    whenever ARU_GITHUB_APP_RUNNER is set, so a worker inherits the App as its
+    GitHub actor. A review worker must instead act as the actor its reviewer
+    identity is bound to: a binding to a GitHub App login (``…[bot]``) keeps the
+    runner, a binding to a personal login drops it so the worker's own `gh`
+    credentials submit the attestation. One installation can therefore author
+    through the App and review through a distinct actor. Implementation workers
+    inherit the Driver environment unchanged.
+    """
+    environment = dict(os.environ)
+    if kind == "review" and isinstance(review, dict):
+        actor = str(review.get("reviewer_actor") or "")
+        if not actor.endswith("[bot]"):
+            environment.pop(APP_RUNNER_ENV, None)
+    return environment
+
+
 def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
            *, kind: str = "implementation", pr: int | None = None,
            head: str | None = None, review: dict | None = None) -> dict:
@@ -197,6 +220,7 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
                  "--capacity-fd", str(descriptor)],
                 cwd=directory, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
                 start_new_session=True, pass_fds=(descriptor,), shell=False,
+                env=worker_environment(kind, review),
             )
     except OSError as exc:
         record.update(state="launch_failed", error=type(exc).__name__)

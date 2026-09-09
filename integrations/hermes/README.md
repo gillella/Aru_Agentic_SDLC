@@ -172,6 +172,16 @@ subscription. The example's flags were checked against installed
 operator selection.
 Worker command permissions remain the installed CLI's normal sandbox policy.
 
+A review worker acts as the GitHub actor its reviewer identity is bound to
+(`reviewer-binding:<identity>=<login>`). When the binding names a GitHub App
+login (`…[bot]`) the worker keeps `ARU_GITHUB_APP_RUNNER` and its `gh` calls
+carry the App identity; when it names a personal login the runner is dropped
+for that worker's process group, so its own `gh` credentials submit the
+attestation. Bind at least one seat to each kind of actor: PRs authored through
+the App need a personally bound reviewer, and PRs pushed by a person need an
+App-bound one, because the kernel refuses a reviewer whose actor equals the
+author's.
+
 ## Capacity observations and probes
 
 The supplied `capacity.py --family openai-codex` observer reports local agent
