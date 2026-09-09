@@ -28,7 +28,7 @@ def command(value: object, name: str) -> list[str]:
 
 
 class Config:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, bind: bool = True):
         self.path = Path(path).resolve()
         try:
             raw = json.loads(self.path.read_text())
@@ -62,8 +62,14 @@ class Config:
             self._project(repo, project)
         for identity, lane in self.lanes.items():
             self._lane(identity, lane)
+        self._permissions()
         self._sessions_agree()
-        self._bind()
+        self._bind(bind=bind)
+
+    def _permissions(self) -> None:
+        from .permissions import validate
+        for repo, project in self.projects.items():
+            validate(self, repo, project)
 
     def _sessions_agree(self) -> None:
         # Every lane on one subscription must agree on how many managed sessions
@@ -75,7 +81,9 @@ class Config:
             if len(values) != 1:
                 raise DriverError(f"lanes sharing capacity_key {account} declare different max_sessions")
 
-    def _bind(self) -> None:
+    def _bind(self, *, bind: bool = True) -> None:
+        if not bind:
+            return
         from .state import State, read_json, write_json
 
         path = self.state_dir / "binding.json"
