@@ -30,6 +30,17 @@ Telegram while this plugin is enabled; other platforms retain Hermes behavior.
 Generic plugin status/compile callbacks have no identity context and refuse.
 There is no new bot, polling loop, gateway injection, scheduler or Hermes core edit.
 
+Hermes compatibility requires both
+`hermes_cli.plugins.PluginContext.register_telegram_handler` and
+`hermes_cli.plugins.PluginManager.get_telegram_handler_factories`. A version
+label alone does not prove those capabilities. Registration was verified against
+Hermes checkout `990473a79c6b0396b0a648fdd85ee8f7a5c267d3`; the full Telegram
+fixture path was also verified on the Mini's `b2aa855b62` checkout. These are
+tested revisions, not a claim about the earliest compatible release. The
+mandatory real-Hermes probe below rejects either missing API. Telegram pilot
+readiness additionally requires the installed `telegram` module and the strict
+`CHOPIN_REQUIRE_TELEGRAM=1` check; registration-only success is insufficient.
+
 The pilot binds **all three**: `telegram`, chat `-5325492504`, user `6431233670`.
 Chat membership grants nobody else the operator bearer. Repository selection is
 configuration, never an argument or remote instruction. Initial web admission is
