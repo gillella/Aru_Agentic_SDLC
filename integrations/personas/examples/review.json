@@ -1,0 +1,60 @@
+{
+  "schema": "aru.personas.request/v1",
+  "synthetic": true,
+  "binding": "synthetic-binding.json",
+  "context": {
+    "worktree": "/synthetic/worktrees/issue-630",
+    "kernel_root": "",
+    "branch": "feat/synthetic",
+    "pr": 700,
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "assignment": {
+    "repo": "gillella/Aru_Agentic_SDLC",
+    "pr": 700,
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "issue": 630,
+    "risk_tier": 1,
+    "authority": "anthropic-claude",
+    "reviewer_persona": "sonnet-reviewer",
+    "reviewer_actor": "synthetic-reviewer",
+    "reviewer_account": "claude-subscription-1",
+    "authority_source": "SYNTHETIC kernel snapshot",
+    "external_first_released": true,
+    "external_first_reason": "SYNTHETIC provider unavailable",
+    "authors": [
+      {
+        "persona_id": "astra-implementer",
+        "account_id": "openai-codex",
+        "actor": "synthetic-author"
+      }
+    ],
+    "touches": [
+      "src/main.py"
+    ]
+  },
+  "current_assignment": {
+    "repo": "gillella/Aru_Agentic_SDLC",
+    "pr": 700,
+    "head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "issue": 630,
+    "risk_tier": 1,
+    "authority": "anthropic-claude",
+    "reviewer_persona": "sonnet-reviewer",
+    "reviewer_actor": "synthetic-reviewer",
+    "reviewer_account": "claude-subscription-1",
+    "authority_source": "SYNTHETIC kernel snapshot",
+    "external_first_released": true,
+    "external_first_reason": "SYNTHETIC provider unavailable",
+    "authors": [
+      {
+        "persona_id": "astra-implementer",
+        "account_id": "openai-codex",
+        "actor": "synthetic-author"
+      }
+    ],
+    "touches": [
+      "src/main.py"
+    ]
+  }
+}

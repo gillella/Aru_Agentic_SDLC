@@ -1,0 +1,135 @@
+{
+  "schema": "aru.personas.fleet-binding/v1",
+  "harnesses": {
+    "claude-code": {
+      "executable": "/synthetic/bin/claude",
+      "workspace": "/synthetic/worktrees/issue-630",
+      "declared_modalities": [],
+      "modality_evidence": "SYNTHETIC installation reads attached reference files"
+    },
+    "codex": {
+      "executable": "/synthetic/bin/codex",
+      "workspace": "/synthetic/worktrees/issue-630",
+      "declared_modalities": [],
+      "modality_evidence": "SYNTHETIC installation reads attached reference files"
+    },
+    "antigravity": {
+      "executable": "/synthetic/bin/agy",
+      "workspace": "/synthetic/worktrees/issue-630",
+      "declared_modalities": [
+        "image"
+      ],
+      "modality_evidence": "SYNTHETIC installation reads attached reference files"
+    }
+  },
+  "accounts": [
+    {
+      "account_id": "claude-subscription-1",
+      "allowed_projects": [
+        "gillella/Aru_Agentic_SDLC"
+      ],
+      "env": {
+        "CLAUDE_CONFIG_DIR": "/synthetic/profiles/claude-subscription-1"
+      },
+      "max_sessions": 1,
+      "sessions_in_use": 0,
+      "unavailable_reason": ""
+    },
+    {
+      "account_id": "openai-codex",
+      "allowed_projects": [
+        "gillella/Aru_Agentic_SDLC"
+      ],
+      "env": {
+        "CODEX_HOME": "/synthetic/profiles/codex"
+      },
+      "max_sessions": 1,
+      "sessions_in_use": 0,
+      "unavailable_reason": ""
+    },
+    {
+      "account_id": "antigravity-account",
+      "allowed_projects": [
+        "gillella/Aru_Agentic_SDLC"
+      ],
+      "env": {},
+      "max_sessions": 1,
+      "sessions_in_use": 0,
+      "unavailable_reason": ""
+    }
+  ],
+  "evidence": {
+    "schema": "aru.personas.capability-evidence/v1",
+    "authorizes_execution": true,
+    "max_age_seconds": 21600,
+    "origin": "SYNTHETIC TESTS ONLY",
+    "note": "SYNTHETIC EXAMPLE ONLY; generated success fixtures, not actual access proof",
+    "observations": [
+      {
+        "account_id": "claude-subscription-1",
+        "route": "claude-code",
+        "model_id": "claude-fable-5-1",
+        "effort": "high",
+        "observed_at": "2026-09-09T18:00:00+00:00",
+        "outcome": "credits_required",
+        "detail": "",
+        "source": "SYNTHETIC test fixture; NOT live access",
+        "authenticated": true,
+        "identity_digest": "fbb38a9be7312aaf7d241734d7701accdaeaf7c421db1b0938366231f1bb8449",
+        "modalities": [
+          "image",
+          "text"
+        ]
+      },
+      {
+        "account_id": "claude-subscription-1",
+        "route": "claude-code",
+        "model_id": "claude-sonnet-5",
+        "effort": "high",
+        "observed_at": "2026-09-09T18:00:00+00:00",
+        "outcome": "ok",
+        "detail": "",
+        "source": "SYNTHETIC test fixture; NOT live access",
+        "authenticated": true,
+        "identity_digest": "fbb38a9be7312aaf7d241734d7701accdaeaf7c421db1b0938366231f1bb8449",
+        "modalities": [
+          "image",
+          "text"
+        ]
+      },
+      {
+        "account_id": "openai-codex",
+        "route": "codex",
+        "model_id": "gpt-6-astra",
+        "effort": "high",
+        "observed_at": "2026-09-09T18:00:00+00:00",
+        "outcome": "ok",
+        "detail": "",
+        "source": "SYNTHETIC test fixture; NOT live access",
+        "authenticated": true,
+        "identity_digest": "b6a9339ee7625b709acff9952be3177158d13ab14caed255a793eed80ae6784f",
+        "modalities": [
+          "image",
+          "text"
+        ]
+      },
+      {
+        "account_id": "antigravity-account",
+        "route": "antigravity",
+        "model_id": "gemini-3.1-pro-high",
+        "effort": "high",
+        "observed_at": "2026-09-09T18:00:00+00:00",
+        "outcome": "ok",
+        "detail": "",
+        "source": "SYNTHETIC test fixture; NOT live access",
+        "authenticated": true,
+        "identity_digest": "e6a3b35972549ef36411b0eaffa5d8ed3e0426d35fffa81b758af912d07a81c6",
+        "modalities": [
+          "image",
+          "text"
+        ]
+      }
+    ]
+  },
+  "enabled_optional": []
+}

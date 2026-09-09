@@ -1,0 +1,48 @@
+{
+  "schema": "aru.personas.capability-evidence/v1",
+  "authorizes_execution": false,
+  "origin": "~/.hermes/reports/model-personas-revised (recorded 2026-09-09)",
+  "note": "Historical operator observations of Fable 5.1 entitlement across the four Claude subscriptions. Every record is a dated failure; none is a success and none is invented. authorizes_execution is false, so this archive can never compile a plan. It is the evidence behind the approved Fable -> Astra -> Opus availability fallback. Original report has date precision only; midnight observed_at values are archive date sentinels, not asserted probe timestamps.",
+  "observations": [
+    {
+      "account_id": "claude-subscription-1",
+      "route": "claude-code",
+      "model_id": "claude-fable-5-1",
+      "effort": "high",
+      "observed_at": "2026-09-09T00:00:00+00:00",
+      "outcome": "credits_required",
+      "detail": "Fable 5.1 requires usage credits on this subscription.",
+      "source": "recommendations.md (fresh exact-model tests)"
+    },
+    {
+      "account_id": "claude-subscription-2",
+      "route": "claude-code",
+      "model_id": "claude-fable-5-1",
+      "effort": "high",
+      "observed_at": "2026-09-09T00:00:00+00:00",
+      "outcome": "credits_exhausted",
+      "detail": "api_error_status 429: out of usage credits.",
+      "source": "fable-sub-2.json"
+    },
+    {
+      "account_id": "claude-subscription-3",
+      "route": "claude-code",
+      "model_id": "claude-fable-5-1",
+      "effort": "high",
+      "observed_at": "2026-09-09T00:00:00+00:00",
+      "outcome": "credits_required",
+      "detail": "api_error_status 429: Fable 5.1 requires usage credits.",
+      "source": "fable-sub-3.json"
+    },
+    {
+      "account_id": "claude-subscription-4",
+      "route": "claude-code",
+      "model_id": "claude-fable-5-1",
+      "effort": "high",
+      "observed_at": "2026-09-09T00:00:00+00:00",
+      "outcome": "session_limited",
+      "detail": "api_error_status 429: session limit reached.",
+      "source": "fable-sub-4.json"
+    }
+  ]
+}
