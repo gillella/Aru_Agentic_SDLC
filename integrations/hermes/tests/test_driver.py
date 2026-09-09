@@ -5,6 +5,7 @@ import fcntl
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -68,8 +69,10 @@ def test_stop_gate_remains_closed_even_if_scheduler_pause_fails(config, monkeypa
         assert not state.project("owner/repo")["enabled"]
         raise scheduler.SchedulerError("synthetic scheduler outage")
     monkeypatch.setattr(scheduler, "stop_project", fail)
-    with pytest.raises(scheduler.SchedulerError):
-        driver.stop(config, "owner/repo")
+    result = driver.stop(config, "owner/repo")
+    assert result["status"] == "partial"
+    assert result["stop_intent_persisted"] and result["spawn_barrier_verified"]
+    assert result["scheduler"] == {"verified": False}
     assert not state.project("owner/repo")["enabled"]
 
 
@@ -366,3 +369,148 @@ def test_review_child_revalidates_before_actual_execution_and_uses_completion_wa
     assert not state.capacity_busy("account-one")
     assert len(wakes) == (0 if gate == "stopped" else 1)
     assert len(reads) == (0 if gate in {"stopped", "lane-family", "receipt-head"} else 1)
+
+
+def _lock_holder(path):
+    # A separate OS process owns the real flock until the test releases stdin.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    script = "import fcntl,sys; f=open(sys.argv[1],'a'); fcntl.flock(f,fcntl.LOCK_EX); print('locked',flush=True); sys.stdin.read()"
+    process = subprocess.Popen([sys.executable, "-c", script, str(path)], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE, text=True)
+    assert process.stdout.readline().strip() == "locked"
+    return process
+
+
+def test_stop_does_not_wait_for_other_projects_coordination(config, monkeypatch):
+    state = State(config.state_dir)
+    data = state.project("owner/repo")
+    data["enabled"] = True
+    state.save("owner/repo", data)
+    monkeypatch.setattr(scheduler, "stop_project", lambda *a, **k: {"enabled": False})
+    holder = _lock_holder(config.state_dir / "coordination.lock")
+    try:
+        began = time.monotonic()
+        result = driver.stop(config, "owner/repo", timeout_seconds=.5)
+        assert time.monotonic() - began < 1
+        assert holder.poll() is None  # Stop did not terminate or wait out the other project.
+        assert result["status"] == "stopped" and result["spawn_barrier_verified"]
+        assert not state.project("owner/repo")["enabled"]
+        state.save("owner/repo", data)  # Its old in-flight snapshot can still finish.
+        assert not state.project("owner/repo")["enabled"]
+    finally:
+        holder.communicate(timeout=3)
+
+
+def test_stop_fence_is_partial_until_inflight_spawn_barrier_is_settled(config):
+    from aru_project_driver.state import key
+
+    state = State(config.state_dir)
+    holder = _lock_holder(config.state_dir / "project-locks" / f"{key('owner/repo')}.spawn.lock")
+    try:
+        began = time.monotonic()
+        result = driver.stop(config, "owner/repo", timeout_seconds=.15)
+        assert time.monotonic() - began < 1
+        assert result["status"] == "partial" and result["stop_intent_persisted"]
+        assert result["spawn_barrier_verified"] is False
+        assert result["scheduler"] == {"verified": False}
+        assert not state.project("owner/repo")["enabled"]
+    finally:
+        holder.communicate(timeout=3)
+
+
+def test_start_begun_before_stop_cannot_acknowledge_intervening_nonce(config, monkeypatch):
+    import contextlib
+
+    state = State(config.state_dir)
+    original = State.lock
+    @contextlib.contextmanager
+    def stop_before_lock(self, **kwargs):
+        state.request_stop("owner/repo")
+        with original(self, **kwargs):
+            yield
+    monkeypatch.setattr(State, "lock", stop_before_lock)
+    monkeypatch.setattr(scheduler, "ensure_heartbeat", lambda *a, **k: pytest.fail("stale Start scheduled"))
+    with pytest.raises(DriverError, match="superseded"):
+        driver.start(config, "owner/repo")
+    assert not state.project("owner/repo")["enabled"]
+
+
+def test_stop_during_heartbeat_setup_defeats_start(config, monkeypatch):
+    state = State(config.state_dir)
+    def heartbeat(*a, **k):
+        state.request_stop("owner/repo")
+        return {"heartbeat_job_id": "one"}
+    monkeypatch.setattr(scheduler, "ensure_heartbeat", heartbeat)
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: pytest.fail("stale Start woke"))
+    with pytest.raises(DriverError, match="superseded"):
+        driver.start(config, "owner/repo")
+    assert not state.project("owner/repo")["enabled"]
+
+
+def test_stuck_native_stop_and_status_return_truthful_partial_state(config, monkeypatch):
+    state = State(config.state_dir)
+    def stuck(*a, **k):
+        # A broad native error handler must not swallow the operation deadline.
+        try:
+            time.sleep(10)
+        except Exception:
+            time.sleep(10)
+    monkeypatch.setattr(scheduler, "stop_project", stuck)
+    began = time.monotonic()
+    result = driver.stop(config, "owner/repo", timeout_seconds=.1)
+    assert time.monotonic() - began < 1
+    assert result["status"] == "partial" and result["spawn_barrier_verified"]
+    assert result["scheduler"] == {"verified": False}
+    assert not state.project("owner/repo")["enabled"]
+    monkeypatch.setattr(scheduler, "scheduler_status", stuck)
+    began = time.monotonic()
+    result = driver.status(config, "owner/repo", timeout_seconds=.1)
+    assert time.monotonic() - began < 1
+    assert result["status"] == "partial" and result["enabled"] is False
+    assert result["scheduler"] == {"verified": False}
+
+
+def test_cli_partial_stop_is_nonzero(config, monkeypatch, capsys):
+    monkeypatch.setattr(scheduler, "stop_project", lambda *a, **k: time.sleep(10))
+    assert driver.main(["--config", str(config.path), "stop", "--project", "owner/repo",
+                        "--timeout-seconds", ".05"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "partial" and result["stop_intent_persisted"]
+
+
+def test_deadline_at_context_exit_cannot_keep_successful_stop_status(config, monkeypatch):
+    import contextlib
+
+    @contextlib.contextmanager
+    def expire_at_exit(_):
+        yield
+        raise scheduler.SchedulerError("scheduler deadline expired")
+    monkeypatch.setattr(scheduler, "bounded", expire_at_exit)
+    monkeypatch.setattr(scheduler, "stop_project", lambda *a, **k: {"enabled": False})
+    result = driver.stop(config, "owner/repo")
+    assert result["status"] == "partial" and "deadline" in result["reason"]
+    assert result["stop_intent_persisted"] and result["spawn_barrier_verified"]
+    assert result["scheduler"]["verified"]  # Retain completed evidence, but never success.
+
+
+def test_new_explicit_start_winning_control_supersedes_older_stop(config, monkeypatch):
+    import contextlib
+
+    state = State(config.state_dir)
+    original = State.project_lock
+    restarted = []
+    @contextlib.contextmanager
+    def restart_before_control(self, repo, *, spawn=False):
+        if not spawn and not restarted:
+            restarted.append(True)
+            assert state.stop_nonce(repo) is not None
+            driver.start(config, repo)
+        with original(self, repo, spawn=spawn):
+            yield
+    monkeypatch.setattr(State, "project_lock", restart_before_control)
+    monkeypatch.setattr(scheduler, "ensure_heartbeat", lambda *a, **k: {"heartbeat_job_id": "one"})
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: {})
+    monkeypatch.setattr(scheduler, "stop_project", lambda *a, **k: pytest.fail("older Stop paused newer Start"))
+    result = driver.stop(config, "owner/repo")
+    assert result["status"] == "partial" and "superseded" in result["reason"]
+    assert state.project("owner/repo")["enabled"]
