@@ -1459,6 +1459,50 @@ project with no prior error the same pair is simply a healthy run. Refill and
 active-worker Stop/restart remain unproven; see the issues decomposed from #557
 for the scripted canary and its approved live run.
 
+### Canary preparation record: 2026-09-09
+
+The approved `gillella/aru-golden-path-demo` canary was **blocked before Start**.
+The [#557 preflight receipt](https://github.com/gillella/Aru_Agentic_SDLC/issues/557#issuecomment-5596233480)
+and [#607 record](https://github.com/gillella/Aru_Agentic_SDLC/issues/607#issuecomment-5596233626)
+preserve the observations; the Mini's private copy is
+`$HERMES_HOME/state/aru-driver-canary-20260909/preflight.json`.
+The approved bounds remain 30 minutes of observation plus 30 seconds for final
+Stop/readback cleanup. No live run or active-worker Stop/restart test occurred.
+
+Preparation established the demo App repository binding and accepted
+Administration: Read-only permission. Repository runner `21`,
+`aru-mac-mini-demo` version `2.337.0`, was online with exactly
+`self-hosted`, `macOS`, `ARM64`, `aru-ci`; ruleset `22611728` has no bypass
+actors. Demo [setup PR #6](https://github.com/gillella/aru-golden-path-demo/pull/6)
+head `b1ac3902ace4f19570b23810abfa1254b471f767` had passing required CI and
+pending review at this observation. Fixtures #7 and #8 remained Backlog,
+dependent on open setup issue #5.
+
+The Mini kernel checkout was updated to
+`dadf1c1fec5021f1a22ce1e268ec7a937836d2ee`; every installed Driver Python module
+hash matched that source. Existing custom operator notes in the installed
+Hermes skill were preserved. The demo-only `m3-canary` lane uses non-employer
+Claude profile 3, one shared session and one worker, with `auto_triage: false`.
+Other projects' configuration was preserved. The lane uses the canonical
+capacity observer; a bounded model probe returned `OK`, while fixture
+execution remained untested.
+
+The readiness blocker is the installed Stop path: it acquires the
+profile-global coordination lock before persisting disabled dispatch, and its
+coordination and scheduler lock acquisitions have no deadline. Actual Factory
+reconciliation (PID `38725`) held the shared lock for an observed 141 seconds;
+two bounded 50-second configuration-lock waits ended without modifying
+configuration. This contention exceeds the cleanup allowance. It does not
+establish an attempted or failed active-worker Stop test, and later lock
+acquisition does not establish bounded Stop.
+
+Final demo readback was `enabled: false`, zero workers and zero enabled
+heartbeat, wake and review-wake jobs. There are no live-run IDs and no rollback
+was performed. Existing demo issues #1/#2, PR #3, fixture issues and other
+runner services were preserved. Governed completion/refill, active-worker
+Stop/restart, duplicate/stale delivery and lost-worker recovery remain
+unproven; #607's acceptance criteria remain unchecked.
+
 ### Reviewer-policy migration to v2 source
 
 Use the verified merged source revision before updating installed integrations.
