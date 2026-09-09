@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import copy
+import subprocess
+
+import pytest
 
 import claim_issue
 import create_pr
@@ -14,14 +17,12 @@ def status_label(status: str) -> str:
 
 
 def verification_body(command: str) -> str:
-    return (
-        "## Summary\n\nSummary\n\n"
-        "## Verification\n\n"
-        f"- `{command}`"
-    )
+    return f"## Summary\n\nSummary\n\n## Verification\n\n- `{command}`"
 
 
 def traverse(monkeypatch, number: int) -> dict:
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("unexpected external call"))
+    finalized = []
     state = {
         "issue": {
             "number": number,
@@ -43,13 +44,7 @@ def traverse(monkeypatch, number: int) -> dict:
 
     pre_mutation_observations: list[tuple[int, str, str | None]] = []
 
-    def move_status(
-        _number,
-        status,
-        *,
-        expected_current=None,
-        pre_mutation_check=None,
-    ):
+    def move_status(_number, status, *, expected_current=None, pre_mutation_check=None):
         current_statuses = [
             label["name"][len("status:"):]
             for label in state["issue"]["labels"]
@@ -140,17 +135,18 @@ def traverse(monkeypatch, number: int) -> dict:
         "statusCheckRollup": [{"name": reviewer, "status": "COMPLETED", "conclusion": "SUCCESS"}],
     }
     monkeypatch.setattr(merge_pr, "pull_request", lambda _number: copy.deepcopy(state["pr"]))
-    monkeypatch.setattr(
-        merge_pr,
-        "pull_changed_paths",
-        lambda _number: ["app.py", "tests/test_app.py"],
-    )
+    monkeypatch.setattr(merge_pr, "pull_changed_paths", lambda _n: ["app.py", "tests/test_app.py"])
     monkeypatch.setattr(merge_state, "issue", current_issue)
-    monkeypatch.setattr(
-        merge_pr,
-        "ci_verdict",
-        lambda _number: {"head": "a" * 40, "state": "success", "checks": ["Verify"]},
-    )
+    ci = {"head": "a" * 40, "state": "success", "checks": ["Verify"]}
+    monkeypatch.setattr(merge_pr, "ci_verdict", lambda _n: ci)
+
+    def finalization_ci(pr):
+        # This lifecycle fixture stubs CI, but retains the real queue-history gate.
+        merge_state.require_direct_merge_history(pr["number"], pr["headRefOid"], pr["mergeCommit"]["oid"])
+        finalized.append(pr["number"])
+        return ci
+
+    monkeypatch.setattr(merge_pr, "finalization_verdict", finalization_ci)
     monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _number: [])
     monkeypatch.setattr(merge_pr, "exact_head_review", lambda *_args: True)
     monkeypatch.setattr(merge_pr, "base_snapshot", lambda _pr: "b" * 40)
@@ -174,7 +170,7 @@ def traverse(monkeypatch, number: int) -> dict:
     }}})
 
     def close_out(numbers, _changed_paths):
-        assert numbers == [number]
+        assert numbers == [number] and finalized == [number + 100]
         move_status(number, "Done")
         state["issue"]["state"] = "CLOSED"
         return [{"issue": number}]

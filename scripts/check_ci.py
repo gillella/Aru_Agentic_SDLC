@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from common import KernelError, gh_json, json_print, repo_slug
 from review_evidence import parse_time
+from merge_state import require_direct_merge_history
 
 DEFAULT_REQUIRED_CHECK = "aru-governed-pr"
 GITHUB_ACTIONS_APP_ID = 15368
@@ -93,7 +94,7 @@ def _workflow_runs(slug: str, head: str) -> list[dict]:
     return runs
 
 
-def _run_binding(run: dict, pr: dict, slug: str) -> bool:
+def _run_binding(run: dict, pr: dict, slug: str, merged_at: datetime | None = None) -> bool:
     """Validate provenance before excluding history; PR associations are mutable."""
     if (not _positive(run.get("id")) or not _positive(run.get("check_suite_id"))
             or not _positive(run.get("run_attempt"))
@@ -106,6 +107,12 @@ def _run_binding(run: dict, pr: dict, slug: str) -> bool:
         raise KernelError("governed Actions run has incompatible provenance")
     current = _timestamp(run.get("created_at")) >= _timestamp(pr.get("createdAt"))
     associations = run.get("pull_requests")
+    if associations == [] and merged_at is not None:
+        # Missing associations are never inferred. Only completed pre-merge work
+        # in this PR's lifetime can use authenticated historical merge evidence.
+        if not current:
+            raise KernelError("governed Actions run predates the merged PR")
+        return True
     if not isinstance(associations, list) or len(associations) != 1:
         raise KernelError("governed Actions PR association is incomplete or conflicting")
     linked = associations[0]
@@ -139,7 +146,9 @@ def _check_binding(check: dict, head: str, slug: str) -> int:
     return int(match[1])
 
 
-def commit_verdict(head: str, *, pr: dict | None = None) -> dict[str, object]:
+def commit_verdict(
+    head: str, *, pr: dict | None = None, merged_at: datetime | None = None,
+) -> dict[str, object]:
     """Conservatively combine all governing executions, never select newest green.
 
     A complete bounded inventory binds each Actions check to its canonical workflow
@@ -171,12 +180,20 @@ def commit_verdict(head: str, *, pr: dict | None = None) -> dict[str, object]:
         checks[run_id] = record
     states, seen, suites = [], set(), set()
     for run in _workflow_runs(slug, head):
-        current = _run_binding(run, pr, slug)
+        current = _run_binding(run, pr, slug, merged_at)
         if run["id"] in seen or run["check_suite_id"] in suites:
             raise KernelError("governed workflow-run inventory is ambiguous")
         seen.add(run["id"])
         suites.add(run["check_suite_id"])
-        state = _bound_state(run, checks.get(run["id"]))
+        check = checks.get(run["id"])
+        state = _bound_state(run, check)
+        if merged_at is not None and current:
+            if state != "success" or check is None or not (
+                _timestamp(pr["createdAt"]) <= _timestamp(run["created_at"])
+                <= _timestamp(run.get("run_started_at")) <= _timestamp(check.get("started_at"))
+                <= _timestamp(check.get("completed_at")) <= _timestamp(run.get("updated_at")) <= merged_at
+            ):
+                raise KernelError("governed CI did not succeed within the pre-merge lifetime")
         if current:
             states.append(state)
     if set(checks) - seen:
@@ -198,6 +215,53 @@ def _bound_state(run: dict, check: dict | None) -> str:
     if state == "success" and check_status != "success":
         raise KernelError("successful governed workflow conflicts with required check")
     return "failure" if "failure" in (state, check_status) else "pending" if "pending" in (state, check_status) else "success"
+
+
+def finalization_verdict(pr: dict) -> dict[str, object]:
+    """Read-only historical proof, used explicitly by confirmed-merge close-out.
+
+    The merged REST PR records the historical base; never query a branch tip or
+    require the head branch to survive. Bind its ordered parents to that base and
+    the exact head, and retain the independent, bounded queue-history refusal.
+    """
+    number, head = pr["number"], pr["headRefOid"]
+    slug = repo_slug()
+    endpoint = f"repos/{slug}/pulls/{number}"
+    merged = gh_json(["api", endpoint])
+    commit = pr.get("mergeCommit")
+    if (pr.get("state") != "MERGED" or not isinstance(commit, dict)
+            or not isinstance(commit.get("oid"), str)
+            or not re.fullmatch(r"[0-9a-fA-F]{40}", commit["oid"])
+            or not isinstance(merged, dict) or merged.get("number") != number
+            or merged.get("state") != "closed" or merged.get("merged") is not True
+            or merged.get("merge_commit_sha") != commit["oid"]
+            or merged.get("merged_at") != pr.get("mergedAt")
+            or merged.get("created_at") != pr.get("createdAt")):
+        raise KernelError("confirmed merged PR provenance is incomplete or conflicting")
+    merged_at = _timestamp(merged.get("merged_at"))
+    if _timestamp(pr.get("createdAt")) >= merged_at:
+        raise KernelError("merged PR lifetime is conflicting")
+    for side, ref in (("head", "headRefName"), ("base", "baseRefName")):
+        branch = merged.get(side)
+        if (not isinstance(branch, dict) or branch.get("ref") != pr.get(ref)
+                or not isinstance(branch.get("repo"), dict) or branch["repo"].get("full_name") != slug
+                or not isinstance(branch.get("sha"), str)
+                or not re.fullmatch(r"[0-9a-fA-F]{40}", branch["sha"])
+                or (side == "head" and branch["sha"] != head)):
+            raise KernelError("merged PR repository/head/base provenance conflicts")
+    obj = gh_json(["api", f"repos/{slug}/commits/{commit['oid']}"])
+    parents = obj.get("parents") if isinstance(obj, dict) else None
+    if (not isinstance(obj, dict) or obj.get("sha") != commit["oid"]
+            or not isinstance(parents, list) or len(parents) != 2
+            or any(not isinstance(parent, dict) for parent in parents)
+            or [parent.get("sha") for parent in parents] != [merged["base"]["sha"], head]
+            or merged["base"]["sha"] == head):
+        raise KernelError("confirmed direct merge commit parents conflict")
+    require_direct_merge_history(number, head, commit["oid"])
+    result = commit_verdict(head, pr=pr, merged_at=merged_at)
+    if gh_json(["api", endpoint]) != merged:
+        raise KernelError("merged PR provenance changed during CI inspection")
+    return {"pr": number, **result}
 
 
 def ci_verdict(number: int) -> dict[str, object]:
