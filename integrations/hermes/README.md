@@ -251,6 +251,21 @@ in the dependent live-run issue.
 
 ## Install separately; activate deliberately
 
+For a project, use `Hermes Project Driver Setup OWNER/REPO` for first adoption
+and `Hermes Project Driver Update OWNER/REPO` to reconcile that project's copied
+Aru files. Preserve working consumer verification during Update; do not copy
+the scaffold's fail-closed placeholder over it. These requests are described
+in the [project command guide](../../docs/OPERATIONS.md#project-commands) and
+the [Driver skill](skill/SKILL.md#setup-and-update).
+
+The procedure below installs the shared Hermes adapter. Updating the Aru source
+repository or one consumer does not implicitly authorize this installation,
+changes to other configured projects, or a live Loop. Use
+`Hermes Project Driver Loop OWNER/REPO` when continuation should start;
+`Hermes Project Driver Status OWNER/REPO` inspects it and
+`Hermes Project Driver Stop OWNER/REPO` disables future dispatch while preserving
+workers already finishing.
+
 Prerequisites are a supported Python runtime, an installed Hermes runtime with
 native script wake gates, authenticated coding CLIs, and a governed consumer
 checkout. Set `HERMES_HOME` to the same absolute home as the configuration and
