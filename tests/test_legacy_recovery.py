@@ -20,6 +20,10 @@ SIGNED_MESSAGE = f"Legacy work.\n\n{ATTESTED}"
 FENCED = f"Explain an example, not authorship.\n\n```text\n{ATTESTED}\n```\n\nAn example.\n"
 QUOTED = f"Discuss a prior claim:\n{ATTESTED}\n\nThe prior claim is incorrect.\n"
 STRAY = f"Legacy work.\n\n{ATTESTED}\nThe prior claim is incorrect.\n"
+DIVIDED = f"Subject\n\n---\n\n{ATTESTED}\n"
+PATCHED = f"Subject\n\n---\nfile | 1 +\n\ndiff --git a/file b/file\n\n{ATTESTED}\n"
+TWO_MAILBOXES = "Co-Authored-By: Claude <noreply@anthropic.com>, Codex <noreply@openai.com>"
+REVERSED_MAILBOXES = "Co-Authored-By: Codex <noreply@openai.com>, Claude <noreply@anthropic.com>"
 
 
 def pr_record(**overrides):
@@ -291,6 +295,8 @@ def test_declared_author_must_equal_the_recorded_claimant(harness):
         (FENCED, "canonical author-family attestation"),
         (QUOTED, "canonical author-family attestation"),
         (STRAY, "canonical author-family attestation"),
+        (DIVIDED, "canonical author-family attestation"),
+        (PATCHED, "canonical author-family attestation"),
         (f"Work.\n\n{ATTESTED}\n{CODEX_ATTESTED}", "canonical author-family attestation"),
         (f"Work.\n\n{CODEX_ATTESTED}", "contradicts the attested historical family"),
     ],
@@ -300,6 +306,22 @@ def test_only_a_verified_canonical_trailer_proves_lineage(harness, message, erro
     harness(commit_message=message)
     with pytest.raises(KernelError, match=error):
         recover()
+
+
+@pytest.mark.parametrize("value", [TWO_MAILBOXES, REVERSED_MAILBOXES])
+def test_conflicting_addresses_in_one_value_refuse_before_any_write(harness, value):
+    """Ambiguity is never resolved by taking the first address, in either order."""
+    state = harness(commit_message=f"Legacy work.\n\n{value}\n")
+    with pytest.raises(KernelError, match="no single complete canonical mailbox"):
+        recover(apply=True)
+    assert (state.commands, state.statuses, state.ensured) == ([], [], [])
+
+
+def test_a_patch_divider_below_the_trailer_block_still_recovers(harness):
+    """git reads trailers before the divider, so a diffstat under one is harmless."""
+    state = harness(commit_message=f"Legacy work.\n\n{ATTESTED}\n---\n file | 1 +\n")
+    assert recover(apply=True)["author_family"] == "claude-code"
+    assert state.statuses == [(206, "In Review")]
 
 
 def test_current_configuration_alone_cannot_supply_lineage(harness):

@@ -1139,7 +1139,9 @@ governed CI verdict for that same head is `success`.
 family produced legacy work is a canonical `Co-Authored-By:` trailer, matched on
 its email address, in the message's real terminal trailer block — the block
 `git interpret-trailers --parse` returns, so a co-author line quoted in a fenced
-example, left in the middle of the message, or followed by prose is not a trailer
+example, left in the middle of the message, followed by prose, or placed after
+git's `---` patch divider is not a trailer, and a co-author value must be one
+complete canonical mailbox rather than the first of several addresses
 — inside a commit whose signature GitHub itself reports as verified and whose
 authenticated committer is the merged PR actor. The attributed author is not that
 proof: GitHub verifies the committer's key and documents that the author address

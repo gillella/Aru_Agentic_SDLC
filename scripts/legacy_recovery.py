@@ -54,7 +54,13 @@ ATTESTED_FAMILY_EMAILS = {
     "noreply@google.com": "google-antigravity",
 }
 TRAILER_LINE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*):[ \t]*(.*)$")
-TRAILER_EMAIL = re.compile(r"<([^>\s]+)>")
+# git ends the commit message at its patch divider: the first line starting with
+# "---" followed by whitespace. This is git's own find_patch_start() rule, so
+# "----" and "---text" are ordinary lines while "--- a/file" is a divider.
+PATCH_DIVIDER = re.compile(r"^---(?=[ \t]|$)", re.MULTILINE)
+# One complete canonical mailbox and nothing else. A value carrying a second
+# address is ambiguous evidence, never a menu to pick the first entry from.
+MAILBOX = re.compile(r"^[^<>]*<([^<>\s]+@[^<>\s]+)>$")
 
 
 class LegacyRecoveryError(KernelError):
@@ -122,24 +128,37 @@ def linked_closed_issue(pr: dict[str, Any], expected_issue: int) -> dict[str, An
 def attested_families(message: str) -> set[str]:
     """Families named by canonical co-author trailers in the real terminal block.
 
-    Mirrors ``git interpret-trailers --parse`` without executing git: only the
-    message's final paragraph counts, and only when every one of its lines is a
-    ``Token: value`` pair. A co-author line quoted in prose or inside a fenced
-    block is therefore not a trailer, exactly as git reports it, and any stray
-    or folded line makes the whole block non-trailing, which fails closed.
+    Mirrors ``git interpret-trailers --parse`` without executing git. The commit
+    message ends at git's patch divider, so nothing after it -- a diffstat, a
+    patch, or a co-author line below either -- can attest anything. Of what
+    remains, only the final paragraph counts, and only when every one of its
+    lines is a ``Token: value`` pair, so a co-author line quoted in prose or a
+    fenced block is not a trailer, exactly as git reports it, and a stray or
+    folded line makes the whole block non-trailing.
+
+    Every co-author value must then be one complete canonical mailbox. Anything
+    else -- a second address, a truncated form -- is ambiguous evidence about
+    who produced the work, so it fails closed instead of being resolved here.
     """
-    paragraphs = re.split(r"\n[ \t]*\n", message.replace("\r\n", "\n").rstrip())
+    body = message.replace("\r\n", "\n")
+    divider = PATCH_DIVIDER.search(body)
+    if divider is not None:
+        body = body[: divider.start()]
+    paragraphs = re.split(r"\n[ \t]*\n", body.rstrip())
     lines = paragraphs[-1].splitlines() if len(paragraphs) > 1 else []
     matches = [TRAILER_LINE.match(line) for line in lines]
     if not matches or any(match is None for match in matches):
         return set()
-    addresses = [
-        found.group(1).lower()
-        for match in matches
-        if match.group(1).lower() == "co-authored-by"
-        and (found := TRAILER_EMAIL.search(match.group(2)))
-    ]
-    return {ATTESTED_FAMILY_EMAILS[a] for a in addresses if a in ATTESTED_FAMILY_EMAILS}
+    families = set()
+    for match in (m for m in matches if m.group(1).lower() == "co-authored-by"):
+        mailbox = MAILBOX.match(match.group(2).strip())
+        if mailbox is None:
+            raise KernelError("a co-author trailer carries no single complete canonical mailbox; "
+                              f"refusing ambiguous attestation {match.group(2).strip()!r}")
+        family = ATTESTED_FAMILY_EMAILS.get(mailbox.group(1).lower())
+        if family is not None:  # an unrecognised co-author is not evidence either way
+            families.add(family)
+    return families
 
 
 def head_commit_evidence(head: str, actor: str) -> str:
