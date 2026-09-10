@@ -62,7 +62,10 @@ def enabled(config, repo: str, identity: str) -> bool:
 
 
 def fingerprint(config, repo: str, identity: str) -> str:
+    from .reviewers import inventory
+    reviewers = inventory(config, repo)
     return digest({"compiler": COMPILER, "policy": config.project(repo).get("worker_permissions"),
+                   **({"coding_reviewers": reviewers} if reviewers is not None else {}),
                    "repo_dir": config.project(repo)["repo_dir"], "kernel": str(config.kernel_root),
                    "lane": config.lane(repo, identity)})
 

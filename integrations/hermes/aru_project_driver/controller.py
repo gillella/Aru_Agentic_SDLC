@@ -39,8 +39,7 @@ class Controller:
         self.now = now
 
     def adapter(self, repo: str):
-        return self.adapter_factory(self.config.kernel_root,
-                                    Path(self.config.project(repo)["repo_dir"]), repo)
+        return self.config.kernel_adapter(repo, self.adapter_factory)
 
     @staticmethod
     def _owners(snapshot: dict) -> set[str]:
