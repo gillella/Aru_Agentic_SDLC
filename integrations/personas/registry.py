@@ -1,9 +1,17 @@
 """The 13 approved persona identities, their roles, task families and accounts.
 
-This module is data. It encodes exactly the fleet Aru approved on 2026-09-09
-and nothing else: no alias, no experimental pilot model, no legacy standby.
-Every model identifier and effort here is checked against the recorded route
-catalog by :mod:`personas.catalog` before a plan is compiled.
+This module is the *default* policy data. It encodes exactly the fleet Aru
+approved on 2026-09-09 and nothing else: no alias, no experimental pilot model,
+no legacy standby. Every model identifier and effort here is checked against the
+recorded route catalog by :mod:`personas.catalog` before a plan is compiled.
+
+Since #637 this data is a baseline, not the only expressible fleet. The types
+below are the shape an operator policy document is validated into, and
+:mod:`personas.policy` composes an immutable :class:`~personas.policy.PolicySnapshot`
+from this baseline plus a schema-validated operator document. Adding an expert,
+a subscription or a model on an already supported harness is a configuration
+change; the invariants those additions can never weaken stay here and in
+:mod:`personas.policy`, in source, under review.
 
 Two separable ideas live here:
 
@@ -52,6 +60,10 @@ _NO_LIFECYCLE = (
     "Never edit lifecycle or review labels, or manufacture review approval.",
 )
 
+#: Every role, shipped or configured, carries these. A policy document may add
+#: stop criteria to a role; dropping one of these is refused.
+MANDATORY_STOP_CRITERIA: tuple[str, ...] = _COMMON_STOP + _NO_LIFECYCLE
+
 
 @dataclass(frozen=True)
 class Role:
@@ -60,6 +72,11 @@ class Role:
     A role is stable across whichever approved persona performs it. That is what
     makes the architect fallback safe: the deliverables do not change when the
     acting model does.
+
+    A configured specialization names its ``base`` role and may only *add* to
+    that role's deliverables, escalation triggers and stop criteria. Dropping or
+    rewording an inherited safety line is refused, so a new expert cannot become
+    a weaker copy of an approved contract.
     """
 
     id: str
@@ -68,6 +85,9 @@ class Role:
     output_contract: tuple[str, ...]
     escalation: tuple[str, ...]
     stop_criteria: tuple[str, ...] = _COMMON_STOP + _NO_LIFECYCLE
+    #: The approved role this one specializes, when it was configured by an
+    #: operator. Empty for the base contracts shipped here.
+    base: str = ""
 
     def sections(self) -> Mapping[str, tuple[str, ...]]:
         return {
@@ -386,10 +406,21 @@ class Persona:
     optional: bool = False
     required_modalities: frozenset[str] = field(default=frozenset({"text"}))
     notes: str = ""
+    #: Who authored the model, which is *not* the harness that reaches it. Empty
+    #: means "the same family as the access lineage", which is true for all 13
+    #: defaults. An Anthropic model reached through Cursor or Antigravity keeps
+    #: ``vendor="anthropic-claude"`` while its ``lineage`` stays the harness
+    #: fleet, so it never becomes an independent reviewer of Claude authorship.
+    vendor: str = ""
 
     @property
     def title(self) -> str:
         return role(self.native_role).title
+
+    @property
+    def author_vendor(self) -> str:
+        """The model-authorship family used for review independence."""
+        return self.vendor or self.lineage
 
     @property
     def role_ids(self) -> tuple[str, ...]:
@@ -640,10 +671,82 @@ def persona(persona_id: str) -> Persona:
 #: The one approved acting-role chain, kept here so it is auditable as data.
 ARCHITECT_FALLBACK_CHAIN: tuple[str, ...] = TASK_CLASSES["architecture_decision"].candidates
 
+#: The approved chain an operator policy may extend but never reorder, shorten
+#: or replace. A configured document may append further qualified candidates.
+APPROVED_ARCHITECT_CHAIN: tuple[str, ...] = (
+    "fable-architect", "astra-implementer", "opus-implementer",
+)
+
+
+# --------------------------------------------------------------------------- #
+# Model rules
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class ModelRule:
+    """What the fleet asserts about one recorded catalog identifier.
+
+    The catalog says an identifier exists and which reasoning levels the provider
+    published. This says who authored the model and whether an effort selection
+    is emitted at all. Both are required before a persona may name the model, and
+    neither replaces an exact-model, exact-effort capability probe.
+    """
+
+    route: str
+    model_id: str
+    #: Model-authorship family, independent of the harness that reaches it.
+    vendor: str
+    #: ``explicit`` - an effort is chosen and validated against the route.
+    #: ``none``     - the surface publishes no level, so only the route default
+    #:                is assignable and no effort argument is emitted.
+    effort_selection: str = "explicit"
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.route, self.model_id)
+
+
+def _rules(route_name: str, vendor: str, *model_ids: str) -> tuple[ModelRule, ...]:
+    return tuple(
+        ModelRule(route_name, model_id, vendor,
+                  "none" if model_id in catalog.NO_EFFORT_MODELS else "explicit")
+        for model_id in model_ids
+    )
+
+
+#: Every model the default fleet may name, plus the two Anthropic identifiers the
+#: recorded Antigravity catalog publishes. Those two carry no persona here; they
+#: are declared so that a configured persona reaching Claude through Antigravity
+#: inherits Claude authorship instead of inventing an independent one.
+MODEL_RULES: Mapping[tuple[str, str], ModelRule] = {r.key: r for r in (
+    *_rules("claude-code", "anthropic-claude", "claude-fable-5-1", "claude-opus-5",
+            "claude-sonnet-5", "claude-haiku-4-5-20251001"),
+    *_rules("codex", "openai-codex", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra",
+            "gpt-5.6-luna", "gpt-5.3-codex-spark"),
+    *_rules("cursor", "cursor-fleet", "cursor-grok-4.6-medium", "cursor-grok-4.6-high",
+            "composer-2.5"),
+    *_rules("antigravity", "google-antigravity", "gemini-3.8-flash-medium",
+            "gemini-3.8-flash-high", "gemini-3.1-pro-high"),
+    ModelRule("antigravity", "claude-sonnet-4-6", "anthropic-claude", "none"),
+    ModelRule("antigravity", "claude-opus-4-6-thinking", "anthropic-claude", "none"),
+)}
+
 
 # --------------------------------------------------------------------------- #
 # Accounts, shared capacity and project scope
 # --------------------------------------------------------------------------- #
+
+#: The lifecycle an operator can express for a billable identity.
+#:
+#: ``enabled``  - reservable now.
+#: ``draining`` - approved, but takes no new reservation; work already running on
+#:                it keeps its account, its policy snapshot and its lineage.
+#: ``disabled`` - not reservable at all; still named, so audit history resolves.
+#:
+#: Removing the entry entirely is the fourth state. None of the four cancels a
+#: provider subscription, revokes a credential or stops a running worker.
+ACCOUNT_STATES: tuple[str, ...] = ("enabled", "draining", "disabled")
+
 
 @dataclass(frozen=True)
 class AccountPolicy:
@@ -652,7 +755,8 @@ class AccountPolicy:
     id: str
     route: str
     #: Every persona on this account draws from this one quota. Switching model
-    #: inside a capacity key is never new capacity.
+    #: inside a capacity key is never new capacity, and neither is a second
+    #: account id that names the same capacity key.
     capacity_key: str
     lineage: str
     description: str
@@ -660,6 +764,19 @@ class AccountPolicy:
     #: means the allowlist may contain only repositories under these owners.
     required_owners: frozenset[str] | None = None
     restriction: str = ""
+    #: Enrollment lifecycle. Configuration only; actual lock and drain execution
+    #: belong to the Driver (#631/#636) and are not deployed by this package.
+    state: str = "enabled"
+    #: Ordered preference hint within a route; lower is consulted first. Equal
+    #: priorities keep the operator's declared document order.
+    priority: int = 0
+    #: Concurrency ceiling for the whole capacity key, when the operator declares
+    #: one. ``None`` defers to each binding's observed ``max_sessions``.
+    concurrency: int | None = None
+
+    @property
+    def reservable(self) -> bool:
+        return self.state == "enabled"
 
 
 UNUM_OWNER = "Unum-Inc"
@@ -733,7 +850,17 @@ def _validate_persona(item: Persona) -> None:
 
 
 def validate_registry() -> None:
-    """Prove every shipped persona is a real, assignable, self-consistent identity."""
+    """Prove the shipped default fleet is real, assignable and self-consistent.
+
+    The general validator lives in :mod:`personas.policy` and runs over any
+    snapshot, configured or default. This entry point additionally keeps the
+    shipped baseline honest in its own right: every shipped persona and task
+    family is checked directly, and there are exactly the 13 approved identities
+    and the exact approved chain.
+    """
+    from .policy import default_snapshot
+
+    default_snapshot().validate()
     for item in PERSONAS.values():
         _validate_persona(item)
     for family in TASK_CLASSES.values():
@@ -749,5 +876,7 @@ def validate_registry() -> None:
                 raise PersonaPolicyError(
                     f"{family.name}: {persona_id} does not declare this family"
                 )
-    if ARCHITECT_FALLBACK_CHAIN != ("fable-architect", "astra-implementer", "opus-implementer"):
+    if len(PERSONAS) != 13:
+        raise PersonaPolicyError("the approved default fleet is exactly 13 personas")
+    if ARCHITECT_FALLBACK_CHAIN != APPROVED_ARCHITECT_CHAIN:
         raise PersonaPolicyError("the approved architect fallback chain was altered")

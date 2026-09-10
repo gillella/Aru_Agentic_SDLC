@@ -38,6 +38,16 @@ EXCLUDED_MODEL_IDS: frozenset[str] = frozenset({
 
 MODALITIES: frozenset[str] = frozenset({"text", "image"})
 
+#: Recorded evidence, not a routing enum: these installed surfaces publish no
+#: selectable reasoning level, so the only assignable effort is the route default
+#: and no effort argument is emitted. The default policy document seeds its model
+#: rules from this, and an operator policy declares the same fact for any further
+#: model it enables (``"effort_selection": "none"``).
+NO_EFFORT_MODELS: frozenset[str] = frozenset({"composer-2.5", "claude-haiku-4-5-20251001"})
+
+#: How a model rule may describe effort. Anything else is refused at load time.
+EFFORT_SELECTIONS: frozenset[str] = frozenset({"explicit", "none"})
+
 
 def effort_rank(effort: str) -> int:
     try:
@@ -242,25 +252,37 @@ def require_assignable(route_name: str, model_id: str) -> CatalogEntry:
     return found
 
 
-def require_effort(route_name: str, model_id: str, effort: str) -> None:
-    """Prove the route and, when published, the model itself accept this effort."""
+def require_effort(route_name: str, model_id: str, effort: str, *,
+                   effort_selection: str | None = None) -> None:
+    """Prove the route and, when published, the model itself accept this effort.
+
+    ``effort_selection`` comes from the resolving policy snapshot's model rule.
+    When it is omitted the recorded :data:`NO_EFFORT_MODELS` evidence is used, so
+    a direct catalog call behaves exactly as it did before configuration existed.
+    """
     if effort in NEVER_ASSIGNABLE_EFFORTS:
         raise UnsupportedEffortError(
             f"effort {effort!r} is never assigned by this package (no max/ultra fan-out)"
         )
     if effort not in EFFORT_ORDER:
         raise UnsupportedEffortError(f"unknown effort: {effort!r}")
+    if effort_selection is None:
+        effort_selection = "none" if model_id in NO_EFFORT_MODELS else "explicit"
+    if effort_selection not in EFFORT_SELECTIONS:
+        raise UnsupportedEffortError(f"unknown effort selection: {effort_selection!r}")
     found = require_assignable(route_name, model_id)
     mechanism = route(route_name).effort
-    if mechanism.kind == "model_id":
-        encoded = model_id.rsplit("-", 1)[-1]
-        if (model_id == "composer-2.5" and effort != "default") or (
-                model_id != "composer-2.5" and encoded != effort):
-            raise UnsupportedEffortError("effort contradicts the exact route model identifier")
-    if effort == "default":
-        if model_id not in {"composer-2.5", "claude-haiku-4-5-20251001"}:
-            raise UnsupportedEffortError("this model requires an explicit effort")
+    if effort_selection == "none":
+        if effort != "default":
+            raise UnsupportedEffortError(
+                f"{model_id!r} publishes no selectable reasoning level; only the route "
+                "default is assignable and no effort argument is emitted"
+            )
         return
+    if effort == "default":
+        raise UnsupportedEffortError("this model requires an explicit effort")
+    if mechanism.kind == "model_id" and model_id.rsplit("-", 1)[-1] != effort:
+        raise UnsupportedEffortError("effort contradicts the exact route model identifier")
     if found.efforts is not None and effort not in found.efforts:
         raise UnsupportedEffortError(
             f"{route_name}:{model_id} publishes no {effort!r} reasoning level "

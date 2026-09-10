@@ -17,9 +17,10 @@ from .catalog import MODALITIES
 from .errors import (
     ContradictoryTaskError, RiskEvidenceError, UnknownTaskError, UnsafeScopeError,
 )
-from .registry import PROJECT_RE, TASK_CLASSES, task_class
-from .risk import review_risk_tier
 from .lineage import AuthorIdentity
+from .policy import PolicySnapshot, default_snapshot
+from .registry import PROJECT_RE
+from .risk import review_risk_tier
 
 TASK_LABEL_PREFIX = "aru-task:"
 RISK_LABEL_PREFIX = "aru-risk:"
@@ -106,17 +107,17 @@ def _labelled(labels: tuple[str, ...], prefix: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(seen))
 
 
-def _classify_family(request: TaskRequest) -> tuple[str, str]:
+def _classify_family(request: TaskRequest, families: Mapping[str, object]) -> tuple[str, str]:
     labelled = _labelled(request.labels, TASK_LABEL_PREFIX)
     if len(labelled) > 1:
         raise ContradictoryTaskError(
             "trusted labels name more than one task class: " + ", ".join(sorted(labelled))
         )
     if request.task_class is not None:
-        if request.task_class not in TASK_CLASSES:
+        if request.task_class not in families:
             raise UnknownTaskError(
                 f"{request.task_class!r} is not an approved task class "
-                f"(approved: {', '.join(sorted(TASK_CLASSES))})"
+                f"(approved: {', '.join(sorted(families))})"
             )
         if labelled and labelled[0] != request.task_class:
             raise ContradictoryTaskError(
@@ -125,7 +126,7 @@ def _classify_family(request: TaskRequest) -> tuple[str, str]:
             )
         return request.task_class, "explicit request field"
     if labelled:
-        if labelled[0] not in TASK_CLASSES:
+        if labelled[0] not in families:
             raise UnknownTaskError(f"{TASK_LABEL_PREFIX}{labelled[0]} is not an approved task class")
         return labelled[0], f"trusted label {TASK_LABEL_PREFIX}{labelled[0]}"
     raise UnknownTaskError(
@@ -173,14 +174,20 @@ def _classify_risk(request: TaskRequest) -> tuple[int, str, int | None]:
     return declared, source, derived
 
 
-def classify(request: TaskRequest) -> Classification:
-    """Refuse anything that is not explainable from trusted metadata."""
+def classify(request: TaskRequest, snapshot: PolicySnapshot | None = None) -> Classification:
+    """Refuse anything that is not explainable from trusted metadata.
+
+    The approved task families come from the caller's policy snapshot, so a
+    configured family is classified exactly like a shipped one and neither can
+    reach the other's requests.
+    """
+    policy = snapshot or default_snapshot()
     for flag in (request.major_unresolved_decision, request.allow_optional, request.nontrivial):
         if type(flag) is not bool:
             raise ContradictoryTaskError("task switches must be booleans")
     if request.major_unresolved_decision and request.task_class not in (None, "architecture_decision"):
         raise ContradictoryTaskError("major unresolved decision applies only to architecture")
-    family, family_source = _classify_family(request)
+    family, family_source = _classify_family(request, policy.task_classes)
     if request.major_unresolved_decision and family != "architecture_decision":
         raise ContradictoryTaskError("major unresolved decision applies only to architecture")
     tier, tier_source, derived = _classify_risk(request)
@@ -200,5 +207,5 @@ def classify(request: TaskRequest) -> Classification:
         },
         derived_tier=derived,
         required_modalities=frozenset(request.modalities)
-                            | task_class(family).required_modalities,
+                            | policy.task_class(family).required_modalities,
     )

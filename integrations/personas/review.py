@@ -10,7 +10,7 @@ from .classify import TaskRequest, derive_risk_tier
 from .errors import (ExternalFirstError, HeadMismatchError, ReviewAuthorityError,
                      ReviewIndependenceError)
 from .lineage import AuthorIdentity, extend_history
-from .registry import persona
+from .policy import default_snapshot
 
 MUTATES_KERNEL_AUTHORITY = False
 
@@ -38,7 +38,8 @@ class ReviewAssignment:
                 "authors": [a.to_dict() for a in self.authors], "touches": list(self.touches)}
 
 
-def validate_assignment(assignment, current_head, *, current_assignment):
+def validate_assignment(assignment, current_head, *, current_assignment, snapshot=None):
+    policy = snapshot or default_snapshot()
     if not isinstance(assignment, ReviewAssignment) or assignment != current_assignment:
         raise ReviewAuthorityError("proposed assignment differs from fresh kernel authority")
     if not re.fullmatch(r"[0-9a-f]{40}", current_head or "") or assignment.head != current_head:
@@ -52,21 +53,29 @@ def validate_assignment(assignment, current_head, *, current_assignment):
         raise ReviewAuthorityError("invalid review risk tier")
     if assignment.risk_tier < derive_risk_tier(assignment.touches):
         raise ReviewAuthorityError("review risk below scope floor")
-    reviewer = persona(assignment.reviewer_persona)
-    identity = AuthorIdentity(reviewer.id, assignment.reviewer_account, assignment.reviewer_actor)
+    reviewer = policy.persona(assignment.reviewer_persona)
+    identity = AuthorIdentity(reviewer.id, assignment.reviewer_account,
+                              assignment.reviewer_actor, snapshot=policy)
     if (not reviewer.performs("code_reviewer") or not reviewer.reviews_at(assignment.risk_tier)
             or assignment.authority != reviewer.lineage):
         raise ReviewAuthorityError("bound reviewer lacks authority for this role/risk/family")
     for author in assignment.authors:
-        if (identity.family == author.family or identity.account_id == author.account_id or
-                identity.actor.casefold() == author.actor.casefold()):
-            raise ReviewIndependenceError("reviewer overlaps cumulative author family/account/actor")
+        # Access lineage and model authorship are checked separately: a persona
+        # that reaches a vendor's model through a different harness is still that
+        # vendor's work and never an independent reviewer of it.
+        if (identity.family == author.family or identity.vendor == author.vendor
+                or identity.account_id == author.account_id
+                or identity.actor.casefold() == author.actor.casefold()):
+            raise ReviewIndependenceError(
+                "reviewer overlaps cumulative author family/vendor/account/actor"
+            )
     return assignment
 
 
 def plan_review(assignment, current_head, binding, context, now=None, *, current_assignment):
     from .resolve import _resolve
-    validate_assignment(assignment, current_head, current_assignment=current_assignment)
+    validate_assignment(assignment, current_head, current_assignment=current_assignment,
+                        snapshot=binding.snapshot)
     if context.head != current_head or context.pr != assignment.pr:
         raise HeadMismatchError("review prompt context differs from assigned PR/head")
     bound_account = binding.require(assignment.reviewer_account)
@@ -81,6 +90,8 @@ def plan_review(assignment, current_head, binding, context, now=None, *, current
     return replace(plan, review_assignment=assignment.to_dict(), digest="")
 
 
-def require_author_continuity(history, next_persona, account_id, actor, handoff_reason=""):
+def require_author_continuity(history, next_persona, account_id, actor, handoff_reason="",
+                              snapshot=None):
     """An explicitly authorized continuation appends every contributor, never resets."""
-    return extend_history(history, next_persona, account_id, actor, handoff_reason)
+    return extend_history(history, next_persona, account_id, actor, handoff_reason,
+                          snapshot=snapshot)

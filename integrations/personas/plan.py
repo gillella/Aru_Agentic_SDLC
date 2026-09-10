@@ -34,7 +34,7 @@ PLAN_SCHEMA = "aru.personas.command-plan/v1"
 #: this set so an audit can tell which policy source produced it, and so a plan
 #: replayed against edited policy is visibly not the same decision.
 POLICY_SOURCES: tuple[str, ...] = (
-    "catalog.py", "classify.py", "errors.py", "plan.py", "prompt.py",
+    "catalog.py", "classify.py", "errors.py", "plan.py", "policy.py", "prompt.py",
     "registry.py", "resolve.py", "review.py", "binding.py", "evidence.py",
     "lineage.py", "risk.py", "__init__.py", "__main__.py", "data/route-catalogs.json",
 )
@@ -81,31 +81,50 @@ def _argv_element(value: object, what: str) -> str:
     return value
 
 
-def _base_args(route_name: str, base: list[str], read_only: bool) -> list[str]:
-    if read_only:
-        if route_name == "codex":
-            base[base.index("workspace-write")] = "read-only"
-        elif route_name == "claude-code":
-            base[base.index("acceptEdits")] = "plan"
-        else:
-            raise HarnessBindingError("route has no approved reviewer")
+def _base_args(spec, route_name: str, read_only: bool) -> list[str]:
+    """Reviewer mode flips a documented per-route argument; it never adds a new one."""
+    base = list(spec.base_args)
+    if not read_only:
+        return base
+    if route_name == "codex":
+        base[base.index("workspace-write")] = "read-only"
+    elif route_name == "claude-code":
+        base[base.index("acceptEdits")] = "plan"
+    else:
+        raise HarnessBindingError("route has no approved reviewer")
     return base
+
+
+def _image_args(input_files: tuple[str, ...]) -> tuple[str, ...]:
+    """Codex passes local references with ``--image``; each path stays literal and absolute."""
+    argv: list[str] = []
+    for path in input_files:
+        if not Path(path).is_absolute() or "\x00" in path or ".." in Path(path).parts:
+            raise HarnessBindingError("invalid input path")
+        argv.extend(("--image", path))
+    return tuple(argv)
 
 
 def build_argv(route_name: str, executable: str, model_id: str, effort: str,
                workspace: str, prompt: str, *, read_only: bool = False,
-               input_files: tuple[str, ...] = ()) -> tuple[str, ...]:
-    """Compose one argument array from the route's own documented flag surface."""
+               input_files: tuple[str, ...] = (), snapshot=None) -> tuple[str, ...]:
+    """Compose one argument array from the route's own documented flag surface.
+
+    Protocol, flag semantics and modality transport stay here, in reviewed source.
+    Configuration decides *which* approved persona, model and effort reach this
+    function; it never contributes an argument, an executable or a shell string.
+    """
     from .binding import HarnessBinding
-    from .registry import PERSONAS
+    from .policy import default_snapshot
+    policy = snapshot or default_snapshot()
     HarnessBinding(route_name, executable, workspace)
-    catalog.require_effort(route_name, model_id, effort)
-    if not any(p.route == route_name and p.model_ids.get(effort) == model_id for p in PERSONAS.values()):
+    if not any(p.route == route_name and p.model_ids.get(effort) == model_id
+               for p in policy.personas.values()):
         raise HarnessBindingError("command model/effort has no approved persona")
+    policy.require_effort(route_name, model_id, effort)
     spec = catalog.route(route_name)
     argv: list[str] = [_argv_element(executable, "executable")]
-    base = _base_args(route_name, list(spec.base_args), read_only)
-    argv.extend(base)
+    argv.extend(_base_args(spec, route_name, read_only))
     argv.extend((spec.model_flag, _argv_element(model_id, "model id")))
     if effort != "default":
         mechanism = spec.effort
@@ -116,10 +135,7 @@ def build_argv(route_name: str, executable: str, model_id: str, effort: str,
     if spec.workspace_flag:
         argv.extend((spec.workspace_flag, _argv_element(workspace, "workspace")))
     if route_name == "codex":
-        for path in input_files:
-            if not Path(path).is_absolute() or "\x00" in path or ".." in Path(path).parts:
-                raise HarnessBindingError("invalid input path")
-            argv.extend(("--image", path))
+        argv.extend(_image_args(input_files))
     if spec.prompt_flag:
         argv.extend((spec.prompt_flag, _argv_element(prompt, "prompt")))
     else:
@@ -181,6 +197,11 @@ class CommandPlan:
     context: Mapping = field(default_factory=dict)
     input_files: tuple[str, ...] = ()
     review_assignment: Mapping = field(default_factory=dict)
+    #: Which operator policy produced this decision. Work already running stays
+    #: tied to the snapshot it was resolved against, even after publication.
+    policy_version: str = ""
+    policy_digest: str = ""
+    policy_origin: str = ""
     digest: str = field(default="")
 
     def __post_init__(self) -> None:
@@ -193,6 +214,9 @@ class CommandPlan:
             "registry_version": self.registry_version,
             "catalog_recorded_on": self.catalog_recorded_on,
             "source_digest": self.source_digest,
+            "policy_version": self.policy_version,
+            "policy_digest": self.policy_digest,
+            "policy_origin": self.policy_origin,
             "created_at": self.created_at,
             "expires_at": self.expires_at,
             "project": self.project,

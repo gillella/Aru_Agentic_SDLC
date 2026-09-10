@@ -7,6 +7,11 @@ exist right now. Both must agree before a plan exists.
 Nothing here reads the environment, discovers a binary on ``PATH`` or accepts a
 shell string. An executable is an absolute path whose basename the route already
 documents, and the environment handed to a worker is an explicit allowlist.
+
+Since #637 a binding also carries the immutable :class:`PolicySnapshot` it was
+built against, and refuses to mix two. Which subscriptions exist is operator
+policy; which of them is authenticated, occupied or unusable right now is a
+binding fact the Driver observes. The two are never conflated.
 """
 
 from __future__ import annotations
@@ -20,10 +25,12 @@ from typing import Mapping
 
 from .catalog import MODALITIES, Route, route as get_route
 from .errors import (
-    AccountScopeError, CapacityExhaustedError, HarnessBindingError, ModalityError,
+    AccountScopeError, AccountStateError, CapacityExhaustedError, HarnessBindingError,
+    ModalityError,
 )
 from .evidence import EvidenceStore
-from .registry import PROJECT_RE, AccountPolicy, account
+from .policy import PolicySnapshot, default_snapshot, from_document, load as load_policy
+from .registry import PROJECT_RE, AccountPolicy
 
 BINDING_SCHEMA = "aru.personas.fleet-binding/v1"
 
@@ -117,6 +124,10 @@ class AccountBinding:
     sessions_in_use: int = 0
     #: Set when the provider has told the operator this account is unusable.
     unavailable_reason: str = ""
+    #: The immutable policy this account was read from. Two bindings resolved
+    #: against two snapshots never share state; there is no global to patch.
+    snapshot: PolicySnapshot = field(default_factory=default_snapshot,
+                                     repr=False, compare=False)
 
     def __post_init__(self) -> None:
         policy = self.policy
@@ -160,7 +171,7 @@ class AccountBinding:
 
     @property
     def policy(self) -> AccountPolicy:
-        return account(self.account_id)
+        return self.snapshot.account(self.account_id)
 
     @property
     def identity_digest(self) -> str:
@@ -178,7 +189,29 @@ class AccountBinding:
                 + (" " + self.policy.restriction if self.policy.restriction else "")
             )
 
+    def require_state(self) -> None:
+        """Refuse a new reservation on a draining or disabled subscription.
+
+        This is a *reservation* refusal only. Work already running keeps this
+        account, its policy snapshot and its cumulative lineage; nothing here
+        stops a worker, erases audit history, cancels provider billing or
+        revokes a credential. Actual drain execution belongs to #631/#636.
+        """
+        state = self.policy.state
+        if state == "draining":
+            raise AccountStateError(
+                f"{self.account_id} is draining: no new reservation is made on it. Work "
+                "already running keeps this account and its recorded lineage."
+            )
+        if state != "enabled":
+            raise AccountStateError(
+                f"{self.account_id} is {state} in the current policy and takes no "
+                "reservation. Removing it from configuration is not a provider "
+                "cancellation or a credential revocation."
+            )
+
     def require_capacity(self) -> None:
+        self.require_state()
         if self.unavailable_reason:
             raise CapacityExhaustedError(
                 f"{self.account_id} is unusable: {self.unavailable_reason}"
@@ -195,6 +228,7 @@ class AccountBinding:
                 "allowed_projects": list(self.allowed_projects),
                 "max_sessions": self.max_sessions,
                 "sessions_in_use": self.sessions_in_use,
+                "state": self.policy.state,
                 "env_names": sorted(self.env)}
 
 
@@ -209,6 +243,8 @@ class FleetBinding:
     evidence: EvidenceStore
     #: Optional specialists stay refused unless named here *and* freshly probed.
     enabled_optional: frozenset[str] = field(default=frozenset())
+    #: The one policy this whole binding was resolved against.
+    snapshot: PolicySnapshot = field(default_factory=default_snapshot, repr=False)
 
     def __post_init__(self) -> None:
         for name, harness in self.harnesses.items():
@@ -216,12 +252,42 @@ class FleetBinding:
                 raise HarnessBindingError(
                     f"harness keyed {name!r} declares route {harness.route!r}"
                 )
+        for bound in self.accounts:
+            if bound.snapshot.digest != self.snapshot.digest:
+                raise AccountScopeError(
+                    f"{bound.account_id} was built against policy "
+                    f"{bound.snapshot.digest[:12]} but the fleet binding carries "
+                    f"{self.snapshot.digest[:12]}; one binding reads exactly one snapshot"
+                )
         profiles = [str(Path(v).resolve()) for a in self.accounts for v in a.env.values()]
         if len(profiles) != len(set(profiles)):
             raise AccountScopeError("account profiles must be distinct; aliases are not capacity")
         seen = [a.account_id for a in self.accounts]
         if len(seen) != len(set(seen)):
             raise AccountScopeError("an account is bound more than once")
+
+    def require_capacity(self, bound: AccountBinding) -> None:
+        """Every reservation on one capacity key counts, whichever alias asked.
+
+        Two account identifiers may name one subscription. The shared quota is
+        the sum of what is reserved across all of them, and the ceiling is the
+        lowest one any of them observed, so an extra alias can never raise it.
+        """
+        bound.require_capacity()
+        siblings = [a for a in self.accounts if a.capacity_key == bound.capacity_key]
+        if len(siblings) < 2:
+            return
+        used = sum(a.sessions_in_use for a in siblings)
+        ceiling = min(a.max_sessions for a in siblings)
+        declared = self.snapshot.account(bound.account_id).concurrency
+        if declared is not None:
+            ceiling = min(ceiling, declared)
+        if used >= ceiling:
+            raise CapacityExhaustedError(
+                f"capacity key {bound.capacity_key} is fully reserved across "
+                f"{', '.join(sorted(a.account_id for a in siblings))} ({used}/{ceiling}); "
+                "aliasing one subscription under a second identifier is not new capacity"
+            )
 
     def harness(self, route_name: str) -> HarnessBinding:
         try:
@@ -232,7 +298,10 @@ class FleetBinding:
             ) from exc
 
     def accounts_for(self, route_name: str) -> tuple[AccountBinding, ...]:
-        return tuple(a for a in self.accounts if a.policy.route == route_name)
+        """Bound accounts for one route, in the operator's declared preference order."""
+        found = [a for a in self.accounts if a.policy.route == route_name]
+        found.sort(key=lambda a: a.policy.priority)
+        return tuple(found)
 
     def require(self, account_id: str) -> AccountBinding:
         for candidate in self.accounts:
@@ -243,6 +312,8 @@ class FleetBinding:
     def to_dict(self) -> dict:
         return {
             "schema": BINDING_SCHEMA,
+            "policy": {"version": self.snapshot.version, "digest": self.snapshot.digest,
+                       "origin": self.snapshot.origin},
             "harnesses": {k: v.to_dict() for k, v in sorted(self.harnesses.items())},
             "accounts": [a.to_dict() for a in self.accounts],
             "enabled_optional": sorted(self.enabled_optional),
@@ -255,6 +326,7 @@ class FleetBinding:
     def from_dict(cls, raw: dict, base: Path | None = None) -> "FleetBinding":
         if raw.get("schema") != BINDING_SCHEMA:
             raise HarnessBindingError("fleet binding has an unsupported schema")
+        snapshot = _snapshot_from(raw.get("policy"), base)
         harnesses = {
             name: HarnessBinding(
                 route=name, executable=spec["executable"], workspace=spec["workspace"],
@@ -272,6 +344,7 @@ class FleetBinding:
                 max_sessions=spec.get("max_sessions", 1),
                 sessions_in_use=spec.get("sessions_in_use", 0),
                 unavailable_reason=spec.get("unavailable_reason", ""),
+                snapshot=snapshot,
             )
             for spec in (raw.get("accounts") or ())
         )
@@ -288,7 +361,8 @@ class FleetBinding:
                 "fleet binding must reference a capability-evidence file or embed one"
             )
         return cls(harnesses=harnesses, accounts=accounts, evidence=store,
-                   enabled_optional=frozenset(raw.get("enabled_optional", ())))
+                   enabled_optional=frozenset(raw.get("enabled_optional", ())),
+                   snapshot=snapshot)
 
     @classmethod
     def load(cls, path: str | Path) -> "FleetBinding":
@@ -298,6 +372,22 @@ class FleetBinding:
         except (OSError, ValueError) as exc:
             raise HarnessBindingError(f"fleet binding is unreadable: {exc}") from exc
         return cls.from_dict(raw, base=location.resolve().parent)
+
+
+def _snapshot_from(spec: object, base: Path | None) -> PolicySnapshot:
+    """A binding references an operator policy document, embeds one, or uses defaults."""
+    if spec is None:
+        return default_snapshot()
+    if isinstance(spec, str):
+        location = Path(spec)
+        if not location.is_absolute() and base is not None:
+            location = base / location
+        return load_policy(location)
+    if isinstance(spec, dict):
+        return from_document(spec, origin="inline binding policy")
+    raise HarnessBindingError(
+        "fleet binding policy must reference a policy document path or embed one"
+    )
 
 
 def now_utc() -> datetime:

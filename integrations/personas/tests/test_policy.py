@@ -131,10 +131,10 @@ class RoutingTests(unittest.TestCase):
 
     def test_unsupported_route_effort_skips_without_translation(self):
         original = catalog.require_effort
-        def reject_fable(route, model, effort):
+        def reject_fable(route, model, effort, **rule):
             if model == "claude-fable-5-1":
                 raise UnsupportedEffortError("SYNTHETIC route rejects xhigh")
-            return original(route, model, effort)
+            return original(route, model, effort, **rule)
         with patch.object(catalog, "require_effort", reject_fable):
             plan = self.plan(self.architecture(major_unresolved_decision=True))
         self.assertEqual((plan.persona, plan.effort), ("astra-implementer", "xhigh"))
