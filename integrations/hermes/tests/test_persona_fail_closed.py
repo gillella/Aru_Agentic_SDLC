@@ -12,7 +12,7 @@ from aru_project_driver.config import DriverError
 
 def test_unclassified_task_is_refused(driver_env):
     config, state, worktree = driver_env
-    with pytest.raises(Exception):
+    with pytest.raises(persona_routing._personas.errors.UnknownTaskError):
         persona_routing.resolve_task_plan(
             config, state, "owner/repo", {"number": 101, "touches": ["src/app.py"]},
             "codex-astra", str(worktree), "feat/issue-101", "a" * 40,
@@ -21,7 +21,7 @@ def test_unclassified_task_is_refused(driver_env):
 
 def test_missing_scope_is_refused(driver_env):
     config, state, worktree = driver_env
-    with pytest.raises(Exception):
+    with pytest.raises(persona_routing._personas.errors.UnsafeScopeError):
         persona_routing.resolve_task_plan(
             config, state, "owner/repo",
             {"number": 101, "labels": ["aru-task:bounded_implementation"]},
@@ -32,7 +32,7 @@ def test_missing_scope_is_refused(driver_env):
 def test_corrupt_evidence_is_refused(driver_env):
     config, state, _ = driver_env
     (state.root / "probe_records.json").write_text("not json")
-    with pytest.raises(Exception):
+    with pytest.raises(DriverError):
         persona_routing.load_evidence_store(config, state)
 
 
