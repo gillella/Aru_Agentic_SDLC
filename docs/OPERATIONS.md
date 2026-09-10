@@ -1112,6 +1112,77 @@ The reverse change follows the normal PR, exact-head governed verification,
 external-review, and merge path.
 Never rewrite shared default-branch history.
 
+### Recover legacy merged-PR provenance
+
+Some PRs merged before author metadata was enforced carry no `author:` or
+`author-family:` label. Their linked issues stay CLOSED while still holding an
+active claim, so `create_pr.py --refresh-reviewer` cannot select a reviewer and
+a consumer Driver cannot admit new work.
+
+`create_pr.py --recover-legacy` repairs exactly that state and nothing else. The
+default is a read-only preview:
+
+```bash
+python3 scripts/create_pr.py \
+  --recover-legacy 207 --issue 206 \
+  --expected-head <full-40-character-historical-head> \
+  --agent m1 --author-family claude-code \
+  --author-github-login <merged-pr-author-actor> --json
+```
+
+Re-run the identical command with `--apply` to write. Recovery refuses unless
+the PR is a confirmed merged PR whose head equals `--expected-head` exactly, the
+body closes exactly the given issue, that issue is CLOSED, and the historical
+governed CI verdict for that same head is `success`.
+
+**Trust boundary for historical lineage.** The only accepted proof that a model
+family produced legacy work is a canonical `Co-Authored-By:` trailer, matched on
+its email address, in the message's real terminal trailer block — the block
+`git interpret-trailers --parse` returns, so a co-author line quoted in a fenced
+example, left in the middle of the message, followed by prose, or placed after
+git's `---` patch divider is not a trailer, and a co-author value must be one
+complete canonical mailbox rather than the first of several addresses
+— inside a commit whose signature GitHub itself reports as verified and whose
+authenticated committer is the merged PR actor. The attributed author is not that
+proof: GitHub verifies the committer's key and documents that the author address
+may differ. Everything else is operator-supplied text and proves nothing: Git
+display names, free commit prose, a quoted trailer, and the current
+`ARU_CODING_REVIEWERS` configuration. Configuration names who an identity is
+today; it is not evidence about the past, so it can only fail a declaration that
+disagrees with the attestation, never supply one. The `--author-family` you pass
+is a declaration that must match the attestation, not a substitute for it. A
+commit with no attestation, more than one distinct family, or an unverified
+signature fails closed. Genuinely ambiguous legacy history therefore stays
+unrecoverable by design; that is an unmet precondition to escalate, not a reason
+to loosen the rule.
+
+Recovery writes at most two things: the truthful `author:`/`author-family:`
+labels, and the single CLOSED `In Progress` -> CLOSED `In Review` step the
+finalizer requires. Every write re-reads the PR and issue first, re-parses the
+closing directive, and refuses on any observed drift.
+
+Both lifecycle authorities must agree. Every path - preview, apply, replay and
+the no-op - reads the linked Project card as well as the issue labels, and
+refuses when they disagree or the card is unreadable. A `set_status` rollback
+that fails can leave the label ahead of the card, so recovery never reports
+success from labels alone.
+
+Reporting distinguishes what is confirmed from what is merely attempted. If a
+label edit succeeds but its readback fails, the operation is reported as
+attempted with an unknown outcome, never as zero mutation. Partial receipts are
+printed at the CLI (as JSON with `--json`) and the command exits non-zero.
+
+**Recovery is not review.** It never sets Done, ticks an acceptance criterion,
+edits an issue body, removes a claim, selects or assigns a reviewer, or records
+an approval. Reviewer selection remains exclusively `--refresh-reviewer`, and
+`merge_pr.py --finalize` keeps refusing incomplete acceptance or review. The
+receipt comment it posts is audit evidence only.
+
+Known limitation: there is no proven route to submit a GitHub APPROVED review on
+an already-merged PR. That gap is an explicit blocker for closing out such work,
+not permission to treat a comment as an approval. Do not invent an alternate
+approval channel; escalate instead.
+
 ### Recover the pre-reset framework
 
 The full framework before the v0.2 reset is preserved at tag:
