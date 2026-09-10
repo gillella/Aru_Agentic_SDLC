@@ -88,7 +88,7 @@ def resume(controller, repo, work, receipt, available):
     if not quota.enabled(controller.config, repo) or receipt.get("outcome") not in {"quota_exhausted", "quota_checkpoint"}:
         return None
     policy, config = controller.config.project(repo)["quota_admission"], controller.config
-    attempts = sum(r.get("outcome") in {"quota_exhausted", "quota_checkpoint"} for r in controller.state.workers(repo)
+    attempts = sum(r.get("outcome") == "quota_exhausted" for r in controller.state.workers(repo)
                    if r["issue"] == work["issue"] and r.get("kind") != "review")
     if attempts > policy["max_recoveries"]:
         raise DriverError("quota recovery bound reached; owner must inspect retained checkpoint")
@@ -151,14 +151,23 @@ def settle(controller, repo, adapter):
               if r.get("quota_decision") and not r.get("quota_review_released")}
     for number in issues:
         summary = adapter.issue_summary(number)
-        if summary.get("state") == "CLOSED" and summary.get("status") == "Done":
+        authors = [r for r in controller.state.workers(repo) if r["issue"] == number and r.get("kind") != "review"]
+        latest = max(authors, key=lambda r: r["started_at"], default={})
+        blocked = latest.get("retry_blocked") and not any(controller._holds_reservation(r) for r in authors)
+        has_pr = any(number in p.get("issues", []) for p in adapter.snapshot()["prs"])
+        if summary.get("state") == "CLOSED" or (blocked and not has_pr):
             admission.release_review(controller.state, repo, number)
 
 
-def review_failure(controller, repo, binding):
+def refusal(controller, repo):
     decisions = read_json(controller.state.root / "quota-decisions" / (key(repo) + ".json"))["decisions"]
-    if any(word in decisions[-1]["reason"] for word in ("invalid", "mismatch", "contradictory", "changed", "unproven")):
-        raise DriverError("quota review evidence invalid; authority retained and retries fail closed")
+    return decisions[-1]["reason"]
+
+
+def review_failure(controller, repo, binding):
+    reason = refusal(controller, repo)
+    if not reason.startswith("quota exhausted;"):
+        raise DriverError(reason + "; assigned authority retained; completion/heartbeat owns revalidation")
     lane = controller.config.lane(repo, binding["reviewer"])
     receipt = {"id": uuid.uuid4().hex, "repo": repo, "agent": binding["reviewer"], "issue": binding["issue"],
                "kind": "review", "pr": binding["pr"], "head": binding["head"], "review": binding,

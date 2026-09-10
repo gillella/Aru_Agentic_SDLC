@@ -89,13 +89,18 @@ def validate_lane(lane, q):
 def validate_project(config, repo, project, policy):
     required = {"version", "max_age_seconds", "headroom_percent", "unknown_checkpoint_seconds",
                 "max_recoveries", "cooldown_seconds", "author_actor", "cold_start"}
-    if (not isinstance(policy, dict) or set(policy) != required or type(policy["version"]) is not int
+    optional = {"unknown_review_seconds", "unknown_max_attempts", "unknown_total_seconds", "review_escrow_seconds"}
+    if (not isinstance(policy, dict) or not required <= set(policy) or set(policy) - required - optional or type(policy["version"]) is not int
             or policy["version"] != 1 or not isinstance(policy["author_actor"], str)
             or not re.fullmatch(r"[A-Za-z0-9_-]+(?:\[bot\])?", policy["author_actor"])):
         raise DriverError("quota_admission requires explicit v1 policy and author actor")
     for field, low, high in (("max_age_seconds", 1, 300), ("headroom_percent", 1, 99),
-                             ("unknown_checkpoint_seconds", 0, 300), ("max_recoveries", 0, 3),
-                             ("cooldown_seconds", 60, 3600)):
+                             ("unknown_checkpoint_seconds", 0, 86400), ("max_recoveries", 0, 3),
+                             ("cooldown_seconds", 60, 3600), ("unknown_review_seconds", 0, 86400),
+                             ("unknown_max_attempts", 1, 32), ("unknown_total_seconds", 1, 86400),
+                             ("review_escrow_seconds", 60, 3600)):
+        if field not in policy:
+            continue
         if not number(policy[field], low, high):
             raise DriverError("quota policy bound invalid: " + field)
         if field != "headroom_percent" and type(policy[field]) is not int:

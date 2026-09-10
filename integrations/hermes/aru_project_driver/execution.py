@@ -332,7 +332,8 @@ def finish_worker(path: Path, record: dict, output, exit_code: int, config=None,
         # can revalidate and resume through the existing controller.
         if record.get("child_pid") is not None:
             record["process_reason"] = record.get("reason")
-            record.update(quota_worker.observe(Path(record["result_path"]), config.lane(record["repo"], record["agent"]), exit_code)
+            record.update(quota_worker.observe(Path(record["result_path"]), config.lane(record["repo"], record["agent"]), exit_code,
+                                               timed_out=record.get("quota_bound_expired", False))
                           if config and record.get("quota_decision") else permissions.observe_result(Path(record["result_path"]), exit_code))
     record.update(state="exited", exit_code=exit_code, finished_at=time.time())
     if config and record.get("quota_decision"):
@@ -372,6 +373,7 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
                 exit_code = process.wait(timeout=timeout)
             except subprocess.TimeoutExpired:
                 exit_code = 124
+                record["quota_bound_expired"] = bool(record.get("quota_decision", {}).get("checkpoint_seconds"))
                 record["reason"] = f"agent execution exceeded {timeout} seconds"
                 stop_process_group(process)
     except (OSError, DriverError, KernelAdapterError, subprocess.TimeoutExpired) as exc:

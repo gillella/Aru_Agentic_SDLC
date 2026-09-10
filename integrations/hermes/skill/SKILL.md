@@ -142,14 +142,21 @@ stays stopped. A denied launch never authorizes activation or another launcher.
 
 Worker exit is not approval. Reconcile reads the kernel's current-head verdict;
 valid approval returns to normal CI/merge/finalization, substantive defects to
-the implementation owner, and an exit/lost reservation without a verdict to
-governed reviewer recovery. A reviewer must never edit the code and approve it.
+the implementation owner, and genuine execution exhaustion/unavailability to governed reviewer recovery.
+For opted-in quota work, unknown/insufficient admission waits on the same assigned
+reviewer. Bounded unknown checkpoints continue that assignment within the explicit
+time/attempt allowance; they never consume reviewer recovery or permission epochs.
+Report notes through normal output: the supervisor saves them outside source and
+injects prior context on continuation, without extra worker file grants. At the
+owned limit, report retained progress and required operator scope/budget inspection. A reviewer must never edit the code and approve it.
 
 The adapter may refill multiple verified free lanes in one activation,
 rechecking capacity and reservations between assignments. Promote only
 already-approved, eligible Backlog work through canonical helpers. Do not
 invent new scope to consume quota. Unknown capacity, unreadable authority,
 rate limiting, and unresolved dependencies are blockers, not free resources.
+Only an explicit author/reviewer unknown-mode allowance accepts quota uncertainty;
+read `references/quota.md` for the limits. Never describe it as measured headroom.
 Avoid repeated full-board scans or unconditional model smoke tests. Use the
 available bounded snapshot and run substantive probes only when justified.
 

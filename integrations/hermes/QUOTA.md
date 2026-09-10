@@ -33,8 +33,12 @@ do not append unsupported permission flags to make an effort setting fit.
 | --- | --- |
 | `max_age_seconds` | Freshness bound, 1–300 seconds; future observations fail |
 | `headroom_percent` | Reserve 1–99 percentage points in each applicable pool window |
-| `unknown_checkpoint_seconds` | 0 blocks unknown; 1–300 explicitly permits a bounded partial checkpoint |
-| `max_recoveries` | 0–3 automatic continuations after quota exhaustion/checkpoints per issue |
+| `unknown_checkpoint_seconds` | 0 blocks unknown authors; 1–86400 permits bounded author work, capped by the lane execution timeout |
+| `unknown_review_seconds` | Optional; default 0 blocks unknown reviews; 1–86400 explicitly accepts bounded unknown review work |
+| `unknown_max_attempts` | Optional 1–32 child attempts per issue and role across identities/heads; default `max_recoveries + 1` |
+| `unknown_total_seconds` | Optional 1–86400 total seconds per issue and role; default per-attempt seconds times attempt bound |
+| `review_escrow_seconds` | Optional 60–3600 second review lease; default 900 |
+| `max_recoveries` | 0–3 automatic continuations after genuine quota exhaustion per issue; separate from unknown work |
 | `cooldown_seconds` | 60–3600 seconds before another attempt when no genuine reset exists |
 | `author_actor` | Operator-declared GitHub actor of author workers; canonical PR actor checks still apply |
 | `cold_start` | Explicit rows keyed by task class, conservative risk, exact model and effort |
@@ -46,6 +50,17 @@ percentage points, from 1 to 100. Classes are `implementation`, `remediation`,
 conservative risk-3 demand bucket; sensitive Markdown contracts never get a
 suffix-based downgrade. This demand assumption does not replace the kernel's
 actual-diff risk tier.
+Unknown mode is explicit risk acceptance, not measured headroom or a promise of
+completion. The example author/review allowance is 1800 seconds, eight attempts
+and 14400 total seconds for each role; choose these against real task duration
+and the lane execution timeout. Each child consumes its entire admitted allowance,
+even if it exits early, so rapid exits and missing completion times cannot defeat
+the bound. At the limit the Driver retains ownership and reports that the operator
+must inspect progress and task scope. It does not demand a permission epoch change
+or automatically reset the allowance. Known capacity can still admit ordinary work.
+Old opt-in configs remain readable; omitted unknown-review policy blocks reviews
+locally. Non-opted projects retain legacy behavior.
+
 Missing demand rows block that candidate. The example's amounts are deliberately
 operator-configurable assumptions, not measured capacity or promises of completion.
 
@@ -89,7 +104,9 @@ position, determines short versus long. A weekly-only response leaves the short
 window unknown. An additional spend-control window is unsupported and produces
 unknown instead of ignoring a constraint. The explicit model/pool mapping is
 operator policy; a provider `normalModelSlug` mismatch is refused. Unknown model
-alias mapping must not be guessed during rollout. Provider prohibition, including
+alias mapping must not be guessed during rollout. The genuine `codex_bengalfox`
+pool exposed both windows but no `normalModelSlug`; that is not evidence that it
+serves `gpt-6-astra`. Do not configure that mapping without supported model evidence. Provider prohibition, including
 ordinary-usage or spend-control denial, overrides positive percentages. Missing
 ordinary-usage permission is unknown, not inferred recovery. Duplicate/conflicting
 pools, malformed/nonfinite/negative/out-of-range values, expired resets and stale
@@ -125,14 +142,33 @@ using fresh canonical reviewer inventory and a distinct actor/family. This is a
 budget estimate, never an authority assignment. The canonical helper can assign
 another reviewer, whose actual launch must pass its own gates. Review escrow is
 replaced on continuation, consumed at review dispatch, released on failed work,
-or released after a live closed/Done read. It cannot authorize lifecycle progress.
+any live CLOSED issue, or a blocked author without an open PR. Every shared-account
+reservation scan also expires leases and releases stopped projects' escrow, even
+when those projects never reconcile again. Missing older leases expire 900 seconds
+after the receipt start. Expiry relinquishes advisory capacity only: later author
+and reviewer launches must revalidate all observations, budgets and authority.
+A stopped child's actual worker reservation lasts while its capacity lock is held.
+These leases cannot authorize lifecycle progress.
 
-Unknown capacity permits only a configured partial checkpoint with a supervisor
-timeout and an outside-worktree checkpoint path. An independent reviewer must
-still be eligible, but its capacity is explicitly unproven; completing the full
-task is not admitted. A valid checkpoint result permits only bounded further
-continuation. An interrupted/malformed/unsupported result remains blocked. Timeout
-may preserve only the worktree diff if the agent did not finish its checkpoint.
+Unknown capacity permits explicitly configured bounded author and reviewer work.
+Both legs retain demand estimates, any actually observed window constraints,
+shared-account exclusion, and independent reviewer eligibility. An unknown review
+leg can accompany a known author; the author still ranks ahead of unknown authors.
+The decision records the unknown observation and time allowance, never fabricated
+percentage headroom. A full authorized task may finish within that allowance;
+GitHub remains the only completion and review authority.
+
+The supervisor writes a private, per-project/issue/role/attempt checkpoint note
+outside source from bounded native output. Workers report notes through normal
+output, requiring no extra sandbox grants or out-of-worktree file writes. Review
+notes use the same channel and grant no source edits. Continuations receive the
+previous note inline and keep the claimed worktree. A timeout may leave only a
+partial diff when the CLI emits nothing until exit; no completed step is inferred.
+Supervisor-proven expiry with empty Claude output or well-formed unfinished Codex
+events becomes `quota_checkpoint`, with bounded same-owner continuation. Successful
+bounded steps also continue on the same assignment. Actual denials, malformed
+nonempty output and unsupported error envelopes remain blocked. Unknown budget
+limits and checkpoints never require a permission-policy revision.
 
 A validated Claude error result containing the native session/weekly-limit
 message and no permission denial or authentication error is `quota_exhausted`,
@@ -142,7 +178,8 @@ evidence and other errors remain fail closed. Ambiguous text such as
 `resets 11:30am (America/New_York)` never yields a fabricated reset epoch.
 All aliases/pools share account cooldown. Fresh numeric exhausted-window resets
 can set its deadline; otherwise `until` is a bounded retry time with `reset_at:null`.
-An opted-in project may reclassify an older `worker_error` only by rereading its
+A generic alias exhaustion never shortens a longer existing cooldown or erases a
+genuine reset. An opted-in project may reclassify an older `worker_error` only by rereading its
 retained, supervised Claude JSON result at the exact private result path. It
 preserves the previous outcome marker and anchors cooldown to the original finish
 time, not each heartbeat. Text-only, missing, malformed, denied or still-live
@@ -156,8 +193,10 @@ family and exact model/effort, before an authored PR, through canonical
 may refuse. An interrupted transition is recorded and requires owner reconciliation,
 not automatic repair. Cross-family transfers are withheld because current canonical
 PR authority has one author-family field; operational receipts cannot silently
-replace it. Assigned-review failure uses the existing one owned canonical recovery
-event. Stop, completion wake and heartbeat ownership remain unchanged.
+replace it. Unknown/insufficient admission retains the assigned reviewer and waits locally;
+checkpoints resume that assignment until its configured bound. Genuine exhaustion
+or execution unavailability uses the existing owned canonical recovery event.
+Invalid results and real denials retain their fail-closed gate. Stop, completion wake and heartbeat ownership remain unchanged.
 
 ## Calibration, limits, rollback and #631 handoff
 

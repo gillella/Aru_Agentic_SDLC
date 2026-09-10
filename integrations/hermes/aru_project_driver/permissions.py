@@ -153,9 +153,6 @@ def compile_policy(config, record: dict, adapter, run, *, preflight: bool = Fals
               f"Read(/{kernel}/scripts/**)"]
     if not preflight:
         allow += [f"Edit(/{body})"]
-        if record.get("quota_checkpoint") and not reviewing:
-            safe_path(record["quota_checkpoint"])
-            allow += [f"Read(/{record['quota_checkpoint']})", f"Edit(/{record['quota_checkpoint']})"]
         if not reviewing:
             allow += [f"Edit(/{directory}/{p})" for p in task["touches"]]
     lane = config.lane(repo, identity)

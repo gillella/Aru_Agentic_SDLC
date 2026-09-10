@@ -45,37 +45,6 @@ def test_second_slot_rechecks_shared_alias_budget_after_first_reservation(qh, mo
             os.close(fd)
 
 
-def test_real_supervisor_enforces_unknown_checkpoint_timeout(qh, monkeypatch):
-    old = terminal(qh)
-    qh.config.project(REPO)["quota_admission"]["unknown_checkpoint_seconds"] = 1
-    monkeypatch.setattr(execution, "KernelAdapter", lambda *args: qh.kernel)
-    monkeypatch.setattr(quota_collect, "collect", lambda c, r, i: observation(c.lane(r, i), state="unknown"))
-    lane = qh.config.lanes["codex-one"]
-    worker = {**old, "kind": "implementation", "prompt": "fixture", "review": None}
-    quota_worker.prepare(qh.config, qh.state, worker, qh.kernel)
-    worker["id"] = "bounded-child"
-    lock = qh.state.capacity_path(lane["capacity_key"])
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    import fcntl
-    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
-    os.write(fd, worker["id"].encode())
-    write_json(qh.state.worker_path(worker["id"]), worker)
-    waits = []
-    class Child:
-        pid = 456
-        def wait(self, timeout):
-            waits.append(timeout)
-            raise execution.subprocess.TimeoutExpired("fixture", timeout)
-    monkeypatch.setattr(execution, "_start_agent", lambda *args: Child())
-    monkeypatch.setattr(execution, "stop_process_group", lambda p: None)
-    monkeypatch.setattr("aru_project_driver.scheduler.schedule_wake", lambda *a, **k: None)
-    assert execution.worker_main(qh.config, worker["id"], fd) == 124
-    receipt = qh.state.worker(worker["id"])
-    assert waits == [1] and receipt["retry_blocked"] and receipt["outcome"] == "result_unavailable"
-    assert receipt["quota_checkpoint"].startswith(str(qh.state.root / "checkpoints"))
-
-
 def test_completed_quota_delta_is_bounded_private_history_not_token_conversion(qh, monkeypatch):
     record = terminal(qh)
     before = observation(qh.config.lanes["codex-one"], 90)
@@ -104,11 +73,11 @@ def test_installer_copies_quota_runbook_and_complete_modules_without_activation(
     source = Path(__file__).resolve().parents[1]
     result = installer.install(source, qh.config.path)
     names = {Path(item["source"]).name for item in result["files"]}
-    assert {"quota.py", "quota_collect.py", "quota_admission.py", "quota_boundary.py", "quota_worker.py", "QUOTA.md"} <= names
+    assert {"quota.py", "quota_collect.py", "quota_admission.py", "quota_boundary.py", "quota_worker.py", "quota_checkpoint.py", "QUOTA.md"} <= names
     assert result["activated"] is False and result["applied"] is False
     assert not (qh.config.hermes_home / "scripts").exists()
     example = Config(source / "config.example.json", bind=False)
-    assert example.project("example/project")["quota_admission"]["unknown_checkpoint_seconds"] == 0
+    assert example.project("example/project")["quota_admission"]["unknown_review_seconds"] == 1800
 
 
 def test_status_exposes_bounded_decisions_cooldown_and_owner(qh, monkeypatch):
@@ -168,15 +137,10 @@ def test_demand_risk_comes_from_canonical_scope_classification(qh, tmp_path, pat
     assert estimate["risk"] == bucket
 
 
-@pytest.mark.parametrize("path", ["/private/checkpoint.md", "/private/checkpoint*.md"])
-def test_checkpoint_grant_keeps_literal_path_policy(scoped, path):
-    scoped[1]["quota_checkpoint"] = path
-    if "*" in path:
-        with pytest.raises(DriverError, match="literal absolute paths"):
-            permissions.compile_policy(*scoped)
-    else:
-        policy = permissions.compile_policy(*scoped)
-        assert f"Edit(/{path})" in policy["argv"] and f"Read(/{path})" in policy["argv"]
+def test_checkpoint_notes_do_not_add_sandbox_grants(scoped):
+    before = permissions.compile_policy(*scoped)
+    scoped[1]["quota_checkpoint"] = "/private/checkpoint.json"
+    assert permissions.compile_policy(*scoped) == before
 
 
 def test_alias_cooldown_suppresses_real_availability_without_inventing_reset(qh, monkeypatch):

@@ -133,9 +133,10 @@ def test_admission_refusals(qh, monkeypatch, case):
 
 def test_unknown_is_only_bounded_checkpoint_and_invalid_never_is(qh, monkeypatch):
     qh.config.project(REPO)["quota_admission"]["unknown_checkpoint_seconds"] = 60
+    qh.config.project(REPO)["quota_admission"]["unknown_review_seconds"] = 60
     monkeypatch.setattr(quota_collect, "collect", lambda c, r, i: observation(c.lane(r, i), state="unknown"))
     decision = admission.evaluate(qh.config, qh.state, REPO, "codex-one", issue(1), "implementation", qh.kernel)
-    assert decision["checkpoint_seconds"] == 60 and decision["demand"]["task_class"] == "checkpoint"
+    assert decision["checkpoint_seconds"] == 60 and decision["demand"]["confidence"] == "unknown"
     monkeypatch.setattr(quota_collect, "collect", lambda *args: {"state": "unknown"})
     with pytest.raises(DriverError, match="invalid quota"):
         admission.evaluate(qh.config, qh.state, REPO, "codex-one", issue(1), "implementation", qh.kernel)
@@ -176,7 +177,7 @@ def test_config_refuses_unsafe_mapping_and_policy(qh, case):
     elif case == "headroom":
         policy["headroom_percent"] = float("nan")
     elif case == "checkpoint":
-        policy["unknown_checkpoint_seconds"] = 301
+        policy["unknown_checkpoint_seconds"] = 86401
     else:
         policy["cold_start"].append(policy["cold_start"][0])
     qh.config.path.write_text(json.dumps(qh.config.raw))

@@ -351,7 +351,8 @@ class Controller:
                 actions = [self._converge_review(repo, adapter, a, launched) for a in plan["actions"]]
                 timers = self.sync_reviews(repo, actions)
                 for work in plan["resumes"]:
-                    self._resume_one(repo, adapter, work, launched)
+                    if blocked_work := self._resume_one(repo, adapter, work, launched):
+                        actions.append(blocked_work)
                 for identity in quota_boundary.ranked(self, repo, adapter, plan["free_lanes"]):
                     self._fill_one(repo, adapter, identity, launched)
                 if not self.state.project(repo)["enabled"]:
@@ -381,7 +382,8 @@ class Controller:
             return
         task = adapter.revalidate(work["issue"], agent=work["agent"])
         if not quota_boundary.approved(self, repo, adapter, identity, task, "remediation"):
-            return
+            return {**work, "type": "worker_blocked", "execution": "blocked",
+                    "reason": quota_boundary.refusal(self, repo), "owner": "Hermes Driver completion/heartbeat"}
         work = quota_boundary.transfer(self, repo, adapter, work)
         # Idempotent canonical branch recovery also verifies any
         # recorded path; a receipt is never filesystem authority.
@@ -435,6 +437,11 @@ class Controller:
                               key=lambda r: r["started_at"])
             if matching and matching[-1].get("retry_blocked") and not permissions.retry_blocker(self.config, matching[-1], work):
                 return self._start_review(repo, adapter, work, binding, launched, recover)
+            if matching and quota.enabled(self.config, repo):
+                if matching[-1].get("outcome") == "quota_checkpoint":
+                    return self._start_review(repo, adapter, work, binding, launched, recover)
+                if matching[-1].get("retry_blocked"):
+                    raise DriverError(matching[-1].get("reason") or "quota review result blocked; authority retained")
             if matching:
                 return self._recover_review(repo, adapter, work, matching[-1], launched, recover)
             return self._start_review(repo, adapter, work, binding, launched, recover)

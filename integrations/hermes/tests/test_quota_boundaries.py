@@ -113,21 +113,22 @@ def test_account_aliases_share_reservations_across_projects(qh):
     old = terminal(qh)
     receipt = qh.launch(qh.config, REPO, "codex-one", 1, old["worktree"], quota_decision=d)
     receipt["repo"] = "other/project"
+    qh.state.save("other/project", {**qh.state.project("other/project"), "enabled": True})
     write_json(qh.state.worker_path(receipt["id"]), receipt)
     held = admission.reservations(qh.config, qh.state, qh.config.lanes["codex-two"]["quota"]["account_sha256"], "codex")
     assert held == {"primary": 30, "secondary": 30}
     assert admission.reservations(qh.config, qh.state, qh.config.lanes["claude-one"]["quota"]["account_sha256"], "codex") == {"primary": 10, "secondary": 10}
 
 
-def test_assigned_review_quota_uses_existing_owned_recovery(qh, monkeypatch):
+def test_insufficient_review_retains_authority_without_recovery(qh, monkeypatch):
     assigned_review(qh)
     qh.kernel.issues = [qh.kernel.record(1)]
     monkeypatch.setattr(quota_collect, "collect", lambda c, r, i: observation(c.lane(r, i), 1))
     result = qh.controller.reconcile(REPO)
     assert not result["launched"]
-    assert sum(c[0] == "refresh_reviewer" for c in qh.kernel.calls) == 1
+    assert sum(c[0] == "refresh_reviewer" for c in qh.kernel.calls) == 0
     qh.controller.reconcile(REPO)
-    assert sum(c[0] == "refresh_reviewer" for c in qh.kernel.calls) == 1
+    assert sum(c[0] == "refresh_reviewer" for c in qh.kernel.calls) == 0
 
 
 def test_cumulative_family_independence_at_review_boundary(qh):
@@ -184,6 +185,7 @@ def test_claude_637_quota_envelope_is_not_permission_policy_failure(qh, tmp_path
     assert observed["quota_reset_at"] is None and "11:30am" not in json.dumps(observed)
     record = terminal(qh, "claude-one")
     qh.config.project(REPO)["quota_admission"]["unknown_checkpoint_seconds"] = 60
+    qh.config.project(REPO)["quota_admission"]["unknown_review_seconds"] = 60
     monkeypatch.setattr(quota_collect, "collect", lambda c, r, i: observation(c.lane(r, i), state="unknown"))
     record["quota_decision"] = admission.evaluate(qh.config, qh.state, REPO, "claude-one", issue(1), "implementation", qh.kernel)
     record.update(observed, child_pid=123)

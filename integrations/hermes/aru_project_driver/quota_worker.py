@@ -5,7 +5,7 @@ import json
 import re
 import time
 
-from . import permissions, quota, quota_admission as admission, quota_collect
+from . import permissions, quota, quota_admission as admission, quota_collect, quota_checkpoint
 from .config import DriverError
 from .state import key, write_json
 
@@ -32,14 +32,7 @@ def prepare(config, state, record, adapter, *, exclude=None):
     record["quota_decision"] = admission.evaluate(config, state, record["repo"], record["agent"],
         task, record["kind"], adapter, exclude=exclude, review=record.get("review"))
     record["policy_fingerprint"] = permissions.fingerprint(config, record["repo"], record["agent"])
-    seconds = record["quota_decision"]["checkpoint_seconds"]
-    if seconds:
-        checkpoint = state.root / "checkpoints" / (key(record["repo"] + str(record["issue"])) + ".md")
-        checkpoint.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        record["quota_checkpoint"] = str(checkpoint)
-        record["prompt"] += (f"\nQuota is unknown. This is only a {seconds}-second checkpoint, not a full task. "
-            f"Finish a small reversible step and save actual progress, tests and next step at {checkpoint}. "
-            "Stop before this bound; preserve claim, worktree and partial work. No completion guarantee.")
+    quota_checkpoint.prepare(state, record)
 
 
 def argv(lane, record):
@@ -51,7 +44,10 @@ def argv(lane, record):
     return command
 
 
-def observe(path, lane, exit_code):
+def observe(path, lane, exit_code, *, timed_out=False):
+    if timed_out and quota_checkpoint.interrupted(path, lane):
+        return {"outcome": "quota_checkpoint", "retry_blocked": False,
+                "reason": "supervisor quota bound expired; retained artifacts need bounded continuation"}
     if lane["family"] == "claude-code":
         return permissions.observe_result(path, exit_code, quota_errors=True)
     if lane["family"] == "openai-codex":
@@ -61,7 +57,7 @@ def observe(path, lane, exit_code):
                 if len(raw) > permissions.RESULT_BYTES:
                     stream.truncate(permissions.RESULT_BYTES)
                     raise ValueError("oversized")
-            events = [json.loads(line) for line in raw.splitlines()]
+            events = [json.loads(line, object_pairs_hook=quota_collect.unique_fields) for line in raw.splitlines()]
             if not events or any(not isinstance(e, dict) or not isinstance(e.get("type"), str)
                                  or ("item" in e and not isinstance(e["item"], dict)) for e in events):
                 raise ValueError("invalid")
@@ -78,7 +74,7 @@ def observe(path, lane, exit_code):
                     and all(quota.number(failure["usage"].get(k)) for k in ("input_tokens", "cached_input_tokens", "output_tokens"))):
                 return {"outcome": "reported_success", "retry_blocked": True,
                         "reason": "worker reported success; unchanged task requires governed progress", "governed_completion": False}
-        except (OSError, ValueError):
+        except (OSError, ValueError, DriverError):
             pass
     return {"outcome": "result_unavailable", "retry_blocked": True,
             "reason": "quota worker result invalid or unsupported; unchanged retries blocked"}
@@ -93,17 +89,16 @@ def finish(config, state, record):
                                     "worktree": record["worktree"], "checkpoint": record.get("quota_checkpoint")}
     record["quota_measurement"] = {"state": "unknown", "reason": "no-comparable-full-completion-observations"}
     # Release a speculative review budget for a failed/checkpoint author; a
-    # reported full task retains its budget until review dispatch or live Done.
+    # reported full task retains its budget only for the bounded review lease.
     if record.get("outcome") != "reported_success":
         record["quota_review_released"] = True
     if record.get("outcome") == "reported_success" and decision["checkpoint_seconds"]:
         record.update(outcome="quota_checkpoint", retry_blocked=False, quota_review_released=True,
                       reason="bounded quota checkpoint ended; completion/heartbeat owns limited continuation")
+    quota_checkpoint.save(state, record)
     if record.get("outcome") == "quota_exhausted":
         until = now + config.project(record["repo"])["quota_admission"]["cooldown_seconds"]
-        write_json(state.root / "cooldowns" / (key(lane["capacity_key"]) + ".json"), {
-            "until": until, "reset_at": None, "pool": lane["quota"]["pool"], "reason": "quota-exhausted",
-            "continuation_owner": record["id"]})
+        quota_checkpoint.cooldown(state, lane, until, owner=record["id"])
     if record.get("child_pid") is None:
         return
     try:
@@ -113,9 +108,7 @@ def finish(config, state, record):
         if after["state"] == "exhausted":
             resets = [w["reset_at"] for w in after["windows"].values() if w["remaining"] == 0]
             if resets:
-                write_json(state.root / "cooldowns" / (key(lane["capacity_key"]) + ".json"), {
-                    "until": max(resets), "reset_at": max(resets), "pool": lane["quota"]["pool"],
-                    "reason": "quota-exhausted", "continuation_owner": record["id"]})
+                quota_checkpoint.cooldown(state, lane, max(resets), max(resets), record["id"])
         before = decision["observation"]
         if (record.get("outcome") != "reported_success" or decision["checkpoint_seconds"]
                 or before["state"] != "known" or after["state"] != "known"
@@ -143,7 +136,7 @@ def validate_record(record):
     if decision is None:
         return
     if (not isinstance(decision, dict) or decision.get("schema") != "aru.quota-admission/v1"
-            or not quota.number(decision.get("checkpoint_seconds"), 0, 300)
+            or not quota.number(decision.get("checkpoint_seconds"), 0, 86400)
             or not isinstance(decision.get("author_families"), list)
             or not decision["author_families"] or any(not isinstance(f, str) or f not in quota.FAMILIES for f in decision["author_families"])
             or not isinstance(decision.get("reservations"), list) or not 1 <= len(decision["reservations"]) <= 2):

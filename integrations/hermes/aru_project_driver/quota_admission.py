@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 
-from . import quota, quota_collect
+from . import quota, quota_collect, quota_checkpoint
 from .config import DriverError
 from .state import key, read_json, write_json
 
@@ -61,7 +61,7 @@ def reservations(config, state, account, pool, exclude=None, consume_review=None
         if live and not decision and lane.get("quota", {}).get("account_sha256") == account:
             raise DriverError("quota shared account has an unmeasured legacy reservation")
         for allocation in decision.get("reservations", []):
-            held = live if allocation["role"] == "worker" else not r.get("quota_review_released", False)
+            held = live if allocation["role"] == "worker" else escrow_held(state, r)
             if allocation["role"] == "review" and (r["repo"], r["issue"]) == consume_review:
                 held = False
             if held and allocation["account"] == account and allocation["pool"] != pool:
@@ -72,7 +72,7 @@ def reservations(config, state, account, pool, exclude=None, consume_review=None
     return result
 
 
-def capacity(config, state, repo, identity, estimate, *, exclude=None, consume_review=None):
+def capacity(config, state, repo, identity, estimate, *, exclude=None, consume_review=None, unknown_seconds=0):
     lane, now = config.lane(repo, identity), time.time()
     q, policy = lane["quota"], config.project(repo)["quota_admission"]
     cooldown = read_json(state.root / "cooldowns" / (key(lane["capacity_key"]) + ".json"), {"until": 0})
@@ -84,12 +84,11 @@ def capacity(config, state, repo, identity, estimate, *, exclude=None, consume_r
     held = reservations(config, state, q["account_sha256"], q["pool"], exclude, consume_review)
     if obs["state"] == "exhausted":
         resets = [w["reset_at"] for w in obs["windows"].values() if w["remaining"] == 0]
-        write_json(state.root / "cooldowns" / (key(lane["capacity_key"]) + ".json"), {
-            "until": max(resets) if resets else now + policy["cooldown_seconds"],
-            "reset_at": max(resets) if resets else None, "reason": "quota-exhausted", "pool": q["pool"]})
+        quota_checkpoint.cooldown(state, lane, max(resets) if resets else now + policy["cooldown_seconds"],
+                                  max(resets) if resets else None)
         raise DriverError("quota exhausted; shared-account cooldown recorded")
     checkpoint = obs["state"] in {"unknown", "unavailable"}
-    if checkpoint and (not policy["unknown_checkpoint_seconds"] or estimate["task_class"] != "checkpoint"):
+    if checkpoint and not unknown_seconds:
         raise DriverError("quota unknown; only explicit bounded checkpoint work is eligible")
     margins = []
     for name, window in obs["windows"].items():
@@ -114,18 +113,16 @@ def evaluate(config, state, repo, identity, task, kind, adapter, *, exclude=None
     if review and (lane["family"] in families or review["author_actor"].lower() == review["reviewer_actor"].lower()):
         raise DriverError("quota reviewer is not independent of cumulative author family/actor")
     estimate = demand(config, state, repo, identity, task, kind)
-    try:
-        obs, margin, checkpoint = capacity(config, state, repo, identity, estimate, exclude=exclude,
-                                           consume_review=(repo, task["number"]))
-    except DriverError as exc:
-        if "quota unknown;" not in str(exc) or not policy["unknown_checkpoint_seconds"] or review:
-            raise
-        estimate = demand(config, state, repo, identity, task, "checkpoint")
-        obs, margin, checkpoint = capacity(config, state, repo, identity, estimate, exclude=exclude)
+    seconds = policy.get("unknown_review_seconds", 0) if review else policy["unknown_checkpoint_seconds"]
+    obs, margin, checkpoint = capacity(config, state, repo, identity, estimate, exclude=exclude,
+        consume_review=(repo, task["number"]), unknown_seconds=seconds)
+    if checkpoint:
+        seconds = quota_checkpoint.allowance(config, state, repo, identity, task["number"], bool(review), exclude)
+        estimate = {**estimate, "confidence": "unknown", "uncertainty": "operator-bounded-risk-acceptance-not-measured-headroom"}
     q = lane["quota"]
     allocation = {"role": "worker", "account": q["account_sha256"], "pool": q["pool"], "percent": estimate["percent"]}
     result = {"schema": "aru.quota-admission/v1", "observation": obs, "demand": estimate,
-              "margin": margin, "checkpoint_seconds": policy["unknown_checkpoint_seconds"] if checkpoint else 0,
+              "margin": margin, "checkpoint_seconds": seconds if checkpoint else 0,
               "reservations": [allocation], "author_families": families,
               "continuation_owner": "Hermes Driver completion/heartbeat", "selected": identity,
               "review_candidates": [], "policy_hash": quota.digest(str(sorted(policy.items())))}
@@ -136,7 +133,7 @@ def evaluate(config, state, repo, identity, task, kind, adapter, *, exclude=None
 
 def review_budget(config, state, repo, task, adapter, result, exclude):
     policy = config.project(repo)["quota_admission"]
-    families, checkpoint = result["author_families"], result["checkpoint_seconds"]
+    families = result["author_families"]
     status = adapter.reviewer_status()
     if status.get("schema") != "aru.reviewer-status/v3" or status.get("valid") is not True:
         raise DriverError("quota independent reviewer eligibility is unproven")
@@ -164,22 +161,21 @@ def review_budget(config, state, repo, task, adapter, result, exclude):
                 if other_lane["family"] != candidate["family"] or state.capacity_busy(other_lane["capacity_key"], other_lane.get("max_sessions", 1)):
                     raise DriverError("review account unavailable")
                 review_demand = demand(config, state, repo, other, task, "review")
-                if checkpoint:
-                    result["review_budget"] = {"identity": other, "demand": review_demand,
-                                               "state": "unknown-full-task-forbidden", "authority": "eligibility-only"}
-                    return result
-                review_obs, review_margin, _ = capacity(config, state, repo, other, review_demand,
-                    exclude=exclude, consume_review=(repo, task["number"]))
-                options.append((review_margin, other, other_lane, review_demand, review_obs))
+                review_obs, review_margin, unknown = capacity(config, state, repo, other, review_demand,
+                    exclude=exclude, consume_review=(repo, task["number"]), unknown_seconds=policy.get("unknown_review_seconds", 0))
+                seconds = quota_checkpoint.allowance(config, state, repo, other, task["number"], True, exclude) if unknown else 0
+                options.append((not unknown, review_margin, other, other_lane, review_demand, review_obs, seconds))
                 reason = "eligible-budget"
             except DriverError as exc:
                 reason = str(exc)
         result["review_candidates"].append({"identity": other, "reason": reason})
     if not options:
-        raise DriverError("quota no eligible independent reviewer with known budget")
-    _, other, other_lane, review_demand, review_obs = max(options, key=lambda x: (x[0], x[1]))
+        raise DriverError("quota no eligible independent reviewer with admitted budget")
+    _, _, other, other_lane, review_demand, review_obs, seconds = max(options, key=lambda x: x[:3])
     result["review_budget"] = {"identity": other, "observation": review_obs, "demand": review_demand,
+                               "checkpoint_seconds": seconds, "uncertainty": "operator-bounded-risk-acceptance" if seconds else review_demand["uncertainty"],
                                "authority": "budget-only-canonical-helper-selects-reviewer"}
+    result["review_expires_at"] = time.time() + policy.get("review_escrow_seconds", 900)
     result["reservations"].append({"role": "review", "account": other_lane["quota"]["account_sha256"],
                                    "pool": other_lane["quota"]["pool"], "percent": review_demand["percent"]})
     return result
@@ -190,3 +186,16 @@ def release_review(state, repo, issue):
         if receipt["issue"] == issue and receipt.get("quota_decision"):
             receipt["quota_review_released"] = True
             write_json(state.worker_path(receipt["id"]), receipt)
+
+
+def escrow_held(state, receipt):
+    if receipt.get("quota_review_released"):
+        return False
+    expiry = receipt["quota_decision"].get("review_expires_at", receipt["started_at"] + 900)
+    if not quota.number(expiry):
+        raise DriverError("quota review lease invalid")
+    if expiry <= time.time() or not state.project(receipt["repo"])["enabled"]:
+        receipt.update(quota_review_released=True, quota_review_release_reason="lease-expired-or-project-stopped")
+        write_json(state.worker_path(receipt["id"]), receipt)
+        return False
+    return True

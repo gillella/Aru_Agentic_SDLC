@@ -29,7 +29,7 @@ def _payload(source_root: Path, hermes_home: Path) -> list[tuple[Path, Path]]:
     if not (package / "driver.py").is_file() or not (skill / "SKILL.md").is_file():
         raise InstallError("Source package is incomplete: driver.py and skill/SKILL.md are required")
     quota_modules = [package / (name + ".py") for name in (
-        "quota", "quota_collect", "quota_admission", "quota_boundary", "quota_worker")]
+        "quota", "quota_collect", "quota_admission", "quota_boundary", "quota_worker", "quota_checkpoint")]
     if any(path.exists() for path in quota_modules) and not all(path.is_file() for path in quota_modules):
         raise InstallError("Source quota package is incomplete")
     result = []

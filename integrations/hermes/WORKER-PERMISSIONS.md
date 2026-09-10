@@ -85,6 +85,11 @@ The [quota boundary](QUOTA.md) distinguishes a valid native session/weekly-limit
 error with empty denials from permission failures. Its opt-in recovery uses an
 account cooldown and bounded continuation, without a permission-policy revision.
 Malformed results, authentication errors and real denials remain blocked.
+A supervisor-proven quota time bound with empty Claude output or valid unfinished
+Codex events is a bounded checkpoint, not a permission revision reason. The
+supervisor saves checkpoint notes from stdout outside source and injects prior
+notes into continuation prompts; no checkpoint Read/Edit or sandbox grants are
+added, including for independent reviewers.
 
 Receipts retain at most 8 KiB of serialized result observation details; larger
 observations retain only outcome/blocker flags and a pointer to `result_path`.
