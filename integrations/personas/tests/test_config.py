@@ -14,14 +14,22 @@ import sys
 import tempfile
 import unittest
 
-from integrations.personas import *
-from integrations.personas.errors import *
+from integrations.personas import (
+    AccountBinding, AuthorIdentity, resolve, TaskRequest, validate_assignment, verify_payload,
+)
+from integrations.personas.errors import (
+    AccountScopeError, AccountStateError, NoEligibleCandidateError, PersonaPolicyError,
+    PolicyDocumentError, PolicyPrivilegeError, ReviewIndependenceError, RiskEvidenceError,
+    UnknownTaskError, UnsupportedEffortError,
+)
 from integrations.personas.policy import (
     KERNEL_INVARIANTS, POLICY_SCHEMA, default_snapshot, from_document,
     load_policy_document, preview, publish,
 )
 from integrations.personas.registry import MANDATORY_STOP_CRITERIA, PERSONAS
-from .support import *
+from .support import (
+    CONTEXT, HEAD, NOW, PROJECT, assignment, change_probes, fleet, packet, request,
+)
 
 ROOT = Path(__file__).resolve().parents[3]
 
