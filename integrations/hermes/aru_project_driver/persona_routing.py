@@ -29,29 +29,43 @@ def require_package() -> None:
     if not is_available():
         raise DriverError("personas package is not available on PYTHONPATH")
 
-def verify_policy_integrity(snapshot: Any = None) -> None:
-    """Validate policy source digest and snapshot invariants."""
+def enabled(config: Config, repo: str) -> bool:
+    """Explicit migration switch; package importability never enables dispatch."""
+    value = config.project(repo).get("personas_required", config.raw.get("personas_required", False))
+    if type(value) is not bool:
+        raise DriverError("personas_required must be an explicit boolean")
+    return value
+
+
+def verify_policy_integrity(snapshot: Any = None, *, source_digest=None, policy_digest=None) -> None:
+    """Compare configured integrity pins, rather than validating hash length alone."""
     require_package()
     policy = snapshot or _personas.default_snapshot()
-    source_digest = policy_source_digest()
-    if not source_digest or len(source_digest) != 64:
-        raise DriverError("invalid policy source digest")
-    if policy.digest and hasattr(policy, "validate"):
-        policy.validate()
+    if source_digest is not None and source_digest != policy_source_digest():
+        raise DriverError("persona source integrity mismatch")
+    if policy_digest is not None and policy_digest != policy.digest:
+        raise DriverError("persona policy integrity mismatch")
 
 def get_policy_snapshot(config: Config, repo: str | None = None) -> Any:
     """Return the validated PolicySnapshot for the configuration."""
     require_package()
     pconf = config.project(repo) if repo and repo in config.projects else {}
-    doc = pconf.get("personas_policy") or config.raw.get("personas_policy")
+    doc = pconf.get("personas_policy", config.raw.get("personas_policy"))
     if isinstance(doc, str):
         path = Path(doc)
         snapshot = _personas.load_policy_document(path if path.is_absolute() else (config.path.parent / path).resolve())
     elif isinstance(doc, dict):
         snapshot = _personas.from_document(doc, origin="Driver config personas_policy")
-    else:
+    elif doc is None:
         snapshot = _personas.default_snapshot()
-    verify_policy_integrity(snapshot)
+    else:
+        raise DriverError("personas_policy must be a file path or policy object")
+    pins = {name: pconf.get(name, config.raw.get(name))
+            for name in ("personas_source_digest", "personas_policy_digest")}
+    if repo and enabled(config, repo) and any(not value for value in pins.values()):
+        raise DriverError("persona-required dispatch needs source and policy digest pins")
+    verify_policy_integrity(snapshot, source_digest=pins["personas_source_digest"],
+                            policy_digest=pins["personas_policy_digest"])
     return snapshot
 
 def load_evidence_store(config: Config, state: State, *, now: datetime | None = None) -> Any:
@@ -61,8 +75,7 @@ def load_evidence_store(config: Config, state: State, *, now: datetime | None = 
     if isinstance(ev_spec, str):
         path = Path(ev_spec)
         p = path if path.is_absolute() else (config.path.parent / path).resolve()
-        if p.is_file():
-            return _personas.EvidenceStore.load(p)
+        return _personas.EvidenceStore.load(p)
     elif isinstance(ev_spec, dict):
         return _personas.EvidenceStore.from_dict(ev_spec, origin="config capability_evidence")
 
@@ -71,11 +84,11 @@ def load_evidence_store(config: Config, state: State, *, now: datetime | None = 
     if records_file.is_file():
         try:
             data = json.loads(records_file.read_text())
-            raw_list = data if isinstance(data, list) else data.get("records", [])
+            raw_list = data if isinstance(data, list) else data["records"]
             for item in raw_list:
                 records.append(_personas.ProbeRecord.from_dict(item))
-        except Exception:
-            pass
+        except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            raise DriverError("persona capability evidence is unreadable") from exc
     return _personas.EvidenceStore(records=tuple(records), origin="Hermes Driver live state")
 
 def record_probe_result(state: State, record: Any) -> None:
@@ -85,9 +98,11 @@ def record_probe_result(state: State, record: Any) -> None:
     if records_file.is_file():
         try:
             data = json.loads(records_file.read_text())
-            existing = data if isinstance(data, list) else data.get("records", [])
-        except Exception:
-            pass
+            existing = data if isinstance(data, list) else data["records"]
+        except (OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            raise DriverError("existing persona probe records are unreadable; preserved") from exc
+    if not isinstance(existing, list) or any(not isinstance(item, dict) for item in existing):
+        raise DriverError("existing persona probe records must be an array of objects")
     key_tuple = (record.account_id, record.route, record.model_id, record.effort)
     filtered = [r for r in existing if (r.get("account_id"), r.get("route"), r.get("model_id"), r.get("effort")) != key_tuple]
     filtered.append(record.to_dict())
@@ -175,67 +190,37 @@ def build_fleet_binding(config: Config, state: State, repo: str, *,
     )
 
 def extract_author_identities(receipts: list[dict], snapshot: Any) -> tuple[Any, ...]:
-    """Preserve cumulative author lineage across persona/account switches and resumed workers."""
+    """Require explicit cumulative identities; never infer a model from an agent name."""
     require_package()
-    history, seen = [], set()
-    for r in receipts:
-        if r.get("kind") == "review":
+    history = []
+    for receipt in receipts:
+        if receipt.get("kind") == "review":
             continue
-        persona_id, actor = r.get("persona"), r.get("agent", "")
-        if not persona_id:
-            if "codex" in actor or "astra" in actor:
-                persona_id = "astra-implementer"
-            elif "sol" in actor:
-                persona_id = "sol-implementer"
-            elif "haiku" in actor:
-                persona_id = "haiku-triage"
-            elif "sonnet" in actor:
-                persona_id = "sonnet-reviewer"
-            else:
-                persona_id = "opus-implementer"
-        account_id = r.get("account_id") or r.get("capacity_key") or (
-            "openai-codex" if any(k in persona_id for k in ("codex", "astra", "sol")) else "claude-subscription-1"
-        )
-        ident_key = (persona_id, account_id, actor)
-        if ident_key not in seen:
-            seen.add(ident_key)
-            try:
-                history.append(_personas.AuthorIdentity(persona_id, account_id, actor, snapshot=snapshot))
-            except Exception:
-                pass
+        entries = receipt.get("author_history") or [receipt]
+        for entry in entries:
+            persona = entry.get("persona_id", entry.get("persona"))
+            account, actor = entry.get("account_id"), entry.get("actor")
+            if not all((persona, account, actor)):
+                raise DriverError("incomplete author history requires explicit reconciliation")
+            identity = _personas.AuthorIdentity(persona, account, actor, snapshot=snapshot)
+            if identity not in history:
+                history.append(identity)
     return tuple(history)
-
-def _classify_task(task: dict, touches: tuple[str, ...], labels: tuple[str, ...], kind: str) -> str:
-    for label in labels:
-        if label.startswith("aru-task:"):
-            return label.removeprefix("aru-task:")
-    title_body = (task.get("title", "") + " " + task.get("body", "")).lower()
-    if "architecture" in title_body:
-        return "architecture_decision"
-    if "needs-design" in labels:
-        return "design_evidence_analysis"
-    if kind == "remediation":
-        return "bounded_implementation"
-    if touches and all("docs" in t or t.endswith(".md") for t in touches) and not any(t.endswith((".py", ".sh", ".ts", ".go")) for t in touches):
-        return "triage_documentation"
-    if any(t.startswith("integrations/hermes") or "kernel" in t for t in touches):
-        return "security_implementation"
-    return "bounded_implementation"
 
 def resolve_task_plan(config: Config, state: State, repo: str, task: dict, agent: str,
                       worktree: str, branch: str, head: str, *,
                       kind: str = "implementation", pr: int | None = None,
                       author_history: tuple[Any, ...] = (), handoff_reason: str = "",
                       persona_override: str | None = None, effort_override: str | None = None,
-                      major_unresolved: bool = False, allow_optional: bool = True,
+                      major_unresolved: bool = False, allow_optional: bool = False,
                       input_files: tuple[str, ...] = (), now: datetime | None = None,
                       evidence: Any = None) -> Any:
     """Resolve one author or remediation task deterministically into a CommandPlan."""
     require_package()
     issue_num = task.get("number", task.get("issue"))
-    touches = tuple(task.get("touches", ())) or ("src/main.py",)
+    touches = tuple(task.get("touches", ()))
     labels = tuple(task.get("labels", ()))
-    task_class = _classify_task(task, touches, labels, kind)
+    task_class = task.get("task_class")  # classify() validates every structured label; no prose inference.
     policy = get_policy_snapshot(config, repo)
     if not author_history:
         workers = [r for r in state.workers(repo) if r.get("issue") == issue_num]
@@ -255,85 +240,33 @@ def resolve_task_plan(config: Config, state: State, repo: str, task: dict, agent
     fleet_b = build_fleet_binding(config, state, repo, worktree=worktree, snapshot=policy, now=now, evidence=evidence)
     return _personas.resolve(request, fleet_b, context, now=now)
 
-def _resolve_review_authors(binding: dict, state: State, repo: str, issue_num: int,
-                            policy: Any, author_actor: str, author_family: str) -> tuple[Any, ...]:
-    author_raw = binding.get("author_history")
-    if author_raw:
-        return tuple(
-            a if isinstance(a, _personas.AuthorIdentity) else _personas.AuthorIdentity(
-                a.get("persona", "opus-implementer"), a.get("account_id", "claude-subscription-1"),
-                a.get("actor", author_actor), snapshot=policy,
-            ) for a in author_raw
-        )
-    workers = [r for r in state.workers(repo) if r.get("issue") == issue_num]
-    history = extract_author_identities(workers, policy)
-    if history:
-        return history
-    is_codex = "codex" in author_family or "openai" in author_family
-    return (_personas.AuthorIdentity(
-        "astra-implementer" if is_codex else "opus-implementer",
-        "openai-codex" if is_codex else "claude-subscription-1",
-        author_actor, snapshot=policy,
-    ),)
-
-def _select_reviewer_persona(binding: dict, policy: Any,
-                             lineages: set[str], vendors: set[str]) -> str:
-    r_persona = binding.get("reviewer_persona")
-    if r_persona:
-        return r_persona
-    for p in policy.personas.values():
-        if p.performs("code_reviewer") and p.lineage not in lineages and p.lineage not in vendors:
-            return p.id
-    for p in policy.personas.values():
-        if p.performs("code_reviewer") and p.lineage not in lineages:
-            return p.id
-    return "sonnet-reviewer" if "anthropic-claude" not in lineages else "astra-implementer"
-
-def _select_reviewer_account(binding: dict, policy: Any, reviewer: Any,
-                             authors: tuple[Any, ...]) -> str:
-    r_account = binding.get("reviewer_account")
-    if r_account:
-        return r_account
-    auth_accs = {a.account_id for a in authors}
-    for a in policy.accounts.values():
-        if a.lineage == reviewer.lineage and a.route == reviewer.route and a.id not in auth_accs:
-            return a.id
-    return "claude-subscription-2" if "claude" in reviewer.lineage else "openai-codex"
-
 def resolve_review_plan(config: Config, state: State, repo: str, binding: dict,
-                        worktree: str, head: str, *,
+                        worktree: str, head: str, *, current_binding: dict | None = None,
                         now: datetime | None = None, evidence: Any = None) -> Any:
-    """Resolve an assigned coding review into a read-only CommandPlan."""
+    """Compile only an explicit assignment matching separately reread authority."""
     require_package()
-    pr_num, issue_num = binding["pr"], binding.get("issue", binding["pr"])
-    reviewer_actor = binding.get("reviewer_actor", "reviewer")
-    author_actor = binding.get("author_actor", binding.get("author", "author"))
-    author_family = binding.get("author_family", "")
-    touches = tuple(binding.get("touches", ("src/main.py",)))
-
+    if not isinstance(binding, dict) or current_binding is None or binding != current_binding:
+        raise DriverError("persona review requires separately reread matching kernel authority")
+    required = ("pr", "issue", "reviewer_actor", "reviewer_persona", "reviewer_account",
+                "authority", "authority_source", "external_first_reason", "touches", "author_history")
+    if any(not binding.get(name) for name in required) or binding.get("external_first_released") is not True:
+        raise DriverError("persona review assignment is incomplete")
+    if binding.get("repo") != repo or binding.get("head") != head:
+        raise DriverError("persona review project or current head mismatch")
     policy = get_policy_snapshot(config, repo)
-    authors = _resolve_review_authors(binding, state, repo, issue_num, policy, author_actor, author_family)
-    lineages, vendors = {a.family for a in authors}, {a.vendor for a in authors}
-
-    reviewer_persona = _select_reviewer_persona(binding, policy, lineages, vendors)
-    reviewer = policy.persona(reviewer_persona)
-    reviewer_account = _select_reviewer_account(binding, policy, reviewer, authors)
-
-    if reviewer_actor.casefold() in {a.actor.casefold() for a in authors}:
-        reviewer_actor = f"{reviewer_persona}-reviewer"
-
+    authors = extract_author_identities(binding["author_history"], policy)
     assignment = _personas.ReviewAssignment(
-        repo=repo, pr=pr_num, head=head, issue=issue_num,
-        risk_tier=binding.get("risk_tier", 1), authority=reviewer.lineage,
-        reviewer_persona=reviewer_persona, reviewer_actor=reviewer_actor,
-        reviewer_account=reviewer_account, authors=authors, touches=touches,
-        authority_source=binding.get("authority_source", "canonical kernel review authority"),
-        external_first_released=binding.get("external_first_released", True),
-        external_first_reason=binding.get("external_first_reason", "external provider unavailable"),
+        repo=repo, pr=binding["pr"], head=head, issue=binding["issue"],
+        risk_tier=binding["risk_tier"], authority=binding["authority"],
+        reviewer_persona=binding["reviewer_persona"], reviewer_actor=binding["reviewer_actor"],
+        reviewer_account=binding["reviewer_account"], authors=authors, touches=tuple(binding["touches"]),
+        authority_source=binding["authority_source"], external_first_released=True,
+        external_first_reason=binding["external_first_reason"],
     )
-    context = _personas.PromptContext(
-        worktree=str(Path(worktree).resolve()), branch=f"pull/{pr_num}/head", head=head, pr=pr_num,
-    )
-    fleet_b = build_fleet_binding(config, state, repo, worktree=worktree, snapshot=policy, now=now, evidence=evidence)
-    return _personas.plan_review(assignment, head, fleet_b, context, now=now, current_assignment=assignment)
-
+    context = _personas.PromptContext(worktree=str(Path(worktree).resolve()),
+                                    branch=f"pull/{binding['pr']}/head", head=head, pr=binding["pr"])
+    fleet = build_fleet_binding(config, state, repo, worktree=worktree, snapshot=policy,
+                               now=now, evidence=evidence)
+    # The equality above compares separate bridge observations before conversion.
+    return _personas.plan_review(assignment, head, fleet, context, now=now,
+                                current_assignment=assignment)

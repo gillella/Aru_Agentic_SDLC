@@ -199,40 +199,25 @@ resuming the consumer's own CI, review or merge workflow.
 See [references/runtime-contract.md](references/runtime-contract.md) when
 installing, checking event delivery, or diagnosing a stalled Loop.
 
-## Approved persona routing and model execution
+## Persona integration status: incomplete, not ready for activation
 
-The Driver routes author and review workloads through the approved 13-persona
-catalog and expert policy snapshot (`integrations/personas/`). Managed fleet
-entry points enforce exact route capabilities, deterministic task classification,
-reviewer independence, and model flags.
+The 13-persona policy package exists, but #631 is still being implemented and
+#636 has not established installed/live acceptance. Do not describe a green
+source test suite as an activated fleet.
 
-- **Enforcement boundary:** Managed fleet entry points (`driver.py reconcile`,
-  `driver.py launch`, and worker supervisor processes) strictly validate persona
-  policy source digests, bind fleet subscriptions, and enforce exact model and
-  effort parameters. Raw vendor CLI tools or manual local commands outside the
-  managed Driver boundary remain unmanaged and must not bypass governed routing.
-- **Author task resolution:** Tasks are classified strictly from issue metadata
-  and risk classification, resolving to primary persona candidates (e.g.,
-  `architecture_decision` -> `fable-architect`, `backend_feature` -> `astra-implementer`,
-  `security_hotfix` -> `sonnet-security-reviewer`).
-- **Architectural fallback chain:** When the primary candidate for an architectural
-  decision is unavailable, the deterministic fallback chain is traversed:
-  `fable-architect` -> `astra-implementer` -> `opus-implementer` (acting Chief Architect).
-- **Reviewer lineage independence:** Review dispatch enforces strict separation:
-  author and reviewer cannot share lineage (e.g., Claude-authored PRs cannot be
-  reviewed by Sonnet/Opus/Haiku; Codex-authored PRs cannot be reviewed by
-  Astra/Sol/Terra/Luna/Spark).
-- **Operator routing inspection:**
-  - Check persona catalog: `python3 -m integrations.personas catalog`
-  - Plan author routing: `python3 -m integrations.personas plan-task --repo OWNER/REPO --issue N`
-  - Plan review routing: `python3 -m integrations.personas plan-review --repo OWNER/REPO --pr N --author AUTHOR`
+`personas_required: true` explicitly opts a project into the in-progress
+integration and requires `personas_source_digest` and `personas_policy_digest`.
+Missing task classification, missing scope, broken evidence and conflicting
+review identity must refuse resolution. Projects without this explicit opt-in
+continue their existing legacy lane behavior; that path is outside persona
+enforcement. Package importability alone never enables the integration.
 
-## Reporting
+The current source still needs complete account selection and reservation,
+exact authenticated probes, child-spawn revalidation, trusted review metadata
+and operator task wiring. Do not enable this incomplete path in live projects
+or install it as a completed #631 rollout. No `driver.py launch` operation has
+been delivered. Use the installed Driver's `--help` for supported operations.
 
-Keep healthy unchanged activations silent (`[SILENT]`). Notify only on useful
-progress, completion, a new failure, or a decision requiring the user. Lead
-with actual running/waiting/stopped state and the verified next continuation.
-Never say the Loop is working solely because source tests pass or a local
-webhook health endpoint responds. Subscription utilization is a means to
-complete useful approved work, not a reason to bypass review or manufacture
-unnecessary tasks.
+A human running vendor CLIs directly and non-default Hermes profiles remain
+outside managed enforcement. Keep source, installation, provider access and
+live task acceptance as separate evidence.

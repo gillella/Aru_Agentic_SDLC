@@ -244,27 +244,37 @@ def _bind_persona_plan(config: Config, state: State, repo: str, identity: str,
                        issue: int, directory: str, kind: str, pr: int | None,
                        head: str | None, review: dict | None, record: dict) -> None:
     from . import persona_routing
-    if not persona_routing.is_available():
+    if not persona_routing.enabled(config, repo):
         return
     try:
+        persona_routing.require_package()
+        adapter = config.kernel_adapter(repo, KernelAdapter)
         if kind == "review":
-            plan = persona_routing.resolve_review_plan(config, state, repo, review, directory, head or "0" * 40)
+            current = adapter.review_binding(pr, review)
+            plan = persona_routing.resolve_review_plan(config, state, repo, review, directory,
+                                                       head, current_binding=current)
         else:
-            task_data = {"issue": issue, "number": issue}
+            task = adapter.revalidate(issue, identity)
+            observed_head = run_bounded(["git", "rev-parse", "HEAD"], Path(directory))
+            branch = run_bounded(["git", "symbolic-ref", "--short", "HEAD"], Path(directory))
+            if observed_head.returncode or branch.returncode or (head and observed_head.stdout.strip() != head):
+                raise DriverError("persona worktree branch/head is unverified or changed")
             plan = persona_routing.resolve_task_plan(
-                config, state, repo, task_data, identity, directory,
-                branch=f"feat/issue-{issue}", head=head or "0" * 40, kind=kind, pr=pr
-            )
-        if plan:
-            record.update(
-                persona=plan.persona, model_id=plan.model_id, effort=plan.effort,
-                effective_role=plan.effective_role, plan_digest=plan.digest,
-                policy_digest=plan.policy_digest, fallback_reason=plan.fallback_reason,
-                skipped=[s.to_dict() for s in plan.skipped], plan_argv=list(plan.argv),
-                plan_prompt=plan.prompt, plan_env=dict(plan.env),
-            )
-    except Exception:
-        pass
+                config, state, repo, task, identity, directory,
+                branch=branch.stdout.strip(), head=observed_head.stdout.strip(), kind=kind, pr=pr)
+        if plan is None:
+            raise DriverError("persona resolver returned no plan")
+        lane = config.lane(repo, identity)
+        if plan.capacity_key != lane["capacity_key"] or plan.lineage != lane["family"]:
+            raise DriverError("persona selection needs a matching account/author lane before reservation")
+        record.update(persona=plan.persona, model_id=plan.model_id, effort=plan.effort,
+                      effective_role=plan.effective_role, plan_digest=plan.digest,
+                      policy_digest=plan.policy_digest, fallback_reason=plan.fallback_reason,
+                      skipped=[item.to_dict() for item in plan.skipped], plan_argv=list(plan.argv),
+                      plan_prompt=plan.prompt, plan_env=dict(plan.env), account_id=plan.account_id,
+                      author_history=list(plan.author_history), persona_plan=plan.to_dict())
+    except Exception as exc:
+        raise DriverError(f"persona dispatch refused: {exc}") from exc
 
 def _spawn_worker_process(config: Config, state: State, record: dict,
                           repository: Path, policy: dict | None, directory: Path,
@@ -321,10 +331,14 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
                 "prompt": prompt_for(repo, issue, identity, config.kernel_root, str(directory),
                                      kind, pr, head, review)}
     policy = None if quota.enabled(config, repo) else prepare_policy(config, prepared, repository)
+    _bind_persona_plan(config, state, repo, identity, issue, str(directory), kind, pr, head, review, prepared)
+    if prepared.get("persona_plan") and (policy or quota.enabled(config, repo)):
+        raise DriverError("persona dispatch cannot use an overriding legacy permission/quota command")
     descriptor, slot = _acquire_capacity_lock(state, lane)
     worker_id = uuid.uuid4().hex
     _initialize_reservation(descriptor, worker_id)
     record = {
+        **prepared,
         "id": worker_id, "repo": repo, "agent": identity, "issue": issue,
         "kind": kind, "pr": pr, "head": head, "worktree": str(directory),
         "review": review,
@@ -332,7 +346,6 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
         "state": "launching", "pid": None, "admission_stop": admission_stop,
         "prompt": prepared["prompt"],
     }
-    _bind_persona_plan(config, state, repo, identity, issue, str(directory), kind, pr, head, review, record)
     retries.stamp(config, record, work_type)
     process = _spawn_worker_process(config, state, record, repository, policy, directory, descriptor, worker_id, admission_stop)
     return {"id": worker_id, "pid": process.pid, "agent": identity,

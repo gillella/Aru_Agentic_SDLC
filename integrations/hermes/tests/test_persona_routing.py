@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -189,8 +190,13 @@ def test_reviewer_lineage_independence(driver_env):
         "reviewer_actor": "reviewer",
         "risk_tier": 2,
     }
+    review_claude.update(repo="owner/repo", issue=101, head="a" * 40,
+                         reviewer_persona="astra-implementer", reviewer_account="openai-codex",
+                         authority=personas.default_snapshot().persona("astra-implementer").lineage,
+                         authority_source="synthetic kernel authority", external_first_released=True,
+                         external_first_reason="synthetic external refusal", touches=["src/app.py"])
     plan_claude = persona_routing.resolve_review_plan(
-        config, state, "owner/repo", review_claude, str(worktree), "a" * 40
+        config, state, "owner/repo", review_claude, str(worktree), "a" * 40, current_binding=dict(review_claude)
     )
     assert plan_claude is not None
     # Must NOT be Claude lineage (no Sonnet, Opus, Haiku)
@@ -205,8 +211,13 @@ def test_reviewer_lineage_independence(driver_env):
         "reviewer_actor": "reviewer",
         "risk_tier": 2,
     }
+    review_codex.update(repo="owner/repo", issue=102, head="b" * 40,
+                        reviewer_persona="opus-implementer", reviewer_account="claude-subscription-1",
+                        authority=personas.default_snapshot().persona("opus-implementer").lineage,
+                        authority_source="synthetic kernel authority", external_first_released=True,
+                        external_first_reason="synthetic external refusal", touches=["src/app.py"])
     plan_codex = persona_routing.resolve_review_plan(
-        config, state, "owner/repo", review_codex, str(worktree), "b" * 40
+        config, state, "owner/repo", review_codex, str(worktree), "b" * 40, current_binding=dict(review_codex)
     )
     assert plan_codex is not None
     # Must NOT be Codex lineage (no Astra, Sol, Terra, Luna, Spark)
@@ -214,8 +225,21 @@ def test_reviewer_lineage_independence(driver_env):
     assert plan_codex.persona in ("sonnet-reviewer", "sonnet-security-reviewer", "opus-implementer", "grok-reviewer", "gemini-reviewer")
 
 
-def test_execution_launch_injects_persona_metadata_and_argv(driver_env):
+def prepare_managed_dispatch(config, monkeypatch):
+    config.raw["projects"]["owner/repo"].update(
+        personas_required=True, personas_source_digest=persona_routing.policy_source_digest(),
+        personas_policy_digest=personas.default_snapshot().digest)
+    adapter = SimpleNamespace(revalidate=lambda issue, agent: {
+        "number": issue, "touches": ["src/app.py"], "labels": ["aru-task:bounded_implementation"]})
+    monkeypatch.setattr(config, "kernel_adapter", lambda *args: adapter)
+    monkeypatch.setattr(execution, "run_bounded", lambda args, *rest: SimpleNamespace(
+        returncode=0, stdout="a" * 40 if "rev-parse" in args else "feat/issue-100"))
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *args, **kwargs: SimpleNamespace(pid=999999))
+
+
+def test_execution_launch_injects_persona_metadata_and_argv(driver_env, monkeypatch):
     config, state, worktree = driver_env
+    prepare_managed_dispatch(config, monkeypatch)
     receipt = execution.launch(config, "owner/repo", "codex-astra", 105, str(worktree))
     
     assert receipt["id"]
@@ -229,8 +253,9 @@ def test_execution_launch_injects_persona_metadata_and_argv(driver_env):
     assert record["model_id"] in ("claude-opus-5", "gpt-6-astra", "gpt-5.6-sol")
 
 
-def test_worker_output_materializes_plan_argv(driver_env):
+def test_worker_output_materializes_plan_argv(driver_env, monkeypatch):
     config, state, worktree = driver_env
+    prepare_managed_dispatch(config, monkeypatch)
     receipt = execution.launch(config, "owner/repo", "codex-astra", 106, str(worktree))
     lane = config.lane("owner/repo", "codex-astra")
     record = state.worker(receipt["id"])
@@ -273,10 +298,10 @@ def test_verify_policy_integrity_validates(driver_env):
 
 
 def test_verify_policy_integrity_rejects_tampered_source(monkeypatch):
-    monkeypatch.setattr(persona_routing, "policy_source_digest", lambda: "bad_digest")
+    monkeypatch.setattr(persona_routing, "policy_source_digest", lambda: "f" * 64)
     from aru_project_driver.config import DriverError
-    with pytest.raises(DriverError, match="invalid policy source digest"):
-        persona_routing.verify_policy_integrity()
+    with pytest.raises(DriverError, match="source integrity mismatch"):
+        persona_routing.verify_policy_integrity(source_digest="a" * 64)
 
 
 def test_installer_packages_personas_payload(tmp_path):
