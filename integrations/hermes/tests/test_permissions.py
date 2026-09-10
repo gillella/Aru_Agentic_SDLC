@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sys
 from copy import deepcopy
 from pathlib import Path
@@ -171,6 +172,39 @@ def test_no_write_preflight_has_real_capability_commands_without_launch_or_bindi
     assert ["/usr/bin/python3", "--version"] in result["commands"]
     assert not any("pytest" in c or "push" in c or "review" in c for c in result["commands"])
     assert "AGENTS.md" in result["argv"][-1] and "bare OK is insufficient" in result["argv"][-1]
+
+
+@pytest.mark.parametrize("preflight", [False, True])
+def test_compiled_prompt_retains_literal_commands_and_denial_stop(scoped, preflight):
+    result = compiled(scoped, preflight=preflight)
+    prompt = result["argv"][-1]
+    for command in result["commands"]:
+        literal = shlex.join(command)
+        assert prompt.splitlines().count(literal) == 1
+        assert f"Bash({literal})" in result["argv"]
+    for instruction in ("Bash.command must equal one listed command byte-for-byte",
+                        "one command per Bash invocation", "no extra flags or alternate spellings",
+                        "no shell wrappers, composition, substitutions, pipelines or suffixes",
+                        "Do not append echo/printf or exit-code reporting",
+                        "Use native tool output and result metadata",
+                        "Stop on the first permission denial", "do not retry with alternate tools"):
+        assert instruction in prompt
+
+
+def test_preflight_preserves_managed_read_grants_without_write_or_test_grants(scoped):
+    managed, probe = compiled(scoped), compiled(scoped, preflight=True)
+    assert probe["commands"] == managed["commands"][:10]
+    for plan in (managed, probe):
+        argv = plan["argv"]
+        grants = argv[argv.index("--allowedTools") + 1:argv.index("--output-format")]
+        assert [g for g in grants if g.startswith("Bash(")] == [
+            f"Bash({shlex.join(c)})" for c in plan["commands"]]
+    assert [g for g in probe["argv"] if g.startswith("Read(")] == [
+        g for g in managed["argv"] if g.startswith("Read(")]
+    assert not any(g.startswith(("Edit(", "Write(")) for g in probe["argv"])
+    assert probe["argv"][-5:-1] == ["--disallowedTools", "Edit", "Write", "--verbose"]
+    assert probe["argv"][:5] == managed["argv"][:5]
+    assert managed["argv"][managed["argv"].index("--output-format") + 1] == "json"
 
 
 @pytest.mark.parametrize("payload,code,outcome", [
