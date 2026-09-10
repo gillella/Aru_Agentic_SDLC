@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -45,10 +46,9 @@ from review_evidence import (  # noqa: F401 -- compatibility exports
 )
 from reviewer_probe import ProbeRunner, _default_probe
 from merge_state import pull_changed_paths
-from legacy_recovery import (
-    label_values,
-    one_label_value as _one_label_value,
-    recover_from_args,
+from legacy_recovery import (  # shared label readers and the recovery CLI surface
+    LegacyRecoveryError, label_values, one_label_value as _one_label_value,
+    recover_from_args, recovery_failure, recovery_summary, require_exclusive_mode,
 )
 from review_policy import (
     ACTIVITY_GRACE_SECONDS,
@@ -706,30 +706,13 @@ def _resolve_body_argument(args: argparse.Namespace) -> str | None:
     return args.body
 
 
-def _reject_unexpected_args(args: argparse.Namespace, message: str, names: tuple[str, ...]) -> None:
-    if any(getattr(args, name) for name in names):
-        raise KernelError(message)
-
-
 def main() -> int:
     parser = _parser()
     args = parser.parse_args()
     plain_output = ""
     try:
+        require_exclusive_mode(args)
         if args.reviewer_status:
-            _reject_unexpected_args(
-                args,
-                "reviewer status cannot include PR mutation arguments",
-                (
-                    "issue",
-                    "title",
-                    "body",
-                    "body_file",
-                    "author_family",
-                    "refresh_reviewer",
-                    "coding_reviewer_unavailable",
-                ),
-            )
             result = reviewer_status(
                 probe=args.probe_reviewers,
                 author_identity=args.agent or "",
@@ -744,31 +727,14 @@ def main() -> int:
                 f"({policy['timeout_seconds']}s timeout; valid={result['valid']})"
             )
         elif args.recover_legacy:
-            _reject_unexpected_args(
-                args,
-                "legacy recovery cannot include PR creation arguments",
-                ("title", "body", "body_file", "coding_reviewer_unavailable"),
-            )
             result = recover_from_args(args)
-            plain_output = f"legacy recovery {result['action']}: {result['planned']}"
+            plain_output = recovery_summary(result)
         elif args.refresh_reviewer:
-            _reject_unexpected_args(
-                args,
-                "review refresh cannot include PR creation arguments",
-                (
-                    "issue",
-                    "title",
-                    "body",
-                    "body_file",
-                    "agent",
-                    "author_family",
-                    "author_github_login",
-                ),
-            )
             result = refresh_assignment(
                 args.refresh_reviewer,
                 coding_unavailable_reason=args.coding_reviewer_unavailable,
             )
+            plain_output = f"review authority: {result['authority']} ({result['reason']})"
         else:
             if args.coding_reviewer_unavailable:
                 raise KernelError("coding reviewer unavailability requires --refresh-reviewer")
@@ -786,12 +752,13 @@ def main() -> int:
                 author_actor=args.author_github_login or "",
             )
             plain_output = str(result["url"])
+    except LegacyRecoveryError as exc:
+        print(recovery_failure(exc, args.json), file=sys.stderr)
+        return 1
     except KernelError as exc:
         parser.error(str(exc))
     if args.json:
         json_print(result)
-    elif args.refresh_reviewer:
-        print(f"review authority: {result['authority']} ({result['reason']})")
     else:
         print(plain_output)
     return 0

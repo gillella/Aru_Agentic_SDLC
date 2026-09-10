@@ -1133,17 +1133,38 @@ python3 scripts/create_pr.py \
 Re-run the identical command with `--apply` to write. Recovery refuses unless
 the PR is a confirmed merged PR whose head equals `--expected-head` exactly, the
 body closes exactly the given issue, that issue is CLOSED, and the historical
-governed CI verdict for that same head is `success`. The declared identity must
-equal the issue's recorded claimant and resolve to a configured coding family;
-the merged head commit must not contradict it. A Git author name alone is never
-accepted as model-lineage proof, so an unknown family fails closed rather than
-being inferred.
+governed CI verdict for that same head is `success`.
+
+**Trust boundary for historical lineage.** The only accepted proof that a model
+family produced legacy work is a canonical `Co-Authored-By:` trailer, matched on
+its email address, inside a commit whose signature GitHub itself reports as
+verified and whose author GitHub attributes to the merged PR actor. Everything
+else is operator-supplied text and proves nothing: Git display names, free commit
+prose, a trailer quoted inside a message body, and the current
+`ARU_CODING_REVIEWERS` configuration. Configuration names who an identity is
+today; it is not evidence about the past, so it can only fail a declaration that
+disagrees with the attestation, never supply one. The `--author-family` you pass
+is a declaration that must match the attestation, not a substitute for it. A
+commit with no attestation, more than one distinct family, or an unverified
+signature fails closed. Genuinely ambiguous legacy history therefore stays
+unrecoverable by design; that is an unmet precondition to escalate, not a reason
+to loosen the rule.
 
 Recovery writes at most two things: the truthful `author:`/`author-family:`
 labels, and the single CLOSED `In Progress` -> CLOSED `In Review` step the
-finalizer requires. Every write re-reads the PR and issue first and refuses on
-observed drift; a partial write is reported explicitly with what already landed.
-Replay is idempotent and fails closed against conflicting metadata.
+finalizer requires. Every write re-reads the PR and issue first, re-parses the
+closing directive, and refuses on any observed drift.
+
+Both lifecycle authorities must agree. Every path - preview, apply, replay and
+the no-op - reads the linked Project card as well as the issue labels, and
+refuses when they disagree or the card is unreadable. A `set_status` rollback
+that fails can leave the label ahead of the card, so recovery never reports
+success from labels alone.
+
+Reporting distinguishes what is confirmed from what is merely attempted. If a
+label edit succeeds but its readback fails, the operation is reported as
+attempted with an unknown outcome, never as zero mutation. Partial receipts are
+printed at the CLI (as JSON with `--json`) and the command exits non-zero.
 
 **Recovery is not review.** It never sets Done, ticks an acceptance criterion,
 edits an issue body, removes a claim, selects or assigns a reviewer, or records

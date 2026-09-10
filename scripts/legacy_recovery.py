@@ -24,8 +24,9 @@ from common import (
     AUTHOR_PREFIX,
     CODING_REVIEWERS,
     KernelError,
+    StatusPreconditionError,
     acceptance_items,
-    agent_family,
+    configured_reviewer_family,
     ensure_label,
     gh_json,
     issue,
@@ -35,20 +36,25 @@ from common import (
     run,
     same_github_actor,
     set_status,
+    project_item_status,
     status_of,
 )
 from merge_state import linked_issues, pull_request
 
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 RECEIPT_MARKER = "aru-legacy-recovery:v1"
-# Historical authorship hints, used only to refuse a declaration the merged
-# head contradicts. They never select or invent a family on their own.
-FAMILY_EVIDENCE = {
-    "claude-code": ("claude-code", "claude", "anthropic"),
-    "openai-codex": ("openai-codex", "codex", "openai"),
-    "xai-cursor": ("xai-cursor", "cursor", "xai"),
-    "google-antigravity": ("google-antigravity", "antigravity", "gemini"),
+# Trust boundary for historical lineage. The only evidence accepted is a
+# canonical co-author trailer carried by a commit whose signature GitHub itself
+# verified and attributed to the merged PR actor. Display names, free commit
+# prose and the current reviewer configuration are all operator-supplied text,
+# so none of them can establish what produced historical work.
+ATTESTED_FAMILY_EMAILS = {
+    "noreply@anthropic.com": "claude-code",
+    "noreply@openai.com": "openai-codex",
+    "noreply@cursor.com": "xai-cursor",
+    "noreply@google.com": "google-antigravity",
 }
+TRAILER = re.compile(r"(?im)^co-authored-by:[^<\n]*<([^>\n]+)>[ \t]*$")
 
 
 class LegacyRecoveryError(KernelError):
@@ -113,28 +119,31 @@ def linked_closed_issue(pr: dict[str, Any], expected_issue: int) -> dict[str, An
     return record
 
 
-def observed_families(text: str) -> set[str]:
-    lowered = text.lower()
+def attested_families(message: str) -> set[str]:
+    """Families named by canonical co-author trailers, matched on address only."""
     return {
-        family
-        for family, hints in FAMILY_EVIDENCE.items()
-        if any(hint in lowered for hint in hints)
+        ATTESTED_FAMILY_EMAILS[address.strip().lower()]
+        for address in TRAILER.findall(message)
+        if address.strip().lower() in ATTESTED_FAMILY_EMAILS
     }
 
 
-def head_commit_evidence(head: str) -> set[str]:
-    """Families the merged head commit itself names, for refusal only."""
+def head_commit_evidence(head: str, actor: str) -> str:
+    """The single family the verified merged head commit actually attests."""
     obj = gh_json(["api", f"repos/{repo_slug()}/commits/{head}"])
     commit = obj.get("commit") if isinstance(obj, dict) else None
     if not isinstance(obj, dict) or obj.get("sha") != head or not isinstance(commit, dict):
         raise KernelError("historical head commit evidence is unreadable")
-    parts = [str(commit.get("message") or "")]
-    for side in ("author", "committer"):
-        person = commit.get(side)
-        if not isinstance(person, dict) or not str(person.get("name") or "").strip():
-            raise KernelError("historical head commit authorship is incomplete")
-        parts.extend([str(person.get("name")), str(person.get("email") or "")])
-    return observed_families("\n".join(parts))
+    verification = commit.get("verification")
+    if not isinstance(verification, dict) or verification.get("verified") is not True:
+        raise KernelError("historical head commit signature is not verified by GitHub")
+    if not same_github_actor(str((obj.get("author") or {}).get("login") or ""), actor):
+        raise KernelError("verified head commit is not attributed to the merged PR actor")
+    families = attested_families(str(commit.get("message") or ""))
+    if len(families) != 1:
+        raise KernelError("historical head commit lacks exactly one canonical author-family "
+                          f"attestation; found {sorted(families) or ['none']}")
+    return families.pop()
 
 
 def resolve_author(
@@ -146,14 +155,15 @@ def resolve_author(
 ) -> dict[str, str]:
     """Bind a declared identity to governed claim evidence and the real actor.
 
-    A Git author name never selects the family on its own: the declaration must
-    equal the issue's recorded claimant, resolve to a known coding family, and
-    stay uncontradicted by the merged head commit.
+    The declaration never establishes lineage. It must equal the issue's
+    recorded claimant and agree with the family the verified merged head commit
+    attests; that attestation, not a Git display name or the current reviewer
+    configuration, is the evidence of record.
     """
     identity = normalized_identity(declared_identity or "")
     family = normalized_identity(declared_family or "")
-    if family not in CODING_REVIEWERS or agent_family(identity) != family:
-        raise KernelError("declared author family is unknown or not canonical for that identity")
+    if family not in CODING_REVIEWERS:
+        raise KernelError("declared author family is not a canonical coding family")
     claimant = _one_claimant(record)
     if normalized_identity(claimant) != identity:
         raise KernelError("declared author does not match the linked issue's recorded claimant")
@@ -162,12 +172,15 @@ def resolve_author(
         raise KernelError("merged PR has no readable GitHub author actor")
     if declared_actor and not same_github_actor(declared_actor, actor):
         raise KernelError("declared GitHub actor does not match the merged PR author")
-    observed = head_commit_evidence(str(pr["headRefOid"]))
-    if observed != {family}:
+    attested = head_commit_evidence(str(pr["headRefOid"]), actor)
+    if attested != family:
         raise KernelError(
-            "historical head authorship evidence is missing or contradicts the declared family "
-            f"{family!r}; observed {sorted(observed) or ['none']}"
+            f"declared author family {family!r} contradicts the attested historical "
+            f"family {attested!r}"
         )
+    configured = configured_reviewer_family(identity)
+    if configured is not None and configured != attested:
+        raise KernelError("configured identity family contradicts the attested historical family")
     return {
         "author": identity,
         "author_family": family,
@@ -176,8 +189,28 @@ def resolve_author(
     }
 
 
-def status_transition(record: dict[str, Any]) -> dict[str, str] | None:
-    current = status_of(record)
+def agreed_status(record: dict[str, Any], issue_number: int) -> str | None:
+    """The status both lifecycle authorities report, or a refusal on disagreement.
+
+    Issue labels alone are not the board. A failed ``set_status`` rollback can
+    leave the label ahead of the Project card, so every recovery path - preview,
+    apply, replay and the no-op - reads the card before trusting the label.
+    """
+    labelled = status_of(record)
+    try:
+        card = project_item_status(issue_number)
+    except KernelError as exc:
+        raise KernelError(f"linked Project card is unreadable: {exc}") from exc
+    if card != labelled:
+        raise KernelError(
+            f"issue labels report {labelled!r} but the Project card reports {card!r}; "
+            "recovery refuses while the lifecycle authorities disagree"
+        )
+    return labelled
+
+
+def status_transition(record: dict[str, Any], issue_number: int) -> dict[str, str] | None:
+    current = agreed_status(record, issue_number)
     if current == "In Review":
         return None
     if current != "In Progress":
@@ -185,59 +218,74 @@ def status_transition(record: dict[str, Any]) -> dict[str, str] | None:
     return {"from": "In Progress", "to": "In Review"}
 
 
-def snapshot(pr: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+def snapshot(pr: dict[str, Any], record: dict[str, Any], issue_number: int) -> dict[str, Any]:
     """Exactly what every pre-write reread must still observe."""
     return {
         "head": pr.get("headRefOid"),
         "state": pr.get("state"),
         "merge_commit": (pr.get("mergeCommit") or {}).get("oid"),
         "actor": str((pr.get("author") or {}).get("login") or ""),
+        "closes": linked_issues(str(pr.get("body") or "")),
         "issue_state": record.get("state"),
         "claimant": _one_claimant(record),
-        "status": status_of(record),
+        "status": agreed_status(record, issue_number),
         "acceptance": acceptance_items(str(record.get("body") or "")),
         "author_labels": existing_author(pr),
     }
 
 
 def _guard(number: int, issue_number: int, expected: dict[str, Any]) -> None:
-    if snapshot(pull_request(number), issue(issue_number)) != expected:
+    pr = pull_request(number)
+    if linked_issues(str(pr.get("body") or "")) != [issue_number]:
+        raise KernelError("observed closing issue directive drift; no further write")
+    if snapshot(pr, issue(issue_number), issue_number) != expected:
         raise KernelError("observed recovery precondition drift; no further write")
 
 
 def _write_author_metadata(number: int, identity: str, family: str, expected: dict[str, Any],
-                           issue_number: int) -> None:
+                           issue_number: int, receipt: dict[str, list[str]]) -> None:
     author_label, family_label = AUTHOR_PREFIX + identity, AUTHOR_FAMILY_PREFIX + family
     _guard(number, issue_number, expected)
     ensure_label(author_label, color="1d76db", description=f"PR authored by {identity}")
     ensure_label(family_label, color="1d76db", description=f"Author model family: {family}")
     _guard(number, issue_number, expected)
     run(["gh", "pr", "edit", str(number), "--add-label", f"{author_label},{family_label}"])
+    # The edit itself returned success, so the labels are on the PR whatever the
+    # readback reports next. An unreadable state is never zero mutation.
+    receipt["attempted"].append("author-metadata")
     settled = gh_json(["pr", "view", str(number), "--json", "number,labels"])
     if not isinstance(settled, dict) or existing_author(settled) != (identity, family):
         raise KernelError("recovered author metadata did not settle")
+    receipt["attempted"].remove("author-metadata")
+    receipt["applied"].append("author-metadata")
 
 
 def _apply(number: int, issue_number: int, resolved: dict[str, str], planned: list[str],
            expected: dict[str, Any]) -> dict[str, list[str]]:
-    receipt: dict[str, list[str]] = {"applied": [], "skipped": []}
+    receipt: dict[str, list[str]] = {"applied": [], "attempted": [], "skipped": []}
     identity, family = resolved["author"], resolved["author_family"]
     try:
         if "author-metadata" in planned:
-            _write_author_metadata(number, identity, family, expected, issue_number)
-            receipt["applied"].append("author-metadata")
+            _write_author_metadata(number, identity, family, expected, issue_number, receipt)
             expected = {**expected, "author_labels": (identity, family)}
         else:
             receipt["skipped"].append("author-metadata")
         if "status" in planned:
             settled = expected
             _guard(number, issue_number, settled)
-            set_status(
-                issue_number,
-                "In Review",
-                expected_current="In Progress",
-                pre_mutation_check=lambda: _guard(number, issue_number, settled),
-            )
+            try:
+                set_status(
+                    issue_number,
+                    "In Review",
+                    expected_current="In Progress",
+                    pre_mutation_check=lambda: _guard(number, issue_number, settled),
+                )
+            except StatusPreconditionError:
+                raise  # zero-rollback precondition failure: the board did not move
+            except KernelError:
+                # set_status can fail after the label moved and rollback failed.
+                receipt["attempted"].append("status")
+                raise
             receipt["applied"].append("status")
         else:
             receipt["skipped"].append("status")
@@ -250,8 +298,8 @@ def _post_receipt(number: int, result: dict[str, Any]) -> None:
     body = (
         "## Aru legacy provenance recovery\n\n"
         f"Recovered historical author metadata for merged head `{result['head']}` and linked "
-        f"issue #{result['issue']}. This is audit evidence only: it is not a review, an "
-        "approval, acceptance of any criterion, or a lifecycle authority.\n\n"
+        f"issue #{result['issue']}. Audit evidence only: not a review, an approval, "
+        "acceptance of any criterion, or a lifecycle authority.\n\n"
         f"<!-- {RECEIPT_MARKER} {json.dumps(result, sort_keys=True, default=str)} -->"
     )
     run(["gh", "pr", "comment", str(number), "--body", body])
@@ -273,7 +321,7 @@ def recover_legacy_provenance(
     if verdict.get("head") != expected_head or verdict.get("state") != "success":
         raise KernelError("merged provenance or historical governed CI is not proven")
     resolved = resolve_author(pr, record, agent, author_family, author_actor)
-    transition = status_transition(record)
+    transition = status_transition(record, issue_number)
     target = (resolved["author"], resolved["author_family"])
     current = existing_author(pr)
     if current != (None, None) and current != target:
@@ -305,14 +353,23 @@ def recover_legacy_provenance(
         result["action"] = "already-recovered"
         return result
     try:
-        receipt = _apply(number, issue_number, resolved, planned, snapshot(pr, record))
+        receipt = _apply(number, issue_number, resolved, planned,
+                         snapshot(pr, record, issue_number))
     except LegacyRecoveryError as exc:
         result.update(exc.receipt)
-        result["action"] = "partial" if exc.receipt["applied"] else "refused"
+        result["action"] = (
+            "partial" if exc.receipt["applied"] or exc.receipt["attempted"] else "refused"
+        )
         raise LegacyRecoveryError(str(exc), result) from exc
     result.update(receipt)
     result["action"] = "recovered"
-    _post_receipt(number, result)
+    try:
+        _post_receipt(number, result)
+    except KernelError as exc:
+        result["receipt_comment"] = f"unavailable: {exc}"
+        raise LegacyRecoveryError(
+            f"recovery writes completed but the audit receipt comment failed: {exc}", result
+        ) from exc
     return result
 
 
@@ -329,3 +386,46 @@ def recover_from_args(args: Any) -> dict[str, Any]:
         author_actor=args.author_github_login or "",
         apply=args.apply,
     )
+
+
+# Arguments that belong to a different public mode. Creation is the default mode
+# and is identified by the absence of every mode flag below.
+MODE_FORBIDDEN = {
+    "recover_legacy": ("title", "body", "body_file", "coding_reviewer_unavailable"),
+    "refresh_reviewer": ("issue", "title", "body", "body_file", "agent", "author_family",
+                         "author_github_login"),
+    "reviewer_status": ("issue", "title", "body", "body_file", "author_family",
+                        "coding_reviewer_unavailable"),
+}
+
+
+def require_exclusive_mode(args: Any) -> None:
+    """Refuse incompatible public modes before any read or write happens."""
+    selected = [name for name in MODE_FORBIDDEN if getattr(args, name, None)]
+    if len(selected) > 1:
+        raise KernelError(
+            f"create_pr.py modes are mutually exclusive; got {', '.join(sorted(selected))}"
+        )
+    if selected[:1] != ["recover_legacy"] and (args.expected_head or args.apply):
+        raise KernelError("--expected-head and --apply require --recover-legacy")
+    if selected and any(getattr(args, name, None) for name in MODE_FORBIDDEN[selected[0]]):
+        flag = selected[0].replace("_", "-")
+        raise KernelError(f"--{flag} cannot include another mode's arguments")
+
+
+def recovery_summary(result: dict[str, Any]) -> str:
+    return (f"legacy recovery {result['action']}: planned {result['planned'] or 'nothing'}; "
+            f"applied {result['applied'] or 'none'}")
+
+
+def recovery_failure(exc: LegacyRecoveryError, as_json: bool) -> str:
+    """Operator-visible report of everything a failed recovery already wrote."""
+    receipt = exc.receipt
+    if as_json:
+        return json.dumps({"error": str(exc), **receipt}, indent=2, sort_keys=True, default=str)
+    return "\n".join([
+        f"legacy recovery {receipt.get('action', 'refused')}: {exc}",
+        f"  confirmed writes: {receipt.get('applied') or 'none'}",
+        f"  attempted, outcome unknown: {receipt.get('attempted') or 'none'}",
+        f"  not attempted: {receipt.get('skipped') or 'none'}",
+    ])
