@@ -317,13 +317,15 @@ A component enters the Kernel only when it directly authorizes or blocks a
 lifecycle transition, no simpler GitHub/Git primitive solves it, the default
 path uses it now, and evidence from three governed consumers shows the need.
 
-Production Python and hooks are limited to 6,500 lines; tests to 10,500; source
+Production Python and hooks are limited to 6,500 lines; source
 files to 800 lines; supported scripts to 12-14; runtime skills to six; and
 active operating documents to `README.md`, `AGENTS.md`, `CHANGELOG.md`,
 `docs/KERNEL-CONTRACT.md`, `docs/ENFORCEMENT-REGISTER.md`,
 `docs/OPERATIONS.md`, and `docs/DEGRADED-MODE.md`.
 
-The audit corrections expand the test allowance to retain explicit negative-path
-coverage. The separately bounded Hermes integration keeps its 6,000 production
-line limit and allows 6,500 test lines. Production and per-file limits stay in
-place; tests must not be deleted or compressed to hide a growing safety surface.
+Aggregate test volume is deliberately unbudgeted. A ceiling on total test lines can
+only be satisfied by deleting or compressing the safety surface it exists to guard,
+so it measured coverage as debt and blocked legitimate negative-path work. The
+separately bounded Hermes integration keeps its 6,000 production line limit.
+Production totals and the 800-line per-file cap still apply to every file, tests
+included; tests must not be deleted or compressed to hide a growing safety surface.
