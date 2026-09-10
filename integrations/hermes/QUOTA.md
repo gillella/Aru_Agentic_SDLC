@@ -38,6 +38,7 @@ do not append unsupported permission flags to make an effort setting fit.
 | `unknown_max_attempts` | Optional 1–32 child attempts per issue and role across identities/heads; default `max_recoveries + 1` |
 | `unknown_total_seconds` | Optional 1–86400 total seconds per issue and role; default per-attempt seconds times attempt bound |
 | `review_escrow_seconds` | Optional 60–3600 second review lease; default 900 |
+| `reserve_review_for_all_tasks` | Optional explicit boolean; default false follows Kernel risk tiers; true reserves independent review even for Tier 0–1 consumer work |
 | `max_recoveries` | 0–3 automatic continuations after genuine quota exhaustion per issue; separate from unknown work |
 | `cooldown_seconds` | 60–3600 seconds before another attempt when no genuine reset exists |
 | `author_actor` | Operator-declared GitHub actor of author workers; canonical PR actor checks still apply |
@@ -178,9 +179,16 @@ Existing worker receipts hold per-window worker reservations across all configur
 projects and aliases. Unknown legacy reservations block quota admission. Distinct
 pools on a shared account are not numerically interchangeable: outstanding
 cross-pool reservations conservatively block until comparable capacity is free.
-An author also reserves a budget on an eligible independent coding-review lane,
-using fresh canonical reviewer inventory and a distinct actor/family. This is a
-budget estimate, never an authority assignment. The canonical helper can assign
+An author whose canonical scope requires Tier 2–3 review also reserves a budget
+on an eligible independent coding-review lane, using fresh canonical reviewer
+inventory and a distinct actor/family. Tier 0–1 scope does not require this
+reservation or reviewer inventory. Missing or malformed risk evidence remains
+conservative and requires the reservation. A stricter consumer may explicitly
+set `reserve_review_for_all_tasks: true` to retain it for every task. Admission,
+launch and child revalidation reread the scope; a raised tier reinstates this
+budget requirement. The Kernel still derives final review authority from the
+actual changed paths, independently of these preliminary quota estimates.
+This is a budget estimate, never an authority assignment. The canonical helper can assign
 another reviewer, whose actual launch must pass its own gates. Review escrow is
 replaced on continuation, consumed at review dispatch, released on failed work,
 any live CLOSED issue, or a blocked author without an open PR. Every shared-account

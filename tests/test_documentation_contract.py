@@ -68,6 +68,18 @@ def test_version_and_layer_truth_are_explicit():
     assert "Tier 0-1 changes do not wait for an authoritative review" in contract
 
 
+def test_active_release_and_freeze_guidance_agree():
+    agents = text(ROOT / "AGENTS.md")
+    readme = text(ROOT / "README.md")
+    assert "freeze has concluded" in agents
+    assert "freeze period has concluded" in readme
+    for relative in ("README.md", "docs/KERNEL-CONTRACT.md", "docs/OPERATIONS.md"):
+        content = " ".join(text(ROOT / relative).split())
+        assert "unreleased v2" not in content, relative
+        assert "v2 source candidate" not in content, relative
+        assert ".aru/verify-project.sh" in content, relative
+
+
 def governed_workflows() -> dict[str, str]:
     """Aru's own live workflow plus the consumer template for every profile."""
     template = text(ROOT / "templates" / "governed-pr.yml")

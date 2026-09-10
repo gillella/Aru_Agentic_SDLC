@@ -81,6 +81,17 @@ def _argv_element(value: object, what: str) -> str:
     return value
 
 
+def _base_args(route_name: str, base: list[str], read_only: bool) -> list[str]:
+    if read_only:
+        if route_name == "codex":
+            base[base.index("workspace-write")] = "read-only"
+        elif route_name == "claude-code":
+            base[base.index("acceptEdits")] = "plan"
+        else:
+            raise HarnessBindingError("route has no approved reviewer")
+    return base
+
+
 def build_argv(route_name: str, executable: str, model_id: str, effort: str,
                workspace: str, prompt: str, *, read_only: bool = False,
                input_files: tuple[str, ...] = ()) -> tuple[str, ...]:
@@ -93,14 +104,7 @@ def build_argv(route_name: str, executable: str, model_id: str, effort: str,
         raise HarnessBindingError("command model/effort has no approved persona")
     spec = catalog.route(route_name)
     argv: list[str] = [_argv_element(executable, "executable")]
-    base = list(spec.base_args)
-    if read_only:
-        if route_name == "codex":
-            base[base.index("workspace-write")] = "read-only"
-        elif route_name == "claude-code":
-            base[base.index("acceptEdits")] = "plan"
-        else:
-            raise HarnessBindingError("route has no approved reviewer")
+    base = _base_args(route_name, list(spec.base_args), read_only)
     argv.extend(base)
     argv.extend((spec.model_flag, _argv_element(model_id, "model id")))
     if effort != "default":

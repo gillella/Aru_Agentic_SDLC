@@ -202,6 +202,24 @@ def test_linked_project_does_not_requery_within_one_process(monkeypatch):
     assert calls[0][1] == common.PROJECT_AUTH
 
 
+def test_authorization_refresh_replaces_cached_project_identity(monkeypatch):
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    replies = iter([_linked_project_payload(5), _linked_project_payload(9)])
+    monkeypatch.setattr(common, "gh_json", lambda *_a, **_k: next(replies))
+    assert common.linked_project()["number"] == 5
+    assert common.linked_project(refresh=True)["number"] == 9
+
+
+def test_failed_authorization_refresh_discards_stale_project(monkeypatch):
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    replies = iter([_linked_project_payload(), {"errors": [{"message": "unavailable"}]}])
+    monkeypatch.setattr(common, "gh_json", lambda *_a, **_k: next(replies))
+    common.linked_project()
+    with pytest.raises(common.KernelError):
+        common.linked_project(refresh=True)
+    assert ("owner/repo", "") not in common._LINKED_PROJECT_CACHE
+
+
 def test_linked_project_rejects_graphql_errors_without_caching(monkeypatch):
     monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
     common._LINKED_PROJECT_CACHE.clear()
@@ -467,6 +485,23 @@ def test_project_item_status_reads_back_the_settled_option(monkeypatch):
     assert calls[0][1] is None and calls[1][1] == common.PROJECT_AUTH
     query = " ".join(calls[1][0])
     assert "projectItems(first:20)" in query and 'fieldValueByName(name:"Status")' in query
+
+
+def test_project_item_evidence_binds_fresh_project_card_and_status_field(monkeypatch):
+    monkeypatch.setattr(common, "repo_slug", lambda cwd=None: "owner/repo")
+    refreshes = []
+
+    def project(*, cwd=None, refresh=False):
+        refreshes.append(refresh)
+        return {"id": "PVT_1", "number": 5, "title": "Delivery"}
+
+    monkeypatch.setattr(common, "linked_project", project)
+    monkeypatch.setattr(common, "gh_json", lambda args, **_k: {"number": 7, "node_id": "I_7"}
+                        if args[:2] == ["api", "repos/owner/repo/issues/7"] else project_status_payload())
+    assert common.project_item_evidence(7) == {
+        "project_id": "PVT_1", "item_id": "PVTI_7", "status_field_id": "PVTSSF_status", "status": "Done",
+    }
+    assert refreshes == [True]
 
 
 def test_project_item_status_returns_none_without_a_status_value(monkeypatch):

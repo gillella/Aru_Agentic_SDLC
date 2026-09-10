@@ -251,6 +251,9 @@ def scaffold(name: str, directory: Path, *, runner_profile: str) -> list[str]:
         ".aru/verify.sh": (framework / "templates" / "verify.sh").read_text(
             encoding="utf-8"
         ),
+        ".aru/verify-project.sh": (framework / "templates" / "verify-project.sh").read_text(
+            encoding="utf-8"
+        ),
         ".aru/lib/touches.py": (framework / "scripts" / "touches.py").read_text(
             encoding="utf-8"
         ),
@@ -262,7 +265,7 @@ def scaffold(name: str, directory: Path, *, runner_profile: str) -> list[str]:
             destination,
             relative,
             content,
-            executable=relative == ".aru/verify.sh",
+            executable=relative in {".aru/verify.sh", ".aru/verify-project.sh"},
         )
         written.append(relative)
     for name_in_repo in ("pre-push", "enforce_touches.py"):

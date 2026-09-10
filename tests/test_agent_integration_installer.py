@@ -23,6 +23,8 @@ def assert_current(guidance):
     assert "fetch_next_work.py" in guidance
     assert "CodeRabbit is the sole preferred external provider" in guidance
     assert "Each repository must use its declared runner profile" in guidance
+    assert "`.aru/verify-project.sh`" in guidance
+    assert "preserve existing consumer verification on updates" in guidance
     assert not any(old in guidance for old in ("run-aru-factory", "code-review",
                                                "fetch_next_issue.py", "__ARU_"))
     assert guidance.count("<!-- BEGIN ARU_SDLC_GOVERNANCE -->") == 1

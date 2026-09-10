@@ -250,5 +250,12 @@ if [ -f "${governance_flag}" ]; then
   echo "no vendored Factory lifecycle scripts or skills"
 fi
 
+section "Consumer verification"
+[ -f .aru/verify-project.sh ] && [ -x .aru/verify-project.sh ] \
+  || fail ".aru/verify-project.sh must exist and be executable; preserve the project's checks when upgrading"
+if ! ./.aru/verify-project.sh; then
+  fail "consumer verification failed"
+fi
+
 section "Result"
 echo "proportional verification passed for ${scope}"

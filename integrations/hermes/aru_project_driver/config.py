@@ -73,8 +73,10 @@ class Config:
 
     def _permissions(self) -> None:
         from .permissions import validate
+        from .retries import validate_policy
         for repo, project in self.projects.items():
             validate(self, repo, project)
+            validate_policy(project)
 
     def _sessions_agree(self) -> None:
         # Every lane on one subscription must agree on how many managed sessions

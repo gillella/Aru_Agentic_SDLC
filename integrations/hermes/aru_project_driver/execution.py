@@ -14,7 +14,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from .config import Config, DriverError
-from . import permissions, quota, quota_worker, quota_admission, reviewers
+from . import permissions, quota, quota_worker, quota_admission, reviewers, retries
 from .kernel import KernelAdapter, KernelAdapterError
 from .state import State, key, read_json, write_json
 
@@ -208,7 +208,8 @@ def launch_policy(config, state, record, repository, policy):
 
 def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
            *, kind: str = "implementation", pr: int | None = None,
-           head: str | None = None, review: dict | None = None) -> dict:
+           head: str | None = None, review: dict | None = None,
+           work_type: str = "claimed_issue") -> dict:
     """Caller holds State.lock and has just revalidated the live kernel claim."""
     state = State(config.state_dir)
     admission_stop = state.stop_nonce(repo)
@@ -256,6 +257,7 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
         "prompt": prompt_for(repo, issue, identity, config.kernel_root, str(directory),
                              kind, pr, head, review),
     }
+    retries.stamp(config, record, work_type)
     log = state.root / "logs" / f"{worker_id}.log"
     try:
         policy = launch_policy(config, state, record, repository, policy)

@@ -33,9 +33,9 @@ from . import catalog
 from .binding import AccountBinding, FleetBinding
 from .classify import Classification, TaskRequest, classify
 from .errors import (
-    AccountScopeError, AuthorLineageError, CapabilityError, IncompatibleOverrideError,
+    AccountScopeError, CapabilityError, IncompatibleOverrideError,
     ReviewAuthorityError, HarnessBindingError, ModalityError, NoEligibleCandidateError, OptionalPersonaError, PersonaPolicyError,
-    RiskFloorError, RoleQualificationError, UnsupportedEffortError,
+    RiskFloorError, RoleQualificationError,
 )
 from .evidence import ProbeRecord
 from .plan import CommandPlan, SkippedCandidate, build_argv, policy_source_digest

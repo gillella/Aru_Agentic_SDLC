@@ -495,13 +495,15 @@ def ensure_label(name: str, *, color: str = "5319e7", description: str = "", cwd
     run(["gh", "label", "create", name, "--color", color, "--description", description, "--force"], cwd=cwd)
 
 
-def linked_project(*, cwd: str | Path | None = None) -> dict[str, Any]:
+def linked_project(*, cwd: str | Path | None = None, refresh: bool = False) -> dict[str, Any]:
     slug = repo_slug(cwd)
     requested = os.environ.get("ARU_PROJECT_NUMBER") or ""
     key = (slug, requested)
     cached = _LINKED_PROJECT_CACHE.get(key)
-    if cached is not None:
+    if cached is not None and not refresh:
         return dict(cached)
+    if refresh:
+        _LINKED_PROJECT_CACHE.pop(key, None)
     owner, name = slug.split("/", 1)
     query = (
         "query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){ "
@@ -541,8 +543,10 @@ def linked_project(*, cwd: str | Path | None = None) -> dict[str, Any]:
     return dict(open_projects[0])
 
 
-def _project_card_identity(number: int, *, cwd: str | Path | None = None) -> tuple[str, str]:
-    project = linked_project(cwd=cwd)
+def _project_card_identity(
+    number: int, *, cwd: str | Path | None = None, refresh_project: bool = False,
+) -> tuple[str, str]:
+    project = linked_project(cwd=cwd, refresh=True) if refresh_project else linked_project(cwd=cwd)
     project_id = project.get("id")
     if not isinstance(project_id, str) or not project_id:
         raise KernelError("linked Project Board identity is unavailable")
@@ -569,9 +573,9 @@ _PROJECT_CARD_QUERY = (
 
 
 def _project_card_snapshot(
-    number: int, *, cwd: str | Path | None = None
+    number: int, *, cwd: str | Path | None = None, refresh_project: bool = False,
 ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
-    project_id, node_id = _project_card_identity(number, cwd=cwd)
+    project_id, node_id = _project_card_identity(number, cwd=cwd, refresh_project=refresh_project)
     data = gh_json(
         ["api", "graphql", "-f", f"query={_PROJECT_CARD_QUERY}", "-F", f"issue={node_id}", "-F", f"project={project_id}"],
         cwd=cwd,
@@ -651,6 +655,17 @@ def _item_status(item: dict[str, Any], status_field: Any) -> str | None:
 def project_item_status(number: int, *, cwd: str | Path | None = None) -> str | None:
     _project_id, item, status_field = _project_card_snapshot(number, cwd=cwd)
     return _item_status(item, status_field)
+
+
+def project_item_evidence(number: int, *, cwd: str | Path | None = None) -> dict[str, Any]:
+    """Read fresh linked-Project and card identity for authorization comparisons."""
+    project_id, item, status_field = _project_card_snapshot(number, cwd=cwd, refresh_project=True)
+    return {
+        "project_id": project_id,
+        "item_id": item["id"],
+        "status_field_id": _validated_status_field(status_field)["id"],
+        "status": _item_status(item, status_field),
+    }
 
 
 def board_edit(

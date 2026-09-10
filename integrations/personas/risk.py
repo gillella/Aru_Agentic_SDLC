@@ -1,4 +1,4 @@
-"""Local snapshot of scripts/review_risk.py at ebc7664a (no kernel imports)."""
+"""Local snapshot of scripts/review_risk.py; synchronized by parity tests."""
 
 from __future__ import annotations
 
@@ -34,14 +34,6 @@ _KERNEL_POLICY_DOCS = {
     "docs/kernel-contract.md",
     "docs/operations.md",
 }
-_KERNEL_GATE_SCRIPTS = {
-    "check_ci.py", "claim_issue.py", "common.py", "create_branch.py",
-    "create_github_issue.py", "create_pr.py", "fetch_next_issue.py",
-    "fetch_next_work.py", "fetch_pr_feedback.py", "init_project.py",
-    "install_agent_integration.sh", "merge_pr.py", "merge_state.py",
-    "review_evidence.py", "review_policy.py", "review_risk.py", "reviewer_probe.py", "touches.py",
-    "triage_backlog.py",
-}
 
 
 def _dependency_file(name: str) -> bool:
@@ -60,12 +52,11 @@ def _sensitive_contract_path(normalized: str, name: str) -> bool:
             (
                 ".agents/", ".aru/", ".codex/", ".cursor/rules/",
                 ".github/issue_template/", ".github/pull_request_template/",
-                ".github/workflows/", "hooks/", "skills/", "templates/",
+                ".github/workflows/", "hooks/", "skills/", "templates/", "scripts/",
                 "integrations/hermes/aru_project_driver/", "integrations/hermes/skill/",
             )
         )
         or "/skills/" in normalized
-        or (normalized.startswith("scripts/") and name in _KERNEL_GATE_SCRIPTS)
         or _TIER_2_RE.search(normalized)
         or _dependency_file(name)
     )
@@ -86,9 +77,7 @@ def review_risk_tier(paths: Iterable[str]) -> int:
             tiers.append(3)
         elif _sensitive_contract_path(normalized, name):
             tiers.append(2)
-        elif path.suffix.lower() in _DOC_SUFFIXES or name.startswith(
-            ("readme", "changelog", "license")
-        ):
+        elif path.suffix.lower() in _DOC_SUFFIXES or name in {"readme", "changelog", "license"}:
             tiers.append(0)
         elif path.suffix.lower() in _CODE_SUFFIXES:
             tiers.append(1)

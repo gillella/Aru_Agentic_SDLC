@@ -126,7 +126,10 @@ def evaluate(config, state, repo, identity, task, kind, adapter, *, exclude=None
               "reservations": [allocation], "author_families": families,
               "continuation_owner": "Hermes Driver completion/heartbeat", "selected": identity,
               "review_candidates": [], "policy_hash": quota.digest(str(sorted(policy.items())))}
-    if review:
+    risk = task.get("quota_risk")
+    requires_review = (policy.get("reserve_review_for_all_tasks", False)
+                       or type(risk) is not int or risk not in (0, 1))
+    if review or not requires_review:
         return result
     return review_budget(config, state, repo, task, adapter, result, exclude)
 

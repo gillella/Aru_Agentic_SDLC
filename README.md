@@ -1,4 +1,4 @@
-# Aru Agentic SDLC
+# Aru Code Factory
 
 > A small, fail-closed rules-and-guidelines kernel that moves one approved
 > GitHub issue to one safely merged pull request.
@@ -20,7 +20,9 @@ software project:
    expected head; stronger GitHub-side exclusivity is a consumer deployment
    choice described below.
 
-It is intentionally a governance layer, not an autonomous agent platform. It
+The Factory combines the Kernel, separately installed agent coordination, and
+consumer-owned delivery policy. The implemented Kernel is intentionally a
+governance layer, not an autonomous agent platform. It
 does not schedule workers, run a private queue, deploy applications, manage
 credentials, monitor production, or replace GitHub.
 
@@ -95,7 +97,7 @@ install CodeRabbit, Sourcery, CodeAnt, or coding-agent providers, publish an
 initial default branch, or merge conflicting files into an existing repository.
 Those are deliberate operator-owned setup steps.
 
-> **Important:** v1.0.0 installs only the six skills listed below. It has no
+> **Important:** v2.0.0 installs only the six skills listed below. It has no
 > command router or in-kernel loop; persistent continuation belongs to an
 > external Driver.
 
@@ -212,7 +214,11 @@ fallback and does not upload artifacts or use Actions caches by default.
 An existing governed consumer updates by restaging with the `--owner` its
 repository actually lives under and reconciling changed Aru files on a normal
 project branch. Preserve its working verification commands and product rules;
-never replace `.aru/verify.sh` with the generated fail-closed placeholder.
+never replace working checks with generated starters. New scaffolds separate
+framework checks in `.aru/verify.sh` from product checks in the required executable
+`.aru/verify-project.sh`. Replace its failing starter with real product checks.
+When adopting this split, preserve existing verification commands in that file
+and reconcile the framework verifier deliberately.
 Keep the workflow's `# aru-runner-profile:` marker, `runs-on:`, and verification
 expectations consistent. Identical files need no replacement. Changing
 `ARU_SDLC_HOME` alone does not refresh copied `.aru/`, `.github/`, or guidance
@@ -300,12 +306,16 @@ authority. For Tier 2-3, a push invalidates earlier review; self-review,
 unresolved findings, no-op provider results, and stale or conflicting
 attestations block merge.
 
-Merge queues and pending auto-merge requests are unsupported in the v2 source
-candidate: the helper refuses them before submission. The workflow verifies
+Merge queues and pending auto-merge requests are unsupported in the v2.0.0 release: the helper refuses them before submission. The workflow verifies
 same-repository PR heads only. `--finalize` recovers a confirmed direct merge;
 historical queue work is refused because a PR-head check does not prove the
 combined queue revision. Keep the issue In Review until merge and close-out
 are confirmed; only then clean up.
+
+Inspect copied consumer files without running them using the
+[consumer compatibility tool](integrations/adoption/README.md). For shipping
+software, use the [consumer deployment guide](integrations/deployment/README.md)
+and its evidence template. These integrations do not add Kernel lifecycle state.
 
 ## The seven-document map
 

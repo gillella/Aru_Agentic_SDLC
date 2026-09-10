@@ -10,12 +10,14 @@ from common import (
     REPOSITORY_AUTH,
     KernelError,
     acceptance_items,
+    dependencies,
     gh_json,
     gh_paginated,
     issue,
     label_names,
     parse_touches,
     path_allowed,
+    project_item_evidence,
     repo_slug,
     run,
     set_status,
@@ -183,6 +185,9 @@ def issue_gate(
     lifecycle = status_of(record)
     if lifecycle != "In Review" and not (allow_done and lifecycle == "Done"):
         raise KernelError(f"issue #{number} is not In Review")
+    project = project_item_evidence(number)
+    if project["status"] != lifecycle:
+        raise KernelError(f"issue #{number} labels and linked Project card status disagree")
     if not items or any(not done for done, _ in items):
         raise KernelError(f"issue #{number} has incomplete Acceptance Criteria")
     declared = parse_touches(body)
@@ -192,12 +197,21 @@ def issue_gate(
             "pull request changes paths outside the linked issue touches contract: "
             + ", ".join(violations)
         )
+    dependency_evidence = []
+    for dependency in dependencies(body):
+        dependency_record = issue(dependency)
+        state = dependency_record.get("state")
+        if state != "CLOSED":
+            raise KernelError(f"issue #{number} dependency #{dependency} is not confirmed closed")
+        dependency_evidence.append({"issue": dependency, "state": state})
     return [{
         "issue": number,
         "criteria": len(items),
         "acceptance": [{"done": done, "text": text} for done, text in items],
         "touches": declared,
         "claimant": owners[0][len(AGENT_PREFIX) :],
+        "project": project,
+        "dependencies": dependency_evidence,
     }]
 
 

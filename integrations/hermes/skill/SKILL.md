@@ -55,11 +55,13 @@ configuration. Leave existing Loop activation unchanged during Update.
   declaring adoption complete. Configure only the selected project's binding
   within the requested installation scope. First setup does not start a Loop.
 - **Update:** compare the requested Aru revision with the target's guidance,
-  `.github/` templates/workflow, `.aru/verify.sh`, shared parser, and hooks.
+  `.github/` templates/workflow, `.aru/verify.sh`, `.aru/verify-project.sh`,
+  shared parser, and hooks.
   Use the existing-project staged migration in operations section 7 and, for
   an already governed repository, its issue and isolated worktree. Preserve
   working consumer verification and custom policy; never replace verification
-  with the scaffold's fail-closed placeholder. Keep the runner profile marker,
+  with the scaffold's failing product-verifier starter. Preserve product commands
+  when adopting the split verifier. Keep the runner profile marker,
   `runs-on:`, and verification expectations consistent. Apply actual differences
   only; report a no-op when the target already matches.
 
@@ -106,6 +108,16 @@ feedback, review, and merge helpers. Keep a waiting PR in its own author's
 lane. A worker's existence or a green check does not establish acceptance,
 authoritative approval, or deployment. Treat a live worker's intermediate
 push as unsettled until its owning process has finished.
+
+For `worker_retry_wait`, let the existing heartbeat retry after the returned
+deadline; do not launch an alternate worker or run remediation from this callback.
+Standard workers receive three unchanged attempts with 60/120-second backoff.
+For `worker_blocked` with `retry_exhausted:true`, report the operator-owned cause
+and retained work once. Only corrected underlying conditions plus an explicit
+operator `worker_retry_epoch` change, or fresh kernel action/PR/head progress,
+can renew that task. Never clear receipts, bump epochs automatically, or use
+Stop/Start to evade the bound. Permission and quota recovery retain their own
+stricter controls.
 
 For a returned PR action, inspect the named PR and its current head, then use
 the matching canonical workflow: `check_ci.py` and `remediate-ci-failure` for

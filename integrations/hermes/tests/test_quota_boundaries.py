@@ -63,6 +63,17 @@ def test_resume_rechecks_quota_after_probe(qh, monkeypatch):
     assert qh.kernel.record(1)["agents"] == ["codex-one"]
 
 
+def test_child_recheck_reinstates_review_budget_after_scope_risk_increases(qh):
+    record = terminal(qh)
+    qh.kernel.record(1)["quota_risk"] = 0
+    quota_worker.prepare(qh.config, qh.state, record, qh.kernel)
+    assert len(record["quota_decision"]["reservations"]) == 1
+    qh.kernel.record(1)["quota_risk"] = 2
+    qh.kernel.reviewer_status = lambda: {"schema": "aru.reviewer-status/v3", "valid": True, "coding_reviewers": []}
+    with pytest.raises(DriverError, match="no eligible independent reviewer"):
+        quota_worker.recheck(qh.config, qh.state, record, qh.kernel)
+
+
 def test_quota_fallback_uses_canonical_transition_and_preserves_checkpoint(qh):
     old = terminal(qh)
     alias(qh)

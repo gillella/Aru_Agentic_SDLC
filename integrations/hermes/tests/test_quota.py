@@ -105,6 +105,32 @@ def test_known_demand_reserves_independent_review_and_reports_uncertainty(qh):
     assert decision["margin"] == 50
 
 
+@pytest.mark.parametrize("risk", [0, 1])
+def test_low_risk_author_does_not_need_or_reserve_a_reviewer(qh, risk):
+    qh.kernel.reviewer_status = lambda: pytest.fail("low-risk work must not require reviewer inventory")
+    task = {**issue(1), "quota_risk": risk}
+    decision = admission.evaluate(qh.config, qh.state, REPO, "codex-one", task, "implementation", qh.kernel)
+    assert [r["role"] for r in decision["reservations"]] == ["worker"]
+    assert "review_budget" not in decision
+
+
+@pytest.mark.parametrize("risk", [2, 3, None, "0", True, -1, 4])
+def test_sensitive_or_unknown_risk_still_requires_independent_review(qh, risk):
+    qh.kernel.reviewer_status = lambda: {"schema": "aru.reviewer-status/v3", "valid": True, "coding_reviewers": []}
+    with pytest.raises(DriverError, match="no eligible independent reviewer"):
+        admission.evaluate(qh.config, qh.state, REPO, "codex-one", {**issue(1), "quota_risk": risk}, "implementation", qh.kernel)
+
+
+def test_consumer_can_explicitly_reserve_review_for_low_risk_tasks(qh):
+    qh.config.project(REPO)["quota_admission"]["reserve_review_for_all_tasks"] = True
+    quota.validate_config(qh.config)
+    result = admission.evaluate(qh.config, qh.state, REPO, "codex-one", {**issue(1), "quota_risk": 0}, "implementation", qh.kernel)
+    assert result["review_budget"]["identity"] == "claude-one"
+    qh.config.project(REPO)["quota_admission"]["reserve_review_for_all_tasks"] = "false"
+    with pytest.raises(DriverError, match="reserve_review_for_all_tasks"):
+        quota.validate_config(qh.config)
+
+
 @pytest.mark.parametrize("case", ["short", "long", "stale", "no-reviewer", "same-family", "same-actor", "invalid", "unknown", "missing-demand"])
 def test_admission_refusals(qh, monkeypatch, case):
     def collect(c, r, i):

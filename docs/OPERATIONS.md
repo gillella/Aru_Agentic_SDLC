@@ -444,6 +444,10 @@ Treat those as operator-owned bootstrap work. Do not claim that ordinary Aru
 development is ready until the [adoption checklist](#17-adoption-checklist)
 passes.
 
+Use the [read-only compatibility report](../integrations/adoption/README.md)
+to inspect copied files, canonical revision, runner policy and whether the product
+verifier is configured. Matching files do not replace the governed pilot.
+
 ## 7. Adopt Aru in an existing project
 
 `init_project.py` refuses to overwrite conflicting files. That is a safety
@@ -463,9 +467,11 @@ differences needed for the requested Aru update.
 3. Compare each generated file with the project's current governance and
    verification policy.
 4. Merge only the rules and hooks the project can actually support.
-5. On first adoption, replace the fail-closed `.aru/verify.sh` placeholder
-   with consumer commands. On Update, preserve existing verification and merge
-   only applicable framework fixes. Ensure `aru-governed-pr` is required in
+5. On first adoption, replace the failing `.aru/verify-project.sh` starter
+   with meaningful product checks and keep it executable. `.aru/verify.sh` runs
+   framework checks and then this product verifier. On Update, preserve existing
+   verification commands; when adopting the split, move them into the product
+   verifier and merge only applicable framework fixes. Ensure `aru-governed-pr` is required in
    branch rules and an `aru-ci` runner is registered for `self-hosted-mac`
    before validating adoption on a pull request; reuse existing valid setup.
 
@@ -488,7 +494,8 @@ Reconcile these surfaces deliberately:
 | Issue template | Keep required acceptance criteria and `touches:` input |
 | PR template | Keep `Closes #N`, the server-authority explanation, and surface-change evidence |
 | `.github/workflows/governed-pr.yml` | Keep the account's `# aru-runner-profile:` marker and matching `runs-on:`, exact-head checkout, `.aru/verify.sh`, and actual-diff `touches:` enforcement |
-| `.aru/verify.sh` | On first adoption, replace the fail-closed placeholder with consumer commands. On Update, preserve existing verification and merge applicable framework fixes; never copy the placeholder over working checks |
+| `.aru/verify.sh` | Reconcile framework checks while preserving stricter consumer policy; invokes the product verifier before success |
+| `.aru/verify-project.sh` | Replace the failing starter on first adoption; preserve existing product commands on Update and keep this file executable |
 | `.aru/lib/touches.py` | Retain the shared parser used by the server and local hook |
 | `.gitignore` | Merge entries; do not overwrite project-specific ignores |
 | `.aru/hooks/` | Retain versioned hook sources for the consumer project |
@@ -547,7 +554,7 @@ merge authority. Running the same commands outside Actions is useful preflight
 or audit evidence, but it is optional. The workflow accepts only verified
 same-repository `pull_request` events. Merge-group verification is unsupported;
 configured merge queues and pending queue/auto-merge requests are refused by
-the merge helper. This capability correction is part of the unreleased v2
+the merge helper. This capability correction is part of the released v2.0.0
 migration; do not enable a queue for this workflow.
 
 Required Kernel jobs never fall back across profiles. A `self-hosted-mac`
@@ -1724,3 +1731,27 @@ An assigned coding identity is pending execution, not a completed review.
 Rollback requires the prior source revision and preserved configuration records,
 not rewriting review history. Consumer installation and live Driver validation
 remain explicit operations after source verification.
+
+## Consumer compatibility and deployment evidence
+
+Use the [read-only consumer inspection](../integrations/adoption/README.md) before
+reconciling copied governance files. Use the [deployment guide](../integrations/deployment/README.md)
+and [evidence template](../templates/deployment-evidence.md) within the consumer's
+existing delivery platform. Neither establishes live adoption or deployment by itself.
+
+### Optional installed Hermes compatibility checks
+
+The default source suite is independent of an installed Hermes runtime. Its two
+real-runtime compatibility cases are skipped unless `HERMES_TEST_PYTHON` names
+an explicit installation. To demand both registration and Telegram-path evidence:
+
+```bash
+HERMES_TEST_PYTHON=/absolute/path/to/hermes/venv/bin/python \
+CHOPIN_REQUIRE_TELEGRAM=1 python3 -m pytest \
+  tests/test_chopin_integration.py::test_real_hermes_plugin_registration \
+  tests/test_chopin_integration.py::test_real_hermes_plugin_and_telegram_command_path
+```
+
+An explicitly missing runtime or required Telegram capability fails. These
+compatibility checks are separate from source-unit results and do not prove
+autonomous Driver continuation, consumer deployment, or production health.

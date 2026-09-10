@@ -138,6 +138,13 @@ class AccountBinding:
                         f"{self.account_id}: {project!r} is outside this account's client "
                         "scope. " + policy.restriction
                     )
+        self._validate_environment(policy)
+        if type(self.max_sessions) is not int or not 1 <= self.max_sessions <= 8:
+            raise AccountScopeError(f"{self.account_id}: max_sessions must be 1-8")
+        if type(self.sessions_in_use) is not int or self.sessions_in_use < 0:
+            raise AccountScopeError(f"{self.account_id}: sessions_in_use must be >= 0")
+
+    def _validate_environment(self, policy: AccountPolicy) -> None:
         allowed_env = get_route(policy.route).env_allowlist
         for name, value in self.env.items():
             if name not in allowed_env:
@@ -150,10 +157,6 @@ class AccountBinding:
             value = self.env.get(required, "")
             if not Path(value).is_absolute() or ".." in Path(value).parts:
                 raise HarnessBindingError(f"{self.account_id}: absolute {required} profile required")
-        if type(self.max_sessions) is not int or not 1 <= self.max_sessions <= 8:
-            raise AccountScopeError(f"{self.account_id}: max_sessions must be 1-8")
-        if type(self.sessions_in_use) is not int or self.sessions_in_use < 0:
-            raise AccountScopeError(f"{self.account_id}: sessions_in_use must be >= 0")
 
     @property
     def policy(self) -> AccountPolicy:

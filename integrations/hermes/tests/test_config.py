@@ -115,6 +115,12 @@ def test_an_unconfigured_repository_has_no_profile(tmp_path):
         config.runner_profile("gillella/other")
 
 
+@pytest.mark.parametrize("epoch", [None, True, "", "a" * 65, "unsafe revision"])
+def test_worker_retry_epoch_requires_explicit_bounded_revision(tmp_path, epoch):
+    with pytest.raises(DriverError, match="worker_retry_epoch"):
+        Config(write_config(tmp_path, worker_retry_epoch=epoch))
+
+
 @pytest.mark.parametrize("value,ok", [(1, True), (8, True), (0, False), (9, False), ("2", False), (True, False), (2.0, False)])
 def test_max_sessions_is_a_bounded_integer(tmp_path, value, ok):
     config_path = write_config(tmp_path, repo="gillella/repo")

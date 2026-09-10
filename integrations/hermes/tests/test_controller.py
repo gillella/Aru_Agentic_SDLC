@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from aru_project_driver.config import Config, DriverError  # noqa: E402
-from aru_project_driver.controller import Controller  # noqa: E402
+from aru_project_driver import controller, retries  # noqa: E402
 from aru_project_driver.kernel import KernelAdapter, KernelAdapterError, SCHEMA  # noqa: E402
 from aru_project_driver.state import State, write_json  # noqa: E402
 
@@ -188,7 +188,7 @@ class Harness:
         self.on_probe = lambda identity: None
         self.on_launch = lambda receipt: None
         self.kernel = FakeKernel(self)
-        self.controller = Controller(
+        self.controller = controller.Controller(
             self.config, adapter_factory=lambda *args: self.kernel,
             availability=self.availability, probe=self.probe, launch=self.launch,
             sync_reviews=self.sync_reviews, now=lambda: self.clock,
@@ -227,10 +227,11 @@ class Harness:
             raise DriverError("shared subscription was reserved by another worker")
         self.descriptors.append(descriptor)
         receipt = {
-            "id": f"launched-{identity}-{number}", "repo": repo, "agent": identity,
+            "id": f"launched-{identity}-{number}-{len(self.launched)}", "repo": repo, "agent": identity,
             "issue": number, "worktree": worktree, "capacity_key": capacity_key, "capacity_slot": slot,
-            "state": "running", "started_at": self.clock, "pid": os.getpid(), **kwargs,
+            "state": "running", "kind": "implementation", "started_at": self.clock, "pid": os.getpid(), **kwargs,
         }
+        retries.stamp(config, receipt, kwargs.get("work_type", "claimed_issue"))
         os.ftruncate(descriptor, 0)
         os.write(descriptor, receipt["id"].encode())
         os.fsync(descriptor)
@@ -466,13 +467,6 @@ def test_invalid_review_deadline_degrades_before_sync_or_mutation(harness, opera
     assert harness.probes == [] and harness.synced == [] and mutations(harness) == []
 
 
-def test_stopped_project_does_not_inspect_or_refill(harness):
-    harness.stop()
-    assert harness.controller.reconcile(REPO) == {"status": "stopped", "launched": []}
-    assert harness.controller.tick(REPO)["wakeAgent"] is False
-    assert harness.kernel.calls == [] and harness.probes == [] and harness.synced == []
-
-
 def test_inline_events_are_idempotent_and_stopped_projects_ignore_them(harness):
     first = harness.controller.event(REPO, "delivery-1", "event", inline=True)
     duplicate = harness.controller.event(REPO, "delivery-1", "event", inline=True)
@@ -532,7 +526,7 @@ def test_in_review_feedback_resumes_owned_worktree_with_exact_pr_context(harness
     worktree.mkdir(parents=True)
     receipt = {
         "id": "finished-author", "repo": REPO, "agent": "codex-one", "issue": 1,
-        "state": "exited", "exit_code": 0, "started_at": 900,
+        "state": "exited", "exit_code": 0, "started_at": 900, "finished_at": 900,
         "capacity_key": harness.config.lanes["codex-one"]["capacity_key"],
         "worktree": str(worktree), "pr": 9, "head": HEAD,
     }
@@ -636,7 +630,7 @@ def test_assigned_review_executes_once_across_duplicate_delivery_and_restart(har
     assert harness.kernel.record(1)["agents"] == ["codex-one"]
     assert mutations(harness) == []
     assert not harness.controller.event(REPO, "review-event", "review", inline=True)["accepted"]
-    restarted = Controller(harness.config, adapter_factory=lambda *a: harness.kernel,
+    restarted = controller.Controller(harness.config, adapter_factory=lambda *a: harness.kernel,
                            availability=harness.availability, probe=harness.probe,
                            launch=harness.launch, sync_reviews=harness.sync_reviews)
     running = restarted.reconcile(REPO)

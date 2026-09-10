@@ -102,7 +102,9 @@ def test_real_children_preserve_progress_continue_and_stop_at_owned_limit(qh, mo
     if reviewing:
         assigned_review(qh)
     else:
-        terminal(qh, identity, "prepared")
+        prepared = terminal(qh, identity, "prepared")
+        prepared["state"] = "prepared"  # Claim/branch recovery before any child attempt.
+        write_json(qh.state.worker_path(prepared["id"]), prepared)
         qh.kernel.issues = qh.kernel.issues[:1]
     lane = qh.config.lanes[identity]
     code = tmp_path / "bounded_native.py"

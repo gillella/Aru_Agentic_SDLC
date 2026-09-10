@@ -18,12 +18,11 @@ from .errors import (
     ContradictoryTaskError, RiskEvidenceError, UnknownTaskError, UnsafeScopeError,
 )
 from .registry import PROJECT_RE, TASK_CLASSES, task_class
+from .risk import review_risk_tier
+from .lineage import AuthorIdentity
 
 TASK_LABEL_PREFIX = "aru-task:"
 RISK_LABEL_PREFIX = "aru-risk:"
-
-from .risk import review_risk_tier
-from .lineage import AuthorIdentity
 
 
 def tier_for_path(path: str) -> int:

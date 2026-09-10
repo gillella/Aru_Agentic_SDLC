@@ -10,6 +10,15 @@ HEAD = "a" * 40
 BASE = "b" * 40
 
 
+def board_evidence(status="In Review"):
+    return {"project_id": "PVT_1", "item_id": "PVTI_7", "status_field_id": "FIELD_1", "status": status}
+
+
+@pytest.fixture(autouse=True)
+def isolated_board_evidence(monkeypatch):
+    monkeypatch.setattr(merge_state, "project_item_evidence", lambda _n: board_evidence())
+
+
 def ready_pr(**overrides):
     record = dict(
         number=10, body="Closes #7", state="OPEN", isDraft=False,
@@ -86,6 +95,7 @@ def test_issue_gate_checks_actual_paths_with_canonical_touches_parser(monkeypatc
     assert evidence == [dict(
         issue=7, criteria=1, acceptance=[{"done": True, "text": "exact behavior is verified"}],
         touches=["src/example.py", "tests/**"], claimant="codex-1",
+        project=board_evidence(), dependencies=[],
     )]
 
 
@@ -489,6 +499,7 @@ def install_review_boundary(monkeypatch, world, mutate, *, boundary='pr', tier=2
 
     monkeypatch.setattr(merge_pr, 'pull_request', lambda _n: read('pr', world['pr']))
     monkeypatch.setattr(merge_state, 'issue', lambda _n: read('issue', issue_record('scripts/merge_pr.py')))
+    monkeypatch.setattr(merge_state, 'project_item_evidence', lambda _n: board_evidence())
     monkeypatch.setattr(merge_pr, 'pull_changed_paths', lambda _n: ['scripts/merge_pr.py'])
     monkeypatch.setattr(merge_pr, 'review_risk_tier', lambda _p: tier)
     monkeypatch.setattr(merge_pr, 'ci_verdict', lambda _n: read(

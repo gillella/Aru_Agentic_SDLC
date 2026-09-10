@@ -92,6 +92,7 @@ def status(config: Config, repo: str, *, timeout_seconds: float = 20) -> dict:
                 "id", "agent", "issue", "pr", "head", "state", "pid", "exit_code", "worktree",
                 "started_at", "finished_at", "wake_error", "outcome", "reason", "retry_blocked",
                 "policy_fingerprint", "result_path", "quota_decision", "quota_continuation", "quota_measurement",
+                "retry_observation",
             )} for r in state.workers(repo)]
             result.update(enabled=data["enabled"], last_checked_at=data.get("last_checked_at"),
                           last_error=data.get("last_error"), last_observation=data.get("last_observation"),

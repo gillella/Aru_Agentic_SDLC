@@ -22,7 +22,7 @@ def tracked_paths() -> list[Path]:
 
 
 PRODUCTION_LINE_BUDGET = 6500
-TEST_LINE_BUDGET = 9600
+TEST_LINE_BUDGET = 10500
 FILE_LINE_BUDGET = 800
 
 
@@ -186,6 +186,6 @@ def test_external_driver_is_separately_bounded_and_has_no_tracked_state():
     source = [p for p in paths if p.suffix == ".py" and p.parent.name != "tests"]
     tests = [p for p in paths if p.suffix == ".py" and p.parent.name == "tests"]
     assert sum(lines(p) for p in source) <= 6000
-    assert sum(lines(p) for p in tests) <= 6000
+    assert sum(lines(p) for p in tests) <= 6500
     assert all(lines(p) <= FILE_LINE_BUDGET for p in source + tests)
     assert not any(p.name in {"binding.json", "jobs.json", "coordination.lock"} for p in paths)

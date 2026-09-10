@@ -10,7 +10,7 @@ from .classify import TaskRequest, derive_risk_tier
 from .errors import (ExternalFirstError, HeadMismatchError, ReviewAuthorityError,
                      ReviewIndependenceError)
 from .lineage import AuthorIdentity, extend_history
-from .registry import persona, account
+from .registry import persona
 
 MUTATES_KERNEL_AUTHORITY = False
 

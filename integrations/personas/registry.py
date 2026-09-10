@@ -707,31 +707,35 @@ def personas_for_capacity(capacity_key: str) -> tuple[str, ...]:
 # Self-validation
 # --------------------------------------------------------------------------- #
 
+def _validate_persona(item: Persona) -> None:
+    catalog.route(item.route)
+    role(item.native_role)
+    for acting in item.acting_roles:
+        role(acting)
+    if item.canonical_effort not in item.allowed_efforts:
+        raise PersonaPolicyError(f"{item.id}: canonical effort is not allowed")
+    if item.escalated_effort and item.escalated_effort not in item.allowed_efforts:
+        raise PersonaPolicyError(f"{item.id}: escalated effort is not allowed")
+    if set(item.model_ids) != set(item.allowed_efforts):
+        raise PersonaPolicyError(f"{item.id}: model identifiers and efforts disagree")
+    if item.lineage != account(accounts_for_route(item.route)[0]).lineage:
+        raise PersonaPolicyError(f"{item.id}: lineage disagrees with its route accounts")
+    for effort, model in item.model_ids.items():
+        catalog.require_effort(item.route, model, effort)
+    for name in (item.primary_task, *item.also_eligible):
+        task_class(name)
+    if item.id not in task_class(item.primary_task).candidates:
+        raise PersonaPolicyError(f"{item.id}: not listed by its own primary task class")
+    if item.review_scope not in {"none", "routine", "high_risk"}:
+        raise PersonaPolicyError(f"{item.id}: unknown review scope")
+    if item.review_scope != "none" and "code_reviewer" not in item.role_ids:
+        raise PersonaPolicyError(f"{item.id}: holds review scope without the reviewer role")
+
+
 def validate_registry() -> None:
     """Prove every shipped persona is a real, assignable, self-consistent identity."""
     for item in PERSONAS.values():
-        catalog.route(item.route)
-        role(item.native_role)
-        for acting in item.acting_roles:
-            role(acting)
-        if item.canonical_effort not in item.allowed_efforts:
-            raise PersonaPolicyError(f"{item.id}: canonical effort is not allowed")
-        if item.escalated_effort and item.escalated_effort not in item.allowed_efforts:
-            raise PersonaPolicyError(f"{item.id}: escalated effort is not allowed")
-        if set(item.model_ids) != set(item.allowed_efforts):
-            raise PersonaPolicyError(f"{item.id}: model identifiers and efforts disagree")
-        if item.lineage != account(accounts_for_route(item.route)[0]).lineage:
-            raise PersonaPolicyError(f"{item.id}: lineage disagrees with its route accounts")
-        for effort, model in item.model_ids.items():
-            catalog.require_effort(item.route, model, effort)
-        for name in (item.primary_task, *item.also_eligible):
-            task_class(name)
-        if item.id not in task_class(item.primary_task).candidates:
-            raise PersonaPolicyError(f"{item.id}: not listed by its own primary task class")
-        if item.review_scope not in {"none", "routine", "high_risk"}:
-            raise PersonaPolicyError(f"{item.id}: unknown review scope")
-        if item.review_scope != "none" and "code_reviewer" not in item.role_ids:
-            raise PersonaPolicyError(f"{item.id}: holds review scope without the reviewer role")
+        _validate_persona(item)
     for family in TASK_CLASSES.values():
         if not family.candidates:
             raise PersonaPolicyError(f"{family.name}: no approved candidate")

@@ -1,8 +1,11 @@
 """SYNTHETIC ONLY: all success probes here are invented test fixtures."""
 from dataclasses import replace
 from datetime import datetime, timezone
-from integrations.personas import *
-from integrations.personas.registry import ACCOUNTS, ROLES
+from integrations.personas import (
+    AccountBinding, AuthorIdentity, EvidenceStore, FleetBinding, HarnessBinding, PERSONAS,
+    ProbeRecord, PromptContext, ReviewAssignment, TaskRequest,
+)
+from integrations.personas.registry import ACCOUNTS
 
 NOW = datetime(2026, 9, 9, 18, tzinfo=timezone.utc)
 PROJECT = "gillella/Aru_Agentic_SDLC"

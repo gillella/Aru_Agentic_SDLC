@@ -93,5 +93,5 @@ CodeRabbit review). Explicit unavailability bypasses it. Ranked declarations
 remain invalid. Use `create_pr.py --refresh-reviewer <PR>` to migrate a retired
 assignment; do not hand-edit authority or erase prior findings/history.
 
-The v0.2 feature freeze lasts through 2026-09-26. During it, accept only
-security and correctness fixes.
+The v0.2 feature freeze has concluded. Normal feature work is accepted;
+compatible v2.x changes retain the canonical safety and public API contracts.

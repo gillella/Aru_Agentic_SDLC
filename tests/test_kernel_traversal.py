@@ -137,6 +137,10 @@ def traverse(monkeypatch, number: int) -> dict:
     monkeypatch.setattr(merge_pr, "pull_request", lambda _number: copy.deepcopy(state["pr"]))
     monkeypatch.setattr(merge_pr, "pull_changed_paths", lambda _n: ["app.py", "tests/test_app.py"])
     monkeypatch.setattr(merge_state, "issue", current_issue)
+    monkeypatch.setattr(merge_state, "project_item_evidence", lambda _n: {
+        "project_id": "PVT_1", "item_id": f"PVTI_{number}", "status_field_id": "FIELD_1",
+        "status": merge_state.status_of(state["issue"]),
+    })
     ci = {"head": "a" * 40, "state": "success", "checks": ["Verify"]}
     monkeypatch.setattr(merge_pr, "ci_verdict", lambda _n: ci)
 

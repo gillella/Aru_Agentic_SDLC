@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from . import execution, scheduler, dependencies, permissions, quota, quota_boundary
+from . import execution, scheduler, dependencies, permissions, quota, quota_boundary, retries
 from .config import Config, DriverError
 from . import handoff_contract
 from .kernel import KernelAdapter, KernelAdapterError
@@ -120,7 +120,7 @@ class Controller:
             actions.append({**work, "type": "unmanaged_claim",
                             "reason": "existing work needs explicit owner adoption"})
             return
-        receipt = max(owned, key=lambda r: r["started_at"])
+        receipt = retries.latest_attempt(owned)
         blocker = next((reason for r in owned
                         if (reason := permissions.retry_blocker(self.config, r, work))), None)
         if blocker:
@@ -135,6 +135,8 @@ class Controller:
                 actions.append({**work, "type": "worker_blocked", "execution": "blocked",
                                 "reason": str(exc), "worker_id": receipt["id"],
                                 "owner": "Hermes Driver completion/heartbeat"})
+        elif retry := retries.gate(self.config, self.state, repo, work, owned, self.now()):
+            actions.append({**work, **retry})
         elif work["agent"] in available:
             resumes.append({**work, "worktree": receipt.get("worktree")})
 
@@ -204,6 +206,8 @@ class Controller:
                     if r.get("state") in {"launching", "running"} and self._holds_reservation(r)})
 
     def _action_due(self, action: dict) -> bool:
+        if action.get("type") == "worker_retry_wait":
+            return action["retry_at"] <= self.now()
         if action.get("execution") == "running":
             return False
         if action.get("type") == "dependency":
@@ -293,7 +297,7 @@ class Controller:
             # An actionable observation is retried on the next heartbeat even
             # when its fingerprint repeats after a failed probe or missed event.
             wake = plan["actionable"]
-            needs_attention = any(a.get("type") in {"unmanaged_claim", "ownership_conflict", "dependency"}
+            needs_attention = any(a.get("retry_exhausted") or a.get("type") in {"unmanaged_claim", "ownership_conflict", "dependency"}
                                   for a in plan["actions"])
             wake |= needs_attention and plan["fingerprint"] != state.get("last_fingerprint")
             if wake:
@@ -391,6 +395,7 @@ class Controller:
         launched.append(self.launch(
             self.config, repo, work["agent"], work["issue"], str(worktree),
             kind="remediation", pr=work.get("pr"), head=work.get("head"),
+            work_type=work["type"],
         ))
 
     @staticmethod

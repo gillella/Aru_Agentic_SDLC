@@ -141,6 +141,23 @@ Commands must keep their children in that process group; detached background
 workers are unsupported. An inherited capacity lock held by a surviving process
 continues to block reuse until it exits.
 
+Standard author workers have a shared retry safeguard regardless of provider:
+at most three attempts at the same kernel action, issue, PR and head, with
+60-second and 120-second backoffs before the two retries. The recovery heartbeat
+owns the next eligible activation; these delays are minimums, not timing promises.
+Exit zero, changed log prose, duplicate events and Stop/Start do not count as
+governed progress. Lost workers whose reservation has gone also consume an attempt.
+A new kernel action or PR/head starts a new bounded task. After the limit, the
+Driver reports an operator-owned blocker and preserves the claim and worktree.
+An operator who has inspected and corrected the cause may change the project's
+optional `worker_retry_epoch` to a new explicit revision (1–64 letters, digits,
+underscores or hyphens). Do not bump it repeatedly to conceal the same failure.
+Retry observations stay in existing private worker receipts across restarts;
+do not delete them to retry. Legacy receipts begin accounting when first observed.
+Claim/branch preparation and a Stop-fenced child that never ran remain recoverable.
+Existing structured permission denials and quota recovery bounds retain their
+stricter rules. These receipts cannot authorize a claim, review or merge.
+
 `handoff_to` is an optional allowlist of other configured projects. It does not
 move a claim or create lifecycle state. A source issue may carry one typed,
 machine-readable marker in its body after the human requirements, for example:
