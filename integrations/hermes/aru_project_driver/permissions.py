@@ -11,6 +11,8 @@ from .config import DriverError
 
 FACTORY = "gillella/Aru_Agentic_SDLC"
 COMPILER = "factory-claude/v1"
+RESULT_BYTES = 8 * 1024 * 1024
+RECEIPT_DETAILS_BYTES = 8192
 
 
 def digest(value: object) -> str:
@@ -160,6 +162,8 @@ def compile_policy(config, record: dict, adapter, run, *, preflight: bool = Fals
             "--output-format", "json", "--no-session-persistence"]
     prompt = record["prompt"] + "\nUse only these literal shell commands (no extra flags or shell composition):\n" + "\n".join(shlex.join(c) for c in commands)
     prompt += (f"\nUse Read for canonical rules. Body scratch path: {body}; never stage it. "
+               'Create a missing body with Edit using old_string="" and new_string containing the body; '
+               "Read an existing body before editing it. "
                "Canonical access is for reading only. No author review/merge authority. "
                "CLI grants are not OS isolation; tests/helpers execute trusted project code. "
                "Stop on any denial and report the exact blocker.")
@@ -175,11 +179,28 @@ def compile_policy(config, record: dict, adapter, run, *, preflight: bool = Fals
 
 
 def observe_result(path: Path, exit_code: int) -> dict:
+    observation = _observe_result(path, exit_code)
+    # Reconciliation scans receipts repeatedly; keep full model/tool payloads
+    # only in the private result log, never amplified into receipt/status text.
+    if len(json.dumps(observation).encode()) > RECEIPT_DETAILS_BYTES:
+        observation = {key: observation[key] for key in (
+            "outcome", "retry_blocked", "governed_completion") if key in observation}
+        observation.update(details_omitted=True,
+                           reason=f"Claude {observation['outcome']}; full details in worker result_path log")
+    elif len(observation["reason"].encode()) > 2048:
+        observation["reason"] = "Claude " + observation["outcome"] + "; full details in worker result_path log"
+    return observation
+
+
+def _observe_result(path: Path, exit_code: int) -> dict:
     """Claude SDK result envelope; reported artifacts still require GitHub reread."""
     try:
-        if path.stat().st_size > 8 * 1024 * 1024:
-            raise ValueError("result too large")
-        result = json.loads(path.read_text())
+        with path.open("r+b") as stream:
+            payload = stream.read(RESULT_BYTES + 1)
+            if len(payload) > RESULT_BYTES:
+                stream.truncate(RESULT_BYTES)
+                raise ValueError("result too large; retained first 8 MiB in result log")
+        result = json.loads(payload)
         if (not isinstance(result, dict) or result.get("type") != "result"
                 or type(result.get("is_error")) is not bool
                 or not isinstance(result.get("permission_denials"), list)

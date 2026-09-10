@@ -299,8 +299,12 @@ def _start_agent(state: State, record: dict, argv: list[str], descriptor: int, o
 def finish_worker(path: Path, record: dict, output, exit_code: int) -> None:
     if output is not None:
         output.close()
-        record["process_reason"] = record.get("reason")
-        record.update(permissions.observe_result(Path(record["result_path"]), exit_code))
+        # Stop can fence admission after the result file is opened. No child
+        # means no result was expected; preserve the admission reason so Start
+        # can revalidate and resume through the existing controller.
+        if record.get("child_pid") is not None:
+            record["process_reason"] = record.get("reason")
+            record.update(permissions.observe_result(Path(record["result_path"]), exit_code))
     record.update(state="exited", exit_code=exit_code, finished_at=time.time())
     write_json(path, record)
 

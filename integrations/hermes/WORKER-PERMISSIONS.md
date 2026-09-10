@@ -28,6 +28,13 @@ the helper appends it. No issue claiming, reviewer assignment, merge, release,
 deployment or arbitrary helper execution is granted. Exact commands appear in
 the worker prompt; extra flags/alternate spellings may be denied deliberately.
 
+For a missing scratch body, use `Edit` with `old_string=""` and the body in
+`new_string`; read an existing body before editing it. The exact scratch-path
+Edit grant applies to both roles and does not require a broader grant. The
+installed 2.1.266 source supports creation through Edit; see the
+[bounded review evidence](REMEDIATION-638.md). Live harness behavior remains an
+operator gate.
+
 Reviewer grants substitute exact PR review submission for author edits,
 commit/push and PR creation. Reviewers may write the attestation scratch file,
 but have no source-edit grant. Their authenticated actor is checked using
@@ -65,6 +72,21 @@ Claude `result` envelope (`subtype`, `is_error`, `permission_denials`). A denial
 retains its tool/input, including at exit zero. Invalid, absent, oversized or
 error results block rather than becoming success or subscription quota evidence.
 
+Receipts retain at most 8 KiB of serialized result observation details; larger
+observations retain only outcome/blocker flags and a pointer to `result_path`.
+Result-derived reasons are at most 2 KiB, keeping repeated receipt reads and
+status reports small. Full accepted envelopes, including denial inputs, stay in
+the private 0600 result log up to 8 MiB. On completion, an oversized log is
+trimmed to its first 8 MiB and classified unavailable, never successful. This is
+a completed-log limit, not a streaming disk quota while the child runs. These
+logs can contain sensitive model/tool input; inspect locally and publish only
+redacted evidence. Existing receipts are retained without retroactive rewriting.
+
+The receipt's argv is trusted operator-owned execution input. Its config
+fingerprint detects configuration drift, not tampering with the receipt that
+also contains the fingerprint. The existing private state directory and local
+account are the trust boundary; this is not cryptographic receipt authentication.
+
 Even a clean reported success is only a report. The controller rereads GitHub;
 if the task still requires the same author work, its terminal receipt blocks a
 repeat. Changed PR/head or an explicitly approved lane/policy revision (including
@@ -74,6 +96,12 @@ all receipts. Do not repeatedly bump the epoch to conceal an unchanged failure.
 Existing review recovery retains its single bounded authority-refresh event;
 only a changed policy permits a new attempt at an unchanged reviewer assignment.
 Process success never supplies independent review or governed completion.
+
+A worker fenced by Stop before child creation has no result to classify. It
+retains its Stop/admission reason and releases its reservation without a result
+retry blocker. Start can revalidate and resume it once through normal admission;
+an old supervisor still cannot cross the Stop nonce. If a child did run, its
+denial/error result remains blocking even when Stop occurs before completion.
 
 Legacy text receipts are retained unchanged: this repair does not retroactively
 classify #637 by parsing prose. The first authorized opted-in launch after

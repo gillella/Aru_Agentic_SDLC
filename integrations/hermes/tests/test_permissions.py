@@ -105,6 +105,8 @@ def test_author_permissions_are_exact_task_commands_and_scoped_file_rules(scoped
     assert not any("review" in c or "merge" in c or "-c" in c for c in commands)
     assert not any("*" in item for c in commands for item in c)
     assert f"Edit(/{record['worktree']}/integrations/hermes/**)" in argv
+    assert f"Edit(/{record['worktree']}/.aru-worker-body.md)" in argv
+    assert 'old_string=""' in argv[-1]
     assert not any(a in {"Bash", "Read", "Edit", "Write", "--dangerously-skip-permissions"} for a in argv)
     before = deepcopy(result)
     config.lanes["model-one"]["command"][3] = "changed-model"
@@ -144,6 +146,8 @@ def test_reviewer_permissions_and_submission_actor_are_distinct(scoped, actor, m
     assert not any(c[:2] in (["git", "push"], ["git", "commit"]) for c in commands)
     assert not any("create_pr.py" in str(c) or "merge_pr.py" in str(c) for c in commands)
     assert not any(a.startswith("Edit(") and "integrations/hermes" in a for a in result["argv"])
+    assert f"Edit(/{record['worktree']}/.aru-worker-body.md)" in result["argv"]
+    assert 'old_string=""' in result["argv"][-1]
     monkeypatch.setenv(execution.APP_RUNNER_ENV, "author-runner")
     env = execution.scoped_environment(config, record["repo"], "review", record["review"], result)
     assert env.get(execution.APP_RUNNER_ENV) == ("/opt/bin/aru-app" if actor.endswith("[bot]") else None)
@@ -195,7 +199,8 @@ def test_missing_or_malformed_result_never_becomes_success(tmp_path, content):
     assert permissions.observe_result(path, 0)["outcome"] == "result_unavailable"
 
 
-def test_worker_observes_denial_and_keeps_process_exit_separate(synthetic_execution, monkeypatch):
+@pytest.mark.parametrize("stop_after_child", [False, True])
+def test_worker_observes_denial_and_keeps_process_exit_separate(synthetic_execution, monkeypatch, stop_after_child):
     config, state, tree = synthetic_execution
     descriptor, record = execution_tests.reserve_worker(config, state, tree)
     # An immutable synthetic snapshot exercises the existing supervisor, with no Claude call.
@@ -206,6 +211,8 @@ def test_worker_observes_denial_and_keeps_process_exit_separate(synthetic_execut
         kwargs["stdout"].write(json.dumps({"type": "result", "subtype": "success", "is_error": False,
             "permission_denials": [{"tool_name": "Read", "tool_input": {"file_path": "/canonical/AGENTS.md"}}]}))
         kwargs["stdout"].flush()
+        if stop_after_child:
+            state.request_stop(record["repo"])
         return SimpleNamespace(pid=123, wait=lambda **k: 0)
     monkeypatch.setattr(execution.subprocess, "Popen", process)
     monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: {})
@@ -312,3 +319,72 @@ def test_malformed_retry_receipts_fail_closed(scoped, value):
     write_json(state.worker_path(record["id"]), record)
     with pytest.raises(DriverError, match="retry blocker"):
         state.worker(record["id"])
+
+
+@pytest.mark.parametrize("stop_at", ["before-worker", "before-restart", "during-revalidation"])
+def test_policy_stop_without_child_resumes_once_after_restart(tmp_path, monkeypatch, stop_at):
+    h = Harness(tmp_path)
+    h.one_lane()
+    h.kernel.issues = h.kernel.issues[:1]
+    h.controller.reconcile(REPO)
+    record = h.launched[0].copy()
+    fp = permissions.fingerprint(h.config, REPO, record["agent"])
+    record.update(prompt="synthetic", admission_stop=h.state.stop_nonce(REPO),
+                  policy_fingerprint=fp, permission_snapshot={"argv": ["synthetic"], "policy_fingerprint": fp})
+    write_json(h.state.worker_path(record["id"]), record)
+    wakes = []
+    monkeypatch.setattr(scheduler, "ensure_heartbeat", lambda *a, **k: {"heartbeat_job_id": "one"})
+    monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: wakes.append(k) or {})
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("child crossed Stop"))
+    if stop_at == "during-revalidation":
+        monkeypatch.setattr(execution, "_revalidate_review_worker", lambda *a: h.state.request_stop(REPO))
+    else:
+        h.state.request_stop(REPO)
+        if stop_at == "before-restart":
+            driver.start(h.config, REPO)  # isolated synthetic state only
+    try:
+        assert execution.worker_main(h.config, record["id"], h.descriptors.pop()) == 1
+        receipt = h.state.worker(record["id"])
+        assert "stop" in receipt["reason"].lower()
+        assert not receipt.get("retry_blocked")
+        assert "child_pid" not in receipt
+        assert not h.state.capacity_busy(record["capacity_key"])
+        if stop_at != "before-restart":
+            assert not wakes
+            assert h.controller.reconcile(REPO)["status"] == "stopped"
+            driver.start(h.config, REPO)
+        assert h.controller.reconcile(REPO)["status"] == "running"
+        for _ in range(3):
+            h.controller.reconcile(REPO)
+            h.controller.tick(REPO)
+        assert len(h.launched) == 2
+        assert h.kernel.record(1)["agents"] == [record["agent"]]
+    finally:
+        h.close()
+
+
+@pytest.mark.parametrize("field", ["result", "errors", "subtype", "permission_denials"])
+def test_large_result_details_stay_in_log_not_receipt_or_status(tmp_path, field):
+    payload = {"type": "result", "subtype": "success", "is_error": False,
+               "permission_denials": [], "result": "done"}
+    detail = "synthetic-detail-" * 32000
+    payload[field] = ([{"tool_name": "Bash", "tool_input": {"command": detail}}]
+                      if field == "permission_denials" else detail)
+    path = tmp_path / "result.json"
+    original = json.dumps(payload)
+    path.write_text(original)
+    result = permissions.observe_result(path, 0)
+    assert len(json.dumps(result).encode()) <= 16 * 1024
+    assert len(result["reason"].encode()) <= 2048
+    assert result["retry_blocked"]
+    assert result["details_omitted"] is True
+    assert path.read_text() == original  # full denial evidence remains outside receipts
+
+
+def test_oversized_finished_log_is_bounded_and_still_blocks(tmp_path):
+    path = tmp_path / "result.json"
+    path.write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+    result = permissions.observe_result(path, 0)
+    assert result["outcome"] == "result_unavailable" and result["retry_blocked"]
+    assert "too large" in result["reason"]
+    assert path.stat().st_size == 8 * 1024 * 1024
