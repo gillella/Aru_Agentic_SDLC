@@ -1112,6 +1112,50 @@ The reverse change follows the normal PR, exact-head governed verification,
 external-review, and merge path.
 Never rewrite shared default-branch history.
 
+### Recover legacy merged-PR provenance
+
+Some PRs merged before author metadata was enforced carry no `author:` or
+`author-family:` label. Their linked issues stay CLOSED while still holding an
+active claim, so `create_pr.py --refresh-reviewer` cannot select a reviewer and
+a consumer Driver cannot admit new work.
+
+`create_pr.py --recover-legacy` repairs exactly that state and nothing else. The
+default is a read-only preview:
+
+```bash
+python3 scripts/create_pr.py \
+  --recover-legacy 207 --issue 206 \
+  --expected-head <full-40-character-historical-head> \
+  --agent m1 --author-family claude-code \
+  --author-github-login <merged-pr-author-actor> --json
+```
+
+Re-run the identical command with `--apply` to write. Recovery refuses unless
+the PR is a confirmed merged PR whose head equals `--expected-head` exactly, the
+body closes exactly the given issue, that issue is CLOSED, and the historical
+governed CI verdict for that same head is `success`. The declared identity must
+equal the issue's recorded claimant and resolve to a configured coding family;
+the merged head commit must not contradict it. A Git author name alone is never
+accepted as model-lineage proof, so an unknown family fails closed rather than
+being inferred.
+
+Recovery writes at most two things: the truthful `author:`/`author-family:`
+labels, and the single CLOSED `In Progress` -> CLOSED `In Review` step the
+finalizer requires. Every write re-reads the PR and issue first and refuses on
+observed drift; a partial write is reported explicitly with what already landed.
+Replay is idempotent and fails closed against conflicting metadata.
+
+**Recovery is not review.** It never sets Done, ticks an acceptance criterion,
+edits an issue body, removes a claim, selects or assigns a reviewer, or records
+an approval. Reviewer selection remains exclusively `--refresh-reviewer`, and
+`merge_pr.py --finalize` keeps refusing incomplete acceptance or review. The
+receipt comment it posts is audit evidence only.
+
+Known limitation: there is no proven route to submit a GitHub APPROVED review on
+an already-merged PR. That gap is an explicit blocker for closing out such work,
+not permission to treat a comment as an approval. Do not invent an alternate
+approval channel; escalate instead.
+
 ### Recover the pre-reset framework
 
 The full framework before the v0.2 reset is preserved at tag:

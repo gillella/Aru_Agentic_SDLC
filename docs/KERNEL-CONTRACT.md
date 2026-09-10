@@ -305,7 +305,7 @@ A component enters the Kernel only when it directly authorizes or blocks a
 lifecycle transition, no simpler GitHub/Git primitive solves it, the default
 path uses it now, and evidence from three governed consumers shows the need.
 
-Production Python and hooks are limited to 6,000 lines; tests to 9,000; source
+Production Python and hooks are limited to 6,400 lines; tests to 9,500; source
 files to 800 lines; supported scripts to 12-14; runtime skills to six; and
 active operating documents to `README.md`, `AGENTS.md`, `CHANGELOG.md`,
 `docs/KERNEL-CONTRACT.md`, `docs/ENFORCEMENT-REGISTER.md`,

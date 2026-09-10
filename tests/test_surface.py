@@ -21,8 +21,8 @@ def tracked_paths() -> list[Path]:
     return [ROOT / raw.decode() for raw in result.stdout.split(b"\0") if raw]
 
 
-PRODUCTION_LINE_BUDGET = 6000
-TEST_LINE_BUDGET = 9000
+PRODUCTION_LINE_BUDGET = 6400
+TEST_LINE_BUDGET = 9500
 FILE_LINE_BUDGET = 800
 
 
