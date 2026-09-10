@@ -17,6 +17,9 @@ REVIEWER_CONFIG = "claude-code:m1@1,openai-codex:m2"
 ATTESTED = "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 CODEX_ATTESTED = "Co-Authored-By: Codex <noreply@openai.com>"
 SIGNED_MESSAGE = f"Legacy work.\n\n{ATTESTED}"
+FENCED = f"Explain an example, not authorship.\n\n```text\n{ATTESTED}\n```\n\nAn example.\n"
+QUOTED = f"Discuss a prior claim:\n{ATTESTED}\n\nThe prior claim is incorrect.\n"
+STRAY = f"Legacy work.\n\n{ATTESTED}\nThe prior claim is incorrect.\n"
 
 
 def pr_record(**overrides):
@@ -79,10 +82,11 @@ class Harness:
         if args[0] == "api":
             return {
                 "sha": args[1].rsplit("/", 1)[-1],
-                "author": {"login": self.signer},
+                "author": {"login": ACTOR},
+                "committer": {"login": self.signer},
                 "commit": {
                     "message": self.commit_message,
-                    "verification": {"verified": self.verified},
+                    "verification": {"verified": self.verified, "reason": "valid"},
                 },
             }
         return {"number": self.pr["number"], "labels": list(self.pr["labels"])}
@@ -171,12 +175,15 @@ def test_apply_preserves_every_governed_invariant(harness):
     result = recover(apply=True)
     assert result["acceptance"] == {"total": 2, "incomplete": 1}
     assert state.issue["body"] == issue_record()["body"]
-    body = [a for a in state.commands if a[:3] == ["gh", "pr", "comment"]][0][-1]
+    receipts = [a for a in state.commands if a[:3] == ["gh", "pr", "comment"]]
+    assert len(receipts) == 1
+    body = receipts[0][-1]
     assert legacy_recovery.RECEIPT_MARKER in body and "not a review, an approval" in body
     assert {"name": "agent:m1"} in state.issue["labels"]
     assert all(status != "Done" for _number, status in state.statuses)
     joined = " ".join(part for a in state.commands for part in a)
     assert "reviewer" not in joined and "review:" not in joined
+    assert not any(a[:3] == ["gh", "pr", "review"] for a in state.commands)
     assert not any("--remove-label" in a or a[:3] == ["gh", "issue", "edit"] for a in state.commands)
 
 
@@ -281,6 +288,9 @@ def test_declared_author_must_equal_the_recorded_claimant(harness):
         ("Authored by Claude Example <claude@example.com>", "canonical author-family"),
         ("claude-code anthropic claude", "canonical author-family attestation"),
         (f"Reverts a commit that said {ATTESTED!r} in prose", "canonical author-family"),
+        (FENCED, "canonical author-family attestation"),
+        (QUOTED, "canonical author-family attestation"),
+        (STRAY, "canonical author-family attestation"),
         (f"Work.\n\n{ATTESTED}\n{CODEX_ATTESTED}", "canonical author-family attestation"),
         (f"Work.\n\n{CODEX_ATTESTED}", "contradicts the attested historical family"),
     ],
@@ -304,10 +314,11 @@ def test_unverified_head_commit_signature_is_refused(harness):
         recover()
 
 
-def test_verified_commit_from_another_actor_is_refused(harness):
+def test_verified_commit_signed_by_another_actor_is_refused(harness):
+    """GitHub verifies the committer's key; the attributed author may differ."""
     state = harness()
-    state.signer = "someone-else"
-    with pytest.raises(KernelError, match="not attributed to the merged PR actor"):
+    state.signer = "other-signed-contributor"
+    with pytest.raises(KernelError, match="authenticated signer .* not the merged PR actor"):
         recover()
 
 
@@ -347,7 +358,8 @@ def test_malformed_records_are_refused(harness, kind, overrides, message):
         recover()
 
 
-@pytest.mark.parametrize(("label", "status"), [("done", "Done"), ("backlog", "Backlog")])
+@pytest.mark.parametrize(("label", "status"),
+                         [("done", "Done"), ("backlog", "Backlog"), ("ready", "Ready")])
 def test_only_in_progress_advances_to_in_review(harness, label, status):
     state = harness(issue=issue_record(labels=[{"name": "agent:m1"}, {"name": f"status:{label}"}]))
     state.board = status
@@ -361,12 +373,14 @@ def test_observed_drift_before_a_write_refuses_further_mutation(harness):
     with pytest.raises(KernelError, match="precondition drift; no further write"):
         recover(apply=True)
     assert state.commands == [] and state.statuses == []
-def failing(real, message, predicate):
-    """Wrap a harness call so selected invocations raise instead of succeeding."""
+def failing(real, message, predicate, after=False):
+    """Wrap a harness call so selected invocations raise, optionally after taking effect."""
     def call(*args):
-        if predicate(*args):
-            raise KernelError(message)
-        return real(*args)
+        if not predicate(*args):
+            return real(*args)
+        if after:
+            real(*args)  # the server accepted the request; only its response was lost
+        raise KernelError(message)
 
     return call
 
@@ -411,6 +425,19 @@ def test_landed_labels_report_attempted_when_readback_fails(harness, monkeypatch
             if mode == "raises"
             else lambda a: state.gh_json(a) if a[0] == "api" else {"number": 207, "labels": []})
     monkeypatch.setattr(legacy_recovery, "gh_json", stub)
+    with pytest.raises(legacy_recovery.LegacyRecoveryError) as caught:
+        recover(apply=True)
+    assert state.pr["labels"] and caught.value.receipt["action"] == "partial"
+    assert caught.value.receipt["attempted"] == ["author-metadata"]
+    assert caught.value.receipt["applied"] == []
+
+
+def test_a_lost_edit_response_is_reported_as_attempted_not_as_zero_mutation(harness, monkeypatch):
+    """The server took the edit before the transport failed; that is an unknown outcome."""
+    state = harness()
+    monkeypatch.setattr(legacy_recovery, "run",
+                        failing(state.run, "the edit response was lost",
+                                lambda a: a[:3] == ["gh", "pr", "edit"], after=True))
     with pytest.raises(legacy_recovery.LegacyRecoveryError) as caught:
         recover(apply=True)
     assert state.pr["labels"] and caught.value.receipt["action"] == "partial"

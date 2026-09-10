@@ -43,18 +43,18 @@ from merge_state import linked_issues, pull_request
 
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
 RECEIPT_MARKER = "aru-legacy-recovery:v1"
-# Trust boundary for historical lineage. The only evidence accepted is a
-# canonical co-author trailer carried by a commit whose signature GitHub itself
-# verified and attributed to the merged PR actor. Display names, free commit
-# prose and the current reviewer configuration are all operator-supplied text,
-# so none of them can establish what produced historical work.
+# Trust boundary for historical lineage. Evidence is a canonical co-author
+# trailer in a commit GitHub verified and whose authenticated signer is the
+# merged PR actor. Display names, free prose and current configuration are all
+# operator-supplied text and establish nothing about historical work.
 ATTESTED_FAMILY_EMAILS = {
     "noreply@anthropic.com": "claude-code",
     "noreply@openai.com": "openai-codex",
     "noreply@cursor.com": "xai-cursor",
     "noreply@google.com": "google-antigravity",
 }
-TRAILER = re.compile(r"(?im)^co-authored-by:[^<\n]*<([^>\n]+)>[ \t]*$")
+TRAILER_LINE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9-]*):[ \t]*(.*)$")
+TRAILER_EMAIL = re.compile(r"<([^>\s]+)>")
 
 
 class LegacyRecoveryError(KernelError):
@@ -120,12 +120,26 @@ def linked_closed_issue(pr: dict[str, Any], expected_issue: int) -> dict[str, An
 
 
 def attested_families(message: str) -> set[str]:
-    """Families named by canonical co-author trailers, matched on address only."""
-    return {
-        ATTESTED_FAMILY_EMAILS[address.strip().lower()]
-        for address in TRAILER.findall(message)
-        if address.strip().lower() in ATTESTED_FAMILY_EMAILS
-    }
+    """Families named by canonical co-author trailers in the real terminal block.
+
+    Mirrors ``git interpret-trailers --parse`` without executing git: only the
+    message's final paragraph counts, and only when every one of its lines is a
+    ``Token: value`` pair. A co-author line quoted in prose or inside a fenced
+    block is therefore not a trailer, exactly as git reports it, and any stray
+    or folded line makes the whole block non-trailing, which fails closed.
+    """
+    paragraphs = re.split(r"\n[ \t]*\n", message.replace("\r\n", "\n").rstrip())
+    lines = paragraphs[-1].splitlines() if len(paragraphs) > 1 else []
+    matches = [TRAILER_LINE.match(line) for line in lines]
+    if not matches or any(match is None for match in matches):
+        return set()
+    addresses = [
+        found.group(1).lower()
+        for match in matches
+        if match.group(1).lower() == "co-authored-by"
+        and (found := TRAILER_EMAIL.search(match.group(2)))
+    ]
+    return {ATTESTED_FAMILY_EMAILS[a] for a in addresses if a in ATTESTED_FAMILY_EMAILS}
 
 
 def head_commit_evidence(head: str, actor: str) -> str:
@@ -134,11 +148,14 @@ def head_commit_evidence(head: str, actor: str) -> str:
     commit = obj.get("commit") if isinstance(obj, dict) else None
     if not isinstance(obj, dict) or obj.get("sha") != head or not isinstance(commit, dict):
         raise KernelError("historical head commit evidence is unreadable")
+    # GitHub verifies the committer's key, and documents that the attributed
+    # author may differ, so author.login can never authenticate the signer.
     verification = commit.get("verification")
-    if not isinstance(verification, dict) or verification.get("verified") is not True:
+    if (not isinstance(verification, dict) or verification.get("verified") is not True
+            or verification.get("reason") != "valid"):
         raise KernelError("historical head commit signature is not verified by GitHub")
-    if not same_github_actor(str((obj.get("author") or {}).get("login") or ""), actor):
-        raise KernelError("verified head commit is not attributed to the merged PR actor")
+    if not same_github_actor(str((obj.get("committer") or {}).get("login") or ""), actor):
+        raise KernelError("the authenticated signer of the head commit is not the merged PR actor")
     families = attested_families(str(commit.get("message") or ""))
     if len(families) != 1:
         raise KernelError("historical head commit lacks exactly one canonical author-family "
@@ -249,10 +266,10 @@ def _write_author_metadata(number: int, identity: str, family: str, expected: di
     ensure_label(author_label, color="1d76db", description=f"PR authored by {identity}")
     ensure_label(family_label, color="1d76db", description=f"Author model family: {family}")
     _guard(number, issue_number, expected)
-    run(["gh", "pr", "edit", str(number), "--add-label", f"{author_label},{family_label}"])
-    # The edit itself returned success, so the labels are on the PR whatever the
-    # readback reports next. An unreadable state is never zero mutation.
+    # Recorded before the transport runs: a lost response is not evidence the
+    # server rejected the edit, and an unreadable state is never zero mutation.
     receipt["attempted"].append("author-metadata")
+    run(["gh", "pr", "edit", str(number), "--add-label", f"{author_label},{family_label}"])
     settled = gh_json(["pr", "view", str(number), "--json", "number,labels"])
     if not isinstance(settled, dict) or existing_author(settled) != (identity, family):
         raise KernelError("recovered author metadata did not settle")
@@ -390,12 +407,11 @@ def recover_from_args(args: Any) -> dict[str, Any]:
 
 # Arguments that belong to a different public mode. Creation is the default mode
 # and is identified by the absence of every mode flag below.
+CREATION_ARGS = ("title", "body", "body_file")
 MODE_FORBIDDEN = {
-    "recover_legacy": ("title", "body", "body_file", "coding_reviewer_unavailable"),
-    "refresh_reviewer": ("issue", "title", "body", "body_file", "agent", "author_family",
-                         "author_github_login"),
-    "reviewer_status": ("issue", "title", "body", "body_file", "author_family",
-                        "coding_reviewer_unavailable"),
+    "recover_legacy": CREATION_ARGS + ("coding_reviewer_unavailable",),
+    "refresh_reviewer": CREATION_ARGS + ("issue", "agent", "author_family", "author_github_login"),
+    "reviewer_status": CREATION_ARGS + ("issue", "author_family", "coding_reviewer_unavailable"),
 }
 
 
@@ -411,11 +427,6 @@ def require_exclusive_mode(args: Any) -> None:
     if selected and any(getattr(args, name, None) for name in MODE_FORBIDDEN[selected[0]]):
         flag = selected[0].replace("_", "-")
         raise KernelError(f"--{flag} cannot include another mode's arguments")
-
-
-def recovery_summary(result: dict[str, Any]) -> str:
-    return (f"legacy recovery {result['action']}: planned {result['planned'] or 'nothing'}; "
-            f"applied {result['applied'] or 'none'}")
 
 
 def recovery_failure(exc: LegacyRecoveryError, as_json: bool) -> str:

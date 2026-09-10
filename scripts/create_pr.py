@@ -48,7 +48,7 @@ from reviewer_probe import ProbeRunner, _default_probe
 from merge_state import pull_changed_paths
 from legacy_recovery import (  # shared label readers and the recovery CLI surface
     LegacyRecoveryError, label_values, one_label_value as _one_label_value,
-    recover_from_args, recovery_failure, recovery_summary, require_exclusive_mode,
+    recover_from_args, recovery_failure, require_exclusive_mode,
 )
 from review_policy import (
     ACTIVITY_GRACE_SECONDS,
@@ -728,7 +728,8 @@ def main() -> int:
             )
         elif args.recover_legacy:
             result = recover_from_args(args)
-            plain_output = recovery_summary(result)
+            plain_output = (f"legacy recovery {result['action']}: "
+                            f"planned {result['planned'] or 'nothing'}")
         elif args.refresh_reviewer:
             result = refresh_assignment(
                 args.refresh_reviewer,

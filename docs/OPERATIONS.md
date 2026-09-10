@@ -1137,10 +1137,14 @@ governed CI verdict for that same head is `success`.
 
 **Trust boundary for historical lineage.** The only accepted proof that a model
 family produced legacy work is a canonical `Co-Authored-By:` trailer, matched on
-its email address, inside a commit whose signature GitHub itself reports as
-verified and whose author GitHub attributes to the merged PR actor. Everything
-else is operator-supplied text and proves nothing: Git display names, free commit
-prose, a trailer quoted inside a message body, and the current
+its email address, in the message's real terminal trailer block — the block
+`git interpret-trailers --parse` returns, so a co-author line quoted in a fenced
+example, left in the middle of the message, or followed by prose is not a trailer
+— inside a commit whose signature GitHub itself reports as verified and whose
+authenticated committer is the merged PR actor. The attributed author is not that
+proof: GitHub verifies the committer's key and documents that the author address
+may differ. Everything else is operator-supplied text and proves nothing: Git
+display names, free commit prose, a quoted trailer, and the current
 `ARU_CODING_REVIEWERS` configuration. Configuration names who an identity is
 today; it is not evidence about the past, so it can only fail a declaration that
 disagrees with the attestation, never supply one. The `--author-family` you pass
