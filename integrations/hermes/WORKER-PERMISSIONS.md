@@ -81,6 +81,15 @@ keeps stderr in the existing log, and records process exit independently from th
 Claude `result` envelope (`subtype`, `is_error`, `permission_denials`). A denial
 retains its tool/input, including at exit zero. Invalid, absent, oversized or
 error results block rather than becoming success or subscription quota evidence.
+The [quota boundary](QUOTA.md) distinguishes a valid native session/weekly-limit
+error with empty denials from permission failures. Its opt-in recovery uses an
+account cooldown and bounded continuation, without a permission-policy revision.
+Malformed results, authentication errors and real denials remain blocked.
+A supervisor-proven quota time bound with empty Claude output or valid unfinished
+Codex events is a bounded checkpoint, not a permission revision reason. The
+supervisor saves checkpoint notes from stdout outside source and injects prior
+notes into continuation prompts; no checkpoint Read/Edit or sandbox grants are
+added, including for independent reviewers.
 
 Receipts retain at most 8 KiB of serialized result observation details; larger
 observations retain only outcome/blocker flags and a pointer to `result_path`.
@@ -113,8 +122,9 @@ retry blocker. Start can revalidate and resume it once through normal admission;
 an old supervisor still cannot cross the Stop nonce. If a child did run, its
 denial/error result remains blocking even when Stop occurs before completion.
 
-Legacy text receipts are retained unchanged: this repair does not retroactively
-classify #637 by parsing prose. The first authorized opted-in launch after
+Legacy text receipts are retained unchanged: quota recovery never retroactively
+classifies #637 by parsing prose. The quota policy may reread a retained validated
+native result as described in its runbook. The first authorized opted-in launch after
 rollout gets the new snapshot/result contract. A bare provider `OK` probe remains
 liveness evidence only, not proof of task permissions.
 

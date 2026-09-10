@@ -9,6 +9,18 @@ and versioned workflow skills, control those transitions. Configured worker
 commands and the existing supervisor execute assigned work; callbacks need no
 expanded historical factory instructions or additional provider launcher.
 
+An explicitly configured quota policy adds validated observations, conservative
+demand, shared-account reservations and bounded recovery at these same launch
+boundaries. Consult the installed `references/quota.md` (source `QUOTA.md`) for
+setup, unknown-provider limits, calibration and rollback. Never equate a liveness
+probe with sufficient task quota or change canonical review authority from an
+operational quota receipt. Unknown author and reviewer modes require separate
+explicit time allowances and bounded cumulative attempts. Insufficient/unknown
+review admission waits locally; checkpoint continuation retains the assignment.
+Supervisor-owned notes need no worker sandbox write grant. Cross-project review
+escrow expires and is revalidated on later admission. Projects without the policy
+retain the existing path.
+
 The native heartbeat runs every ten minutes. Its generated script must be a
 real file under the configured Hermes home's `scripts` directory: native
 Hermes rejects a script symlink that resolves outside that directory. The

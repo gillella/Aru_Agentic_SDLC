@@ -150,6 +150,7 @@ def make_bridge(backend, tmp_path):  # noqa: C901 -- isolated fake kernel behavi
         label_names=labels, status_of=status, parse_touches=parse_touches,
         safe_declared_path=touches_module.safe_declared_path, dependencies=dependencies,
         acceptance_items=lambda body: re.findall(r"- \[([ x])\] (.+)", body),
+        review_risk_tier=importlib.import_module("review_risk").review_risk_tier,
         project_item_status=lambda number: backend.board_override or status(backend.records[number]),
     )
     bridge.triage = SimpleNamespace(evaluate_with_states=evaluate, _priority=lambda record: 2)

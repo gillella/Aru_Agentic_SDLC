@@ -91,11 +91,16 @@ def status(config: Config, repo: str, *, timeout_seconds: float = 20) -> dict:
             workers = [{key: r.get(key) for key in (
                 "id", "agent", "issue", "pr", "head", "state", "pid", "exit_code", "worktree",
                 "started_at", "finished_at", "wake_error", "outcome", "reason", "retry_blocked",
-                "policy_fingerprint", "result_path",
+                "policy_fingerprint", "result_path", "quota_decision", "quota_continuation", "quota_measurement",
             )} for r in state.workers(repo)]
             result.update(enabled=data["enabled"], last_checked_at=data.get("last_checked_at"),
                           last_error=data.get("last_error"), last_observation=data.get("last_observation"),
                           workers=workers)
+            if config.project(repo).get("quota_admission"):
+                from .state import key, read_json
+                result["quota"] = read_json(state.root / "quota-decisions" / (key(repo) + ".json"), {"decisions": []})
+                result["quota"]["cooldowns"] = {i: read_json(state.root / "cooldowns" / (
+                    key(config.lane(repo, i)["capacity_key"]) + ".json"), {"until": 0}) for i in config.project(repo)["lanes"]}
             result["scheduler"] = scheduler.scheduler_status(
                 config.hermes_home, repo, hermes_repo=config.hermes_repo,
             )

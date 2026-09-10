@@ -7,12 +7,190 @@
   "projects": {
     "example/project": {
       "repo_dir": "/absolute/path/project",
-      "lanes": ["codex-primary", "claude-primary"],
+      "lanes": [
+        "codex-primary",
+        "claude-primary"
+      ],
       "max_workers": 2,
       "max_review_backlog": 4,
       "auto_triage": false,
       "webhook_subscriptions": [],
-      "handoff_to": []
+      "handoff_to": [],
+      "quota_admission": {
+        "version": 1,
+        "max_age_seconds": 120,
+        "headroom_percent": 15,
+        "unknown_checkpoint_seconds": 1800,
+        "unknown_review_seconds": 1800,
+        "unknown_max_attempts": 8,
+        "unknown_total_seconds": 14400,
+        "review_escrow_seconds": 900,
+        "max_recoveries": 2,
+        "cooldown_seconds": 600,
+        "author_actor": "REPLACE_WITH_AUTHOR_GITHUB_ACTOR",
+        "cold_start": [
+          {
+            "task_class": "implementation",
+            "risk": 0,
+            "model": "REPLACE_WITH_EXACT_CODEX_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 35,
+              "secondary": 35
+            }
+          },
+          {
+            "task_class": "implementation",
+            "risk": 3,
+            "model": "REPLACE_WITH_EXACT_CODEX_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 35,
+              "secondary": 35
+            }
+          },
+          {
+            "task_class": "remediation",
+            "risk": 0,
+            "model": "REPLACE_WITH_EXACT_CODEX_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 25,
+              "secondary": 25
+            }
+          },
+          {
+            "task_class": "remediation",
+            "risk": 3,
+            "model": "REPLACE_WITH_EXACT_CODEX_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 25,
+              "secondary": 25
+            }
+          },
+          {
+            "task_class": "review",
+            "risk": 0,
+            "model": "REPLACE_WITH_EXACT_CODEX_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 15,
+              "secondary": 15
+            }
+          },
+          {
+            "task_class": "review",
+            "risk": 3,
+            "model": "REPLACE_WITH_EXACT_CODEX_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 15,
+              "secondary": 15
+            }
+          },
+          {
+            "task_class": "checkpoint",
+            "risk": 0,
+            "model": "REPLACE_WITH_EXACT_CODEX_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 5,
+              "secondary": 5
+            }
+          },
+          {
+            "task_class": "checkpoint",
+            "risk": 3,
+            "model": "REPLACE_WITH_EXACT_CODEX_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 5,
+              "secondary": 5
+            }
+          },
+          {
+            "task_class": "implementation",
+            "risk": 0,
+            "model": "REPLACE_WITH_EXACT_CLAUDE_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 35,
+              "secondary": 35
+            }
+          },
+          {
+            "task_class": "implementation",
+            "risk": 3,
+            "model": "REPLACE_WITH_EXACT_CLAUDE_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 35,
+              "secondary": 35
+            }
+          },
+          {
+            "task_class": "remediation",
+            "risk": 0,
+            "model": "REPLACE_WITH_EXACT_CLAUDE_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 25,
+              "secondary": 25
+            }
+          },
+          {
+            "task_class": "remediation",
+            "risk": 3,
+            "model": "REPLACE_WITH_EXACT_CLAUDE_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 25,
+              "secondary": 25
+            }
+          },
+          {
+            "task_class": "review",
+            "risk": 0,
+            "model": "REPLACE_WITH_EXACT_CLAUDE_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 15,
+              "secondary": 15
+            }
+          },
+          {
+            "task_class": "review",
+            "risk": 3,
+            "model": "REPLACE_WITH_EXACT_CLAUDE_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 15,
+              "secondary": 15
+            }
+          },
+          {
+            "task_class": "checkpoint",
+            "risk": 0,
+            "model": "REPLACE_WITH_EXACT_CLAUDE_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 5,
+              "secondary": 5
+            }
+          },
+          {
+            "task_class": "checkpoint",
+            "risk": 3,
+            "model": "REPLACE_WITH_EXACT_CLAUDE_MODEL_ID",
+            "effort": "default",
+            "percent": {
+              "primary": 5,
+              "secondary": 5
+            }
+          }
+        ]
+      }
     }
   },
   "lanes": {
@@ -21,7 +199,9 @@
       "execution_timeout_seconds": 3600,
       "max_sessions": 1,
       "capacity_key": "openai-subscription-primary",
-      "projects": ["example/project"],
+      "projects": [
+        "example/project"
+      ],
       "command": [
         "/absolute/path/codex",
         "exec",
@@ -50,13 +230,25 @@
         "--color",
         "never",
         "Reply with exactly OK on one line. Do not use tools, inspect files, or perform any other work."
-      ]
+      ],
+      "quota": {
+        "account_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "pool": "codex",
+        "model": "REPLACE_WITH_EXACT_CODEX_MODEL_ID",
+        "effort": "default",
+        "windows": {
+          "primary": 300,
+          "secondary": 10080
+        }
+      }
     },
     "claude-primary": {
       "family": "claude-code",
       "execution_timeout_seconds": 3600,
       "capacity_key": "claude-subscription-primary",
-      "projects": ["example/project"],
+      "projects": [
+        "example/project"
+      ],
       "command": [
         "/absolute/path/claude",
         "--print",
@@ -86,7 +278,17 @@
         "{\"mcpServers\":{}}",
         "--no-session-persistence",
         "Reply with exactly OK on one line. Do not use tools, inspect files, or perform any other work."
-      ]
+      ],
+      "quota": {
+        "account_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "pool": "claude-subscription",
+        "model": "REPLACE_WITH_EXACT_CLAUDE_MODEL_ID",
+        "effort": "default",
+        "windows": {
+          "primary": 300,
+          "secondary": 10080
+        }
+      }
     }
   }
 }
