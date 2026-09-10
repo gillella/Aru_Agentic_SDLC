@@ -9,7 +9,6 @@ from . import permissions, quota, quota_admission as admission, quota_collect, q
 from .config import DriverError
 from .state import key, write_json
 
-
 def recheck(config, state, record, adapter):
     if not record.get("quota_decision"):
         return
@@ -17,7 +16,6 @@ def recheck(config, state, record, adapter):
     prepare(config, state, record, adapter, exclude=record["id"])
     if old["checkpoint_seconds"] != record["quota_decision"]["checkpoint_seconds"]:
         raise DriverError("quota checkpoint mode changed before child execution")
-
 
 def prepare(config, state, record, adapter, *, exclude=None):
     if not quota.enabled(config, record["repo"]):
@@ -34,7 +32,6 @@ def prepare(config, state, record, adapter, *, exclude=None):
     record["policy_fingerprint"] = permissions.fingerprint(config, record["repo"], record["agent"])
     quota_checkpoint.prepare(state, record)
 
-
 def argv(lane, record):
     command = [p.replace("{prompt}", record["prompt"]) for p in lane["command"]]
     if lane["family"] == "claude-code" and "--output-format" not in command:
@@ -42,7 +39,6 @@ def argv(lane, record):
     elif lane["family"] == "openai-codex" and "--json" not in command:
         command.insert(command.index("exec") + 1, "--json")
     return command
-
 
 def observe(path, lane, exit_code, *, timed_out=False):
     if timed_out and quota_checkpoint.interrupted(path, lane):
@@ -78,7 +74,6 @@ def observe(path, lane, exit_code, *, timed_out=False):
             pass
     return {"outcome": "result_unavailable", "retry_blocked": True,
             "reason": "quota worker result invalid or unsupported; unchanged retries blocked"}
-
 
 def finish(config, state, record):
     decision = record.get("quota_decision")
@@ -129,7 +124,6 @@ def finish(config, state, record):
         record["quota_measurement"] = sample
     except DriverError:
         record["quota_measurement"] = {"state": "unknown", "reason": "completion-observation-unavailable"}
-
 
 def validate_record(record):
     decision = record.get("quota_decision")

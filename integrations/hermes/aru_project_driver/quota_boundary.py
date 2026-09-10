@@ -10,10 +10,8 @@ from . import permissions, quota, quota_admission as admission
 from .config import DriverError
 from .state import key, read_json, write_json
 
-
 def approved(controller, repo, adapter, identity, task, kind):
     return not quota.enabled(controller.config, repo) or bool(decide(controller, repo, adapter, identity, task, kind))
-
 
 def recover_results(controller, repo):
     """Migrate only a retained, validated native result; never parse receipt prose."""
@@ -46,7 +44,6 @@ def recover_results(controller, repo):
                               "pool": lane["quota"]["pool"], "continuation_owner": record["id"]})
         write_json(controller.state.worker_path(record["id"]), record)
 
-
 def decide(controller, repo, adapter, identity, task, kind="implementation", review=None):
     if not quota.enabled(controller.config, repo):
         return None
@@ -67,7 +64,6 @@ def decide(controller, repo, adapter, identity, task, kind="implementation", rev
     write_json(path, data)
     return decision
 
-
 def ranked(controller, repo, adapter, identities):
     if not quota.enabled(controller.config, repo):
         return identities
@@ -82,7 +78,6 @@ def ranked(controller, repo, adapter, identities):
         if decision:
             scored.append((not bool(decision["checkpoint_seconds"]), decision["margin"], identity))
     return [i for _, _, i in sorted(scored, reverse=True)]
-
 
 def resume(controller, repo, work, receipt, available):
     if not quota.enabled(controller.config, repo) or receipt.get("outcome") not in {"quota_exhausted", "quota_checkpoint"}:
@@ -111,7 +106,6 @@ def resume(controller, repo, work, receipt, available):
             if decide(controller, repo, controller.adapter(repo), identity, task, "remediation"):
                 return {**work, "quota_transfer": identity, "worktree": receipt.get("worktree")}
     raise DriverError("quota all eligible accounts exhausted or unknown; heartbeat owns cooldown recovery")
-
 
 def transfer(controller, repo, adapter, work):
     identity = work.get("quota_transfer")
@@ -143,7 +137,6 @@ def transfer(controller, repo, adapter, work):
     write_json(controller.state.worker_path(receipt["id"]), receipt)
     return {**work, "agent": identity}
 
-
 def settle(controller, repo, adapter):
     if not quota.enabled(controller.config, repo):
         return
@@ -158,11 +151,9 @@ def settle(controller, repo, adapter):
         if summary.get("state") == "CLOSED" or (blocked and not has_pr):
             admission.release_review(controller.state, repo, number)
 
-
 def refusal(controller, repo):
     decisions = read_json(controller.state.root / "quota-decisions" / (key(repo) + ".json"))["decisions"]
     return decisions[-1]["reason"]
-
 
 def review_failure(controller, repo, binding):
     reason = refusal(controller, repo)

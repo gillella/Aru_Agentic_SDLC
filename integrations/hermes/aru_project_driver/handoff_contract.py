@@ -13,10 +13,8 @@ MARKER = "aru-driver-dependency:v1"
 PATTERN = re.compile(r"^[ \t]*<!-- aru-driver-dependency:v1 (\{[^\r\n]+\}) -->[ \t\r]*$",
                      re.MULTILINE)
 
-
 def number(value: object) -> bool:
     return type(value) is int and value > 0
-
 
 def path(value: object) -> bool:
     return (isinstance(value, str) and bool(value) and not value.startswith("/")
@@ -24,14 +22,12 @@ def path(value: object) -> bool:
             and "\\" not in value and "\x00" not in value
             and str(PurePosixPath(value)) == value)
 
-
 def ref(value: object) -> bool:
     return (isinstance(value, str) and bool(value) and len(value) <= 128
             and not value.startswith(("/", ".")) and ".." not in value
             and "//" not in value and "\\" not in value and "\x00" not in value
             and not any(char.isspace() for char in value)
             and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]*", value) is not None)
-
 
 def parse(body: str, origin: str) -> dict | None:
     if MARKER not in body:
@@ -45,7 +41,6 @@ def parse(body: str, origin: str) -> dict | None:
         raise DriverError("source dependency contract is not valid JSON") from exc
     validate(data, origin)
     return data
-
 
 def validate(data: dict, origin: str) -> None:
     required = {"origin", "target", "issue", "source_pr", "source_head", "conditions"}
@@ -68,7 +63,6 @@ def validate(data: dict, origin: str) -> None:
         _condition(condition, origin, target, data["issue"])
     if not any(c["kind"] == "issue_done" and c["issue"] == data["issue"] for c in conditions):
         raise DriverError("dependency must include the target issue's GitHub Done condition")
-
 
 def _condition(item: dict, origin: str, target: str, issue: int) -> None:
     fields = {
@@ -93,7 +87,6 @@ def _condition(item: dict, origin: str, target: str, issue: int) -> None:
         if (item["release_repo"] != target or not path(item["path"]) or not path(item["release_path"])
                 or not ref(item["ref"])):
             raise DriverError("artifact condition requires bounded paths and explicit consumer ref")
-
 
 def digest(data: dict) -> str:
     return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()

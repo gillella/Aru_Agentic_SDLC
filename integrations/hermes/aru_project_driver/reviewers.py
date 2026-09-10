@@ -8,7 +8,6 @@ ENV = "ARU_CODING_REVIEWERS"
 EXECUTABLES = {"claude-code": "claude-sub", "openai-codex": "codex",
                "xai-cursor": "cursor-agent", "google-antigravity": "agy"}
 
-
 def inventory(config, repo: str) -> str | None:
     project = config.project(repo)
     if "coding_reviewers" not in project:
@@ -40,7 +39,6 @@ def inventory(config, repo: str) -> str | None:
         candidates.add(candidate)
         entries.append(f"{family}:{identity}" + (f"@{subscription}" if subscription else ""))
     return ",".join(entries)
-
 
 def environment(config, repo: str, base: dict[str, str]) -> dict[str, str]:
     result = dict(base)

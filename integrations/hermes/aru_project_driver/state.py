@@ -17,11 +17,8 @@ from .config import DriverError
 
 MAX_EVENT_KEYS = 65_536
 
-
 def key(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()[:24]
-
-
 def write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
@@ -36,7 +33,6 @@ def write_json(path: Path, data: dict) -> None:
     finally:
         temporary.unlink(missing_ok=True)
 
-
 def read_json(path: Path, default: dict | None = None) -> dict:
     if not path.exists() and default is not None:
         return dict(default)
@@ -48,11 +44,8 @@ def read_json(path: Path, default: dict | None = None) -> dict:
         raise DriverError("operational state must be an object")
     return data
 
-
 def _timestamp(value: object) -> bool:
     return type(value) in {int, float} and math.isfinite(value) and value >= 0
-
-
 def _validate_project(data: dict) -> None:
     if data.get("acknowledged_stop") is not None and not _nonce(data["acknowledged_stop"]):
         raise DriverError("operational Stop acknowledgment is invalid")
@@ -84,7 +77,6 @@ def _validate_project(data: dict) -> None:
     if type(handled) is not int or not 0 <= handled <= data["generation"]:
         raise DriverError("operational project handled_generation is invalid")
 
-
 def _validate_worker(data: dict) -> None:
     from .quota_worker import validate_record
     from . import retries
@@ -112,11 +104,8 @@ def _validate_worker(data: dict) -> None:
         if data.get(field) is not None and (type(data[field]) is not int or data[field] <= 0):
             raise DriverError("operational worker process identity is invalid")
 
-
 def _nonce(value: object) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[a-f0-9]{32}", value) is not None
-
-
 class State:
     def __init__(self, root: Path):
         self.root = root

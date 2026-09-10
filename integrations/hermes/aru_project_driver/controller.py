@@ -24,7 +24,6 @@ REVIEW_AUTHORITIES = {
 }
 CODING_AUTHORITIES = REVIEW_AUTHORITIES - {"coderabbit", "sourcery", "codeant"}
 
-
 class Controller:
     def __init__(self, config: Config, *, adapter_factory=KernelAdapter,
                  availability=execution.availability, probe=execution.probe,
@@ -40,7 +39,6 @@ class Controller:
 
     def adapter(self, repo: str):
         return self.config.kernel_adapter(repo, self.adapter_factory)
-
     @staticmethod
     def _owners(snapshot: dict) -> set[str]:
         return {agent for issue in snapshot["issues"] if issue["status"] in ACTIVE
@@ -264,15 +262,7 @@ class Controller:
         backlog = adapter.candidates(snapshot, status="Backlog") if (
             free and project.get("auto_triage", False)
         ) else []
-        result = {
-            "repo": repo, "actions": actions, "resumes": resumes, "free_lanes": free,
-            "ready": [item["number"] for item in candidates],
-            "backlog": [item["number"] for item in backlog],
-            "blocked_lanes": blocked, "reasons": reasons,
-            "blocked_issues": adapter.blocked(snapshot, status="Ready"),
-            "worker_receipts": [{"id": r["id"], "state": r["state"]}
-                                for r in self.state.workers(repo)[-32:]],
-        }
+        result = {"repo": repo, "actions": actions, "resumes": resumes, "free_lanes": free, "ready": [item["number"] for item in candidates], "backlog": [item["number"] for item in backlog], "blocked_lanes": blocked, "reasons": reasons, "blocked_issues": adapter.blocked(snapshot, status="Ready"), "worker_receipts": [{"id": r["id"], "state": r["state"]} for r in self.state.workers(repo)[-32:]]}
         result["actionable"] = bool(resumes or any(self._action_due(a) for a in actions)
                                     or (free and (candidates or backlog)))
         result["fingerprint"] = hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()

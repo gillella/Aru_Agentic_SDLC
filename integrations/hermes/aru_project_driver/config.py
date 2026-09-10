@@ -8,16 +8,13 @@ from pathlib import Path
 
 from .kernel import RUNNER_PROFILES, runner_profile_for_account
 
-
 class DriverError(RuntimeError):
     """An action cannot safely proceed."""
-
 
 def absolute(value: object, name: str) -> Path:
     if not isinstance(value, str) or not Path(value).is_absolute():
         raise DriverError(f"{name} must be an absolute path")
     return Path(value).resolve()
-
 
 def command(value: object, name: str) -> list[str]:
     if not isinstance(value, list) or not value or not value[0] or any(
@@ -25,7 +22,6 @@ def command(value: object, name: str) -> list[str]:
     ):
         raise DriverError(f"{name} must be a nonempty argument array")
     return value
-
 
 class Config:
     def __init__(self, path: str | Path, *, bind: bool = True):
@@ -69,7 +65,14 @@ class Config:
         from .reviewers import inventory
         for repo in self.projects:
             inventory(self, repo)
+        self._persona_policy()
         self._bind(bind=bind)
+
+    def _persona_policy(self) -> None:
+        from . import persona_routing
+        if persona_routing.is_available():
+            for repo in self.projects:
+                persona_routing.get_policy_snapshot(self, repo)
 
     def _permissions(self) -> None:
         from .permissions import validate

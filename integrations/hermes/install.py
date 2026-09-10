@@ -13,42 +13,60 @@ import re
 import tempfile
 import uuid
 
-
 class InstallError(RuntimeError):
     """Installation cannot preserve the requested isolated destination."""
-
 
 def _inside(path: Path, root: Path) -> None:
     if not path.resolve().is_relative_to(root.resolve()):
         raise InstallError(f"Destination resolves outside Hermes home: {path}")
 
-
-def _payload(source_root: Path, hermes_home: Path) -> list[tuple[Path, Path]]:
-    package = source_root / "aru_project_driver"
-    skill = source_root / "skill"
+def _validate_package_completeness(package: Path, skill: Path) -> None:
     if not (package / "driver.py").is_file() or not (skill / "SKILL.md").is_file():
         raise InstallError("Source package is incomplete: driver.py and skill/SKILL.md are required")
-    quota_modules = [package / (name + ".py") for name in (
-        "quota", "quota_collect", "quota_admission", "quota_boundary", "quota_worker", "quota_checkpoint")]
-    if any(path.exists() for path in quota_modules) and not all(path.is_file() for path in quota_modules):
+    qnames = ("quota", "quota_collect", "quota_admission", "quota_boundary", "quota_worker", "quota_checkpoint")
+    qmods = [package / f"{n}.py" for n in qnames]
+    if any(p.exists() for p in qmods) and not all(p.is_file() for p in qmods):
         raise InstallError("Source quota package is incomplete")
+
+def _collect_personas_payload(source_root: Path, hermes_home: Path) -> tuple[list[tuple[Path, Path]], Path | None]:
+    pdir = None
+    for cand in (source_root.parent / "personas", source_root / "personas"):
+        if cand.is_dir():
+            pdir = cand.resolve()
+            break
     result = []
-    for source in sorted(package.rglob("*.py")):
-        if "tests" in source.relative_to(package).parts or "__pycache__" in source.parts:
-            continue
-        result.append((source, hermes_home / "scripts" / "aru_project_driver" / source.relative_to(package)))
-    for source in sorted(skill.rglob("*.md")):
-        result.append((source, hermes_home / "skills" / "autonomous-ai-agents" / "hermes-project-driver" / source.relative_to(skill)))
+    if pdir:
+        for ext in ("*.py", "*.json"):
+            for s in sorted(pdir.rglob(ext)):
+                rel = s.relative_to(pdir)
+                if not any(k in rel.parts for k in ("tests", "__pycache__", "examples")):
+                    result.append((s, hermes_home / "scripts" / "personas" / rel))
+    return result, pdir
+
+def _payload(source_root: Path, hermes_home: Path) -> list[tuple[Path, Path]]:
+    package, skill = source_root / "aru_project_driver", source_root / "skill"
+    _validate_package_completeness(package, skill)
+    result = [
+        (s, hermes_home / "scripts" / "aru_project_driver" / s.relative_to(package))
+        for s in sorted(package.rglob("*.py"))
+        if "tests" not in s.relative_to(package).parts and "__pycache__" not in s.parts
+    ]
+    result.extend(
+        (s, hermes_home / "skills" / "autonomous-ai-agents" / "hermes-project-driver" / s.relative_to(skill))
+        for s in sorted(skill.rglob("*.md"))
+    )
     if (source_root / "QUOTA.md").is_file():
         result.append((source_root / "QUOTA.md", hermes_home / "skills" / "autonomous-ai-agents" / "hermes-project-driver" / "references" / "quota.md"))
+    pitems, pdir = _collect_personas_payload(source_root, hermes_home)
+    result.extend(pitems)
+    allowed_roots = [source_root.resolve()] + ([pdir] if pdir else [])
     for source, destination in result:
-        if source.is_symlink() or not source.resolve().is_relative_to(source_root.resolve()):
+        if source.is_symlink() or not any(source.resolve().is_relative_to(root) for root in allowed_roots):
             raise InstallError(f"Refusing linked source outside the reviewed package: {source}")
         _inside(destination, hermes_home)
         if destination.exists() and not destination.is_file():
             raise InstallError(f"Destination is not a regular file: {destination}")
     return result
-
 
 def _configured_home(config_path: Path, hermes_home: Path | None) -> Path:
     try:
@@ -70,7 +88,6 @@ def _configured_home(config_path: Path, hermes_home: Path | None) -> Path:
         raise InstallError("Installation home must match the explicit Driver configuration")
     return destination_home
 
-
 def _webhook_mappings(config: dict) -> dict[str, str]:
     projects = config.get("projects")
     if not isinstance(projects, dict):
@@ -91,7 +108,6 @@ def _webhook_mappings(config: dict) -> dict[str, str]:
     if not mappings:
         raise InstallError("No explicit project webhook_subscriptions are configured")
     return mappings
-
 
 def _webhook_plan(config_path: Path, hermes_home: Path) -> dict:
     mappings = _webhook_mappings(json.loads(config_path.read_text()))
@@ -130,11 +146,8 @@ def _webhook_plan(config_path: Path, hermes_home: Path) -> dict:
         "changes": changes,
     }
 
-
 def _current(path: Path) -> bytes | None:
     return path.read_bytes() if path.exists() else None
-
-
 def _rollback(written: list, hermes_home: Path) -> list[str]:
     failed = []
     for destination, before, after, mode in reversed(written):
@@ -150,7 +163,6 @@ def _rollback(written: list, hermes_home: Path) -> list[str]:
         except (OSError, InstallError):
             failed.append(str(destination.relative_to(hermes_home)))
     return failed
-
 
 def _apply_changes(plan: list, hermes_home: Path, backup_root: Path) -> list[str]:
     backups, written = [], []
@@ -176,7 +188,6 @@ def _apply_changes(plan: list, hermes_home: Path, backup_root: Path) -> list[str
         raise InstallError(f"Installation failed; {recovery}; backups: {backup_root}; {exc}") from exc
     return backups
 
-
 def _atomic_write(destination: Path, content: bytes) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".aru-install-", dir=destination.parent)
@@ -189,7 +200,6 @@ def _atomic_write(destination: Path, content: bytes) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
-
 
 def install(
     source_root: Path, config_path: Path, *, hermes_home: Path | None = None,
@@ -219,13 +229,7 @@ def install(
     backup_root = destination_home / "state" / "aru_project_driver" / "install-backups" / uuid.uuid4().hex
     _inside(backup_root, destination_home)
     backups = _apply_changes(plan, destination_home, backup_root) if apply else []
-    return {
-        "applied": apply, "activated": False, "hermes_home": str(destination_home),
-        "config_path": str(config_path), "files": changes, "backups": backups,
-        "webhook_changes": webhook_plan["changes"] if webhook_plan else [],
-        "next_step": "Review configuration and run Driver start only when runtime activation is authorized.",
-    }
-
+    return {"applied": apply, "activated": False, "hermes_home": str(destination_home), "config_path": str(config_path), "files": changes, "backups": backups, "webhook_changes": webhook_plan["changes"] if webhook_plan else [], "next_step": "Review configuration and run Driver start only when runtime activation is authorized."}
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -243,7 +247,6 @@ def main() -> int:
         parser.exit(2, f"Installation blocked: {exc}\n")
     print(json.dumps(result, indent=2))
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

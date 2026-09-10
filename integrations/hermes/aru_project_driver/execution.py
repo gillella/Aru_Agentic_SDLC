@@ -11,6 +11,8 @@ import sys
 import time
 import uuid
 from contextlib import suppress
+from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 
 from .config import Config, DriverError
@@ -19,7 +21,6 @@ from .kernel import KernelAdapter, KernelAdapterError
 from .state import State, key, read_json, write_json
 
 TERMINATION_GRACE_SECONDS = 5
-
 
 def stop_process_group(process: subprocess.Popen) -> None:
     """Stop the isolated agent group, including children that ignore SIGTERM."""
@@ -40,7 +41,6 @@ def stop_process_group(process: subprocess.Popen) -> None:
         time.sleep(min(.05, remaining))
     process.wait(timeout=TERMINATION_GRACE_SECONDS)
 
-
 def run_bounded(argv: list[str], cwd: Path, timeout: int = 30) -> subprocess.CompletedProcess:
     try:
         # The executable comes from operator policy; external text is literal argv.
@@ -50,7 +50,6 @@ def run_bounded(argv: list[str], cwd: Path, timeout: int = 30) -> subprocess.Com
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise DriverError(f"agent preflight unavailable: {type(exc).__name__}") from exc
-
 
 def availability(config: Config, repo: str, identity: str, state: State) -> dict:
     lane = config.lane(repo, identity)
@@ -81,7 +80,6 @@ def availability(config: Config, repo: str, identity: str, state: State) -> dict
         "available", "reason", "reset_at", "remaining_percent"
     ) if key in observation}
 
-
 def probe(config: Config, repo: str, identity: str, state: State) -> bool:
     lane = config.lane(repo, identity)
     result = run_bounded(lane["probe_command"], Path(config.project(repo)["repo_dir"]), 45)
@@ -90,8 +88,25 @@ def probe(config: Config, repo: str, identity: str, state: State) -> bool:
         write_json(state.root / "cooldowns" / f"{key(lane['capacity_key'])}.json", {
             "until": time.time() + 600, "reason": "bounded exact-model probe did not succeed",
         })
+    from . import persona_routing
+    if persona_routing.is_available():
+        try:
+            route_map = {"openai-codex": "codex", "xai-cursor": "cursor", "google-antigravity": "antigravity"}
+            route = route_map.get(lane.get("family", ""), lane.get("family", ""))
+            model_id = lane.get("quota", {}).get("model", "gpt-6-astra" if route == "codex" else "claude-opus-5")
+            effort = lane.get("quota", {}).get("effort", "high")
+            account_id = lane["capacity_key"]
+            rec = persona_routing._personas.ProbeRecord(
+                account_id=account_id, route=route, model_id=model_id, effort=effort,
+                observed_at=datetime.now(timezone.utc), outcome="ok" if ok else "error",
+                source="Hermes Driver bounded probe", authenticated=True,
+                identity_digest=hashlib.sha256(json.dumps({"account": account_id}, sort_keys=True).encode()).hexdigest(),
+                modalities=frozenset({"text"}),
+            )
+            persona_routing.record_probe_result(state, rec)
+        except Exception:
+            pass
     return ok
-
 
 def prompt_for(repo: str, issue: int, identity: str, kernel: Path, worktree: str,
                kind: str = "implementation", pr: int | None = None, head: str | None = None,
@@ -136,7 +151,6 @@ Report actual artifacts, PR/head, checks, and any blocker. Do not report work
 complete merely because a process or command exited successfully.
 """
 
-
 def _validate_review_lane(repo: str, identity: str, issue: int, pr: int | None,
                           head: str | None, review: dict | None, lane: dict) -> None:
     if (not isinstance(review, dict) or review.get("repo") != repo or review.get("reviewer") != identity
@@ -144,9 +158,7 @@ def _validate_review_lane(repo: str, identity: str, issue: int, pr: int | None,
             or review.get("authority") != lane["family"]):
         raise DriverError("review launch does not match its lane and assignment")
 
-
 APP_RUNNER_ENV = "ARU_GITHUB_APP_RUNNER"
-
 
 def worker_environment(kind: str, review: dict | None) -> dict[str, str]:
     """Environment for a supervised worker and everything in its process group.
@@ -167,13 +179,11 @@ def worker_environment(kind: str, review: dict | None) -> dict[str, str]:
             environment.pop(APP_RUNNER_ENV, None)
     return environment
 
-
 def scoped_environment(config, repo, kind, review, policy):
     environment = reviewers.environment(config, repo, worker_environment(kind, review))
     if policy and (kind != "review" or review["reviewer_actor"].endswith("[bot]")):
         environment[APP_RUNNER_ENV] = config.project(repo)["worker_permissions"]["app_runner"]
     return environment
-
 
 def prepare_policy(config: Config, record: dict, repository: Path) -> dict | None:
     if not permissions.enabled(config, record["repo"], record["agent"]):
@@ -181,9 +191,14 @@ def prepare_policy(config: Config, record: dict, repository: Path) -> dict | Non
     return permissions.compile_policy(config, record,
         config.kernel_adapter(record["repo"], KernelAdapter), run_bounded)
 
-
 def worker_output(config: Config, state: State, record: dict, lane: dict):
     policy = record.get("permission_snapshot")
+    if record.get("plan_argv") and not policy and not record.get("quota_decision"):
+        result_path = state.root / "logs" / f"{record['id']}.result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        output = os.fdopen(os.open(result_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w")
+        record["result_path"] = str(result_path)
+        return record["plan_argv"], output
     if not policy and not record.get("quota_decision"):
         return [part.replace("{prompt}", record["prompt"]) for part in lane["command"]], None
     if record["policy_fingerprint"] != permissions.fingerprint(config, record["repo"], record["agent"]):
@@ -193,7 +208,6 @@ def worker_output(config: Config, state: State, record: dict, lane: dict):
     output = os.fdopen(os.open(result_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w")
     record["result_path"] = str(result_path)
     return policy["argv"] if policy else quota_worker.argv(lane, record), output
-
 
 def launch_policy(config, state, record, repository, policy):
     if quota.enabled(config, record["repo"]):
@@ -205,6 +219,96 @@ def launch_policy(config, state, record, repository, policy):
         quota_admission.release_review(state, record["repo"], record["issue"])
     return policy
 
+def _acquire_capacity_lock(state: State, lane: dict) -> tuple[int, int]:
+    # Take the first free session slot on the subscription; each slot is one
+    # exclusive lock inherited by the supervised child. Slot count is bounded by
+    # the lane's max_sessions and shared by every lane on the same capacity_key.
+    for slot in range(lane.get("max_sessions", 1)):
+        capacity = state.capacity_path(lane["capacity_key"], slot)
+        capacity.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        candidate = os.open(capacity, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(candidate)
+            continue
+        return candidate, slot
+    raise DriverError("shared subscription was reserved by another worker")
+
+def _initialize_reservation(descriptor: int, worker_id: str) -> None:
+    os.ftruncate(descriptor, 0)
+    os.write(descriptor, worker_id.encode())
+    os.fsync(descriptor)
+
+def _bind_persona_plan(config: Config, state: State, repo: str, identity: str,
+                       issue: int, directory: str, kind: str, pr: int | None,
+                       head: str | None, review: dict | None, record: dict) -> None:
+    from . import persona_routing
+    if not persona_routing.enabled(config, repo):
+        return
+    try:
+        persona_routing.require_package()
+        adapter = config.kernel_adapter(repo, KernelAdapter)
+        if kind == "review":
+            current = adapter.review_binding(pr, review)
+            plan = persona_routing.resolve_review_plan(config, state, repo, review, directory,
+                                                       head, current_binding=current)
+        else:
+            task = adapter.revalidate(issue, identity)
+            observed_head = run_bounded(["git", "rev-parse", "HEAD"], Path(directory))
+            branch = run_bounded(["git", "symbolic-ref", "--short", "HEAD"], Path(directory))
+            if observed_head.returncode or branch.returncode or (head and observed_head.stdout.strip() != head):
+                raise DriverError("persona worktree branch/head is unverified or changed")
+            plan = persona_routing.resolve_task_plan(
+                config, state, repo, task, identity, directory,
+                branch=branch.stdout.strip(), head=observed_head.stdout.strip(), kind=kind, pr=pr)
+        if plan is None:
+            raise DriverError("persona resolver returned no plan")
+        lane = config.lane(repo, identity)
+        if plan.capacity_key != lane["capacity_key"] or plan.lineage != lane["family"]:
+            raise DriverError("persona selection needs a matching account/author lane before reservation")
+        record.update(persona=plan.persona, model_id=plan.model_id, effort=plan.effort,
+                      effective_role=plan.effective_role, plan_digest=plan.digest,
+                      policy_digest=plan.policy_digest, fallback_reason=plan.fallback_reason,
+                      skipped=[item.to_dict() for item in plan.skipped], plan_argv=list(plan.argv),
+                      plan_prompt=plan.prompt, plan_env=dict(plan.env), account_id=plan.account_id,
+                      author_history=list(plan.author_history), persona_plan=plan.to_dict())
+    except Exception as exc:
+        raise DriverError(f"persona dispatch refused: {exc}") from exc
+
+def _spawn_worker_process(config: Config, state: State, record: dict,
+                          repository: Path, policy: dict | None, directory: Path,
+                          descriptor: int, worker_id: str, admission_stop: str) -> subprocess.Popen:
+    log = state.root / "logs" / f"{worker_id}.log"
+    try:
+        policy = launch_policy(config, state, record, repository, policy)
+        environment = scoped_environment(config, record["repo"], record["kind"], record["review"], policy)
+        if record.get("plan_env"):
+            environment = dict(environment)
+            environment.update(record["plan_env"])
+        # The new reservation replaces this task's previous review escrow only
+        # after all current admission checks succeed under both locks.
+        write_json(state.worker_path(worker_id), record)
+        log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with os.fdopen(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
+            with state.project_lock(record["repo"], spawn=True):
+                state.require_admission(record["repo"], admission_stop)
+                # Fixed supervised entrypoint and generated identifiers, without a shell.
+                return subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+                    [sys.executable, str(Path(__file__).with_name("driver.py")),
+                     "--config", str(config.path), "_worker", "--worker-id", worker_id,
+                     "--capacity-fd", str(descriptor)],
+                    cwd=directory, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
+                    start_new_session=True, pass_fds=(descriptor,), shell=False,
+                    env=environment,
+                )
+    except (OSError, DriverError) as exc:
+        record.update(state="launch_failed", error=type(exc).__name__,
+                      reason=str(exc) if isinstance(exc, DriverError) else "worker launch failed", quota_review_released=True)
+        write_json(state.worker_path(worker_id), record)
+        raise DriverError("worker launch failed; existing claim and worktree preserved") from exc
+    finally:
+        os.close(descriptor)  # The supervised child retains the shared lock.
 
 def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
            *, kind: str = "implementation", pr: int | None = None,
@@ -227,67 +331,25 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
                 "prompt": prompt_for(repo, issue, identity, config.kernel_root, str(directory),
                                      kind, pr, head, review)}
     policy = None if quota.enabled(config, repo) else prepare_policy(config, prepared, repository)
-    # Take the first free session slot on the subscription; each slot is one
-    # exclusive lock inherited by the supervised child. Slot count is bounded by
-    # the lane's max_sessions and shared by every lane on the same capacity_key.
-    descriptor, slot = None, 0
-    for slot in range(lane.get("max_sessions", 1)):
-        capacity = state.capacity_path(lane["capacity_key"], slot)
-        capacity.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        candidate = os.open(capacity, os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            os.close(candidate)
-            continue
-        descriptor = candidate
-        break
-    if descriptor is None:
-        raise DriverError("shared subscription was reserved by another worker")
+    _bind_persona_plan(config, state, repo, identity, issue, str(directory), kind, pr, head, review, prepared)
+    if prepared.get("persona_plan") and (policy or quota.enabled(config, repo)):
+        raise DriverError("persona dispatch cannot use an overriding legacy permission/quota command")
+    descriptor, slot = _acquire_capacity_lock(state, lane)
     worker_id = uuid.uuid4().hex
-    os.ftruncate(descriptor, 0)
-    os.write(descriptor, worker_id.encode())
-    os.fsync(descriptor)
+    _initialize_reservation(descriptor, worker_id)
     record = {
+        **prepared,
         "id": worker_id, "repo": repo, "agent": identity, "issue": issue,
         "kind": kind, "pr": pr, "head": head, "worktree": str(directory),
         "review": review,
         "capacity_key": lane["capacity_key"], "capacity_slot": slot, "started_at": time.time(),
         "state": "launching", "pid": None, "admission_stop": admission_stop,
-        "prompt": prompt_for(repo, issue, identity, config.kernel_root, str(directory),
-                             kind, pr, head, review),
+        "prompt": prepared["prompt"],
     }
     retries.stamp(config, record, work_type)
-    log = state.root / "logs" / f"{worker_id}.log"
-    try:
-        policy = launch_policy(config, state, record, repository, policy)
-        environment = scoped_environment(config, repo, kind, review, policy)
-        # The new reservation replaces this task's previous review escrow only
-        # after all current admission checks succeed under both locks.
-        write_json(state.worker_path(worker_id), record)
-        log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        with os.fdopen(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as stream:
-            with state.project_lock(repo, spawn=True):
-                state.require_admission(repo, admission_stop)
-                # Fixed supervised entrypoint and generated identifiers, without a shell.
-                process = subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
-                    [sys.executable, str(Path(__file__).with_name("driver.py")),
-                     "--config", str(config.path), "_worker", "--worker-id", worker_id,
-                     "--capacity-fd", str(descriptor)],
-                    cwd=directory, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
-                    start_new_session=True, pass_fds=(descriptor,), shell=False,
-                    env=environment,
-                )
-    except (OSError, DriverError) as exc:
-        record.update(state="launch_failed", error=type(exc).__name__,
-                      reason=str(exc) if isinstance(exc, DriverError) else "worker launch failed", quota_review_released=True)
-        write_json(state.worker_path(worker_id), record)
-        raise DriverError("worker launch failed; existing claim and worktree preserved") from exc
-    finally:
-        os.close(descriptor)  # The supervised child retains the shared lock.
+    process = _spawn_worker_process(config, state, record, repository, policy, directory, descriptor, worker_id, admission_stop)
     return {"id": worker_id, "pid": process.pid, "agent": identity,
             "issue": issue, "worktree": str(directory)}
-
 
 def _revalidate_review_worker(config: Config, record: dict) -> None:
     if record.get("kind") != "review":
@@ -301,19 +363,16 @@ def _revalidate_review_worker(config: Config, record: dict) -> None:
     if adapter.review_worktree(current) != record["worktree"]:
         raise DriverError("review worktree changed before child execution")
 
-
 def revalidate_worker(config, state, record):
     _revalidate_review_worker(config, record)
     adapter = config.kernel_adapter(record["repo"], KernelAdapter)
     quota_worker.recheck(config, state, record, adapter)
-
 
 def inherited_reservation(state, lane, record, descriptor):
     inherited = os.fstat(descriptor)
     expected = state.capacity_path(lane["capacity_key"], record.get("capacity_slot", 0)).stat()
     if (inherited.st_ino, inherited.st_dev) != (expected.st_ino, expected.st_dev):
         raise DriverError("worker capacity reservation is invalid")
-
 
 def _start_agent(state: State, record: dict, argv: list[str], descriptor: int, output=None, *, environment=None):
     # Only local gate reads and process creation occur under this barrier.
@@ -323,7 +382,6 @@ def _start_agent(state: State, record: dict, argv: list[str], descriptor: int, o
             argv, cwd=record["worktree"], stdin=subprocess.DEVNULL,
             pass_fds=(descriptor,), shell=False, start_new_session=True, stdout=output, env=environment,
         )
-
 
 def finish_worker(path: Path, record: dict, output, exit_code: int, config=None, state=None) -> None:
     if output is not None:
@@ -341,6 +399,20 @@ def finish_worker(path: Path, record: dict, output, exit_code: int, config=None,
         quota_worker.finish(config, state, record)
     write_json(path, record)
 
+def _schedule_completion_wake(config: Config, state: State, record: dict, worker_id: str, path: Path) -> None:
+    # Completion receipt precedes wake creation. Heartbeat can recover a failed wake.
+    try:
+        from .scheduler import schedule_wake
+        with state.lock(blocking=True):
+            if state.project(record["repo"])["enabled"]:
+                state.event(record["repo"], worker_id, "worker completion")
+                schedule_wake(config.hermes_home, record["repo"], config.path,
+                              Path(__file__).with_name("driver.py"),
+                              reason="worker completion", event_key=worker_id,
+                              hermes_repo=config.hermes_repo)
+    except Exception as exc:
+        record["wake_error"] = type(exc).__name__
+        write_json(path, record)
 
 def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
     """Child retains the account lock even if the initiating Hermes session exits."""
@@ -365,6 +437,8 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
             else:
                 revalidate_worker(config, state, record)
                 environment = reviewers.environment(config, record["repo"], os.environ)
+                if record.get("plan_env"):
+                    environment.update(record["plan_env"])
                 process = _start_agent(state, record, argv, descriptor, output, environment=environment)
                 record["child_pid"] = process.pid
                 write_json(path, record)
@@ -389,17 +463,5 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
         finally:
             with suppress(OSError):
                 os.close(descriptor)
-    # Completion receipt precedes wake creation. Heartbeat can recover a failed wake.
-    try:
-        from .scheduler import schedule_wake
-        with state.lock(blocking=True):
-            if state.project(record["repo"])["enabled"]:
-                state.event(record["repo"], worker_id, "worker completion")
-                schedule_wake(config.hermes_home, record["repo"], config.path,
-                              Path(__file__).with_name("driver.py"),
-                              reason="worker completion", event_key=worker_id,
-                              hermes_repo=config.hermes_repo)
-    except Exception as exc:
-        record["wake_error"] = type(exc).__name__
-        write_json(path, record)
+    _schedule_completion_wake(config, state, record, worker_id, path)
     return exit_code

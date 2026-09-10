@@ -6,10 +6,8 @@ from . import handoff_contract
 from .config import DriverError
 from .kernel import KernelAdapterError
 
-
 def _quota_error(exc: Exception) -> bool:
     return any(term in str(exc).lower() for term in ("rate limit", "rate-limit", "quota"))
-
 
 def proofs(controller, contract: dict, *, cache: dict | None = None) -> list[dict]:
     result = []
@@ -29,7 +27,6 @@ def proofs(controller, contract: dict, *, cache: dict | None = None) -> list[dic
             cache[key] = proof
         result.append({"condition": condition, "proof": proof})
     return result
-
 
 def _action(controller, repo: str, number: int, snapshots: dict,
             readiness_cache: dict, proof_cache: dict) -> tuple[dict, bool]:
@@ -62,7 +59,6 @@ def _action(controller, repo: str, number: int, snapshots: dict,
     if not readiness["blockers"]:
         action["next_action"] = "handoff"
     return action, True
-
 
 def actions(controller, repo: str, snapshot: dict) -> tuple[list[dict], set[int]]:
     sources = [item for item in snapshot["issues"]

@@ -10,17 +10,14 @@ import sys
 
 import pytest
 
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from aru_project_driver.config import Config, DriverError  # noqa: E402
 from aru_project_driver import controller, retries  # noqa: E402
 from aru_project_driver.kernel import KernelAdapter, KernelAdapterError, SCHEMA  # noqa: E402
 from aru_project_driver.state import State, write_json  # noqa: E402
 
-
 REPO = "example/project"
 HEAD = "a" * 40
-
 
 def issue(number, *, status="Ready", agent=None, path=None):
     return {
@@ -30,14 +27,12 @@ def issue(number, *, status="Ready", agent=None, path=None):
         "boundary_errors": [], "priority": 2, "dependencies": {}, "labels": [],
     }
 
-
 def pr(number, agent, linked=None):
     return {
         "number": number, "head": HEAD, "author_agent": agent, "author_actor": "test-author",
         "issue": linked, "issues": [linked] if linked else [], "labels": [],
         "touches": [f"review/pr_{number}.py"], "errors": [],
     }
-
 
 class FakeKernel:
     """Mutable authoritative fixture; no GitHub or kernel process is executed."""
@@ -66,7 +61,6 @@ class FakeKernel:
 
     def candidates(self, snapshot, status="Ready"):
         return self.selector.candidates(snapshot, status)
-
     def blocked(self, snapshot, status="Ready"):
         return self.selector.blocked(snapshot, status)
 
@@ -113,7 +107,6 @@ class FakeKernel:
 
     def record(self, number):
         return next(record for record in self.issues if record["number"] == number)
-
     def promote(self, number):
         self.calls.append(("promote", number))
         record = self.record(number)
@@ -148,7 +141,6 @@ class FakeKernel:
         assert record["agents"] == [agent]
         assert record["status"] in {"In Progress", "In Review"}
         return deepcopy(record)
-
 
 class Harness:
     def __init__(self, tmp_path):
@@ -253,7 +245,6 @@ class Harness:
         for descriptor in self.descriptors:
             os.close(descriptor)
 
-
 @pytest.fixture
 def harness(tmp_path):
     value = Harness(tmp_path)
@@ -262,10 +253,8 @@ def harness(tmp_path):
     finally:
         value.close()
 
-
 def mutations(harness):
     return [call for call in harness.kernel.calls if call[0] in {"promote", "claim", "branch"}]
-
 
 def test_two_independent_accounts_fill_once_each(harness):
     result = harness.controller.reconcile(REPO)
@@ -277,7 +266,6 @@ def test_two_independent_accounts_fill_once_each(harness):
     assert harness.controller.reconcile(REPO)["launched"] == []
     assert len(harness.launched) == 2
 
-
 def test_top_conflicting_issue_does_not_starve_independent_ready_work(harness):
     harness.one_lane()
     harness.kernel.issues = [
@@ -286,7 +274,6 @@ def test_top_conflicting_issue_does_not_starve_independent_ready_work(harness):
     ]
     result = harness.controller.reconcile(REPO)
     assert [item["issue"] for item in result["launched"]] == [3]
-
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_backlog_promotion_requires_explicit_opt_in(harness, enabled):
@@ -298,7 +285,6 @@ def test_backlog_promotion_requires_explicit_opt_in(harness, enabled):
         [("promote", 1)] if enabled else []
     )
     assert [item["issue"] for item in result["launched"]] == ([1] if enabled else [])
-
 
 @pytest.mark.parametrize("change", ["offline", "queue_full", "review_full", "candidate_changed"])
 def test_fresh_post_probe_snapshot_blocks_changed_admission(harness, change):
@@ -318,7 +304,6 @@ def test_fresh_post_probe_snapshot_blocks_changed_admission(harness, change):
     assert harness.controller.reconcile(REPO)["launched"] == []
     assert mutations(harness) == []
 
-
 @pytest.mark.parametrize("change", ["offline", "queue_full", "review_full"])
 def test_new_admission_rechecked_between_claims(harness, change):
     def changed(_receipt):
@@ -334,7 +319,6 @@ def test_new_admission_rechecked_between_claims(harness, change):
     assert [item["issue"] for item in result["launched"]] == [1]
     assert harness.kernel.record(2)["status"] == "Ready"
     assert [call for call in mutations(harness) if call[0] == "claim"] == [("claim", 1, "codex-one")]
-
 
 def test_journal_before_claim_recovers_interruption_without_claiming_new_work(harness):
     harness.one_lane()
@@ -352,7 +336,6 @@ def test_journal_before_claim_recovers_interruption_without_claiming_new_work(ha
     assert [call for call in mutations(harness) if call[0] == "claim"] == [("claim", 1, "codex-one")]
     assert harness.kernel.record(2)["status"] == "Ready"
 
-
 def test_identical_actionable_plan_retries_after_failed_probe(harness):
     harness.one_lane()
     first = harness.controller.tick(REPO)
@@ -364,7 +347,6 @@ def test_identical_actionable_plan_retries_after_failed_probe(harness):
     assert second["wakeAgent"] is True
     assert first["plan"]["fingerprint"] == second["plan"]["fingerprint"]
     assert mutations(harness) == []
-
 
 @pytest.mark.parametrize("action", ["merge", "finalize"])
 def test_pr_convergence_stays_actionable_when_coding_quota_is_unavailable(harness, action):
@@ -380,7 +362,6 @@ def test_pr_convergence_stays_actionable_when_coding_quota_is_unavailable(harnes
     assert result["launched"] == [] and harness.probes == []
     assert mutations(harness) == []
 
-
 def test_authored_pr_without_claim_reserves_its_account(harness):
     harness.one_lane()
     harness.kernel.prs = [pr(9, "codex-one")]
@@ -390,14 +371,12 @@ def test_authored_pr_without_claim_reserves_its_account(harness):
     assert mutations(harness) == []
     assert ("next_work", "codex-one") in harness.kernel.calls
 
-
 def test_unavailable_first_model_does_not_hide_available_alias_on_same_account(harness):
     harness.config.lanes["claude-one"]["capacity_key"] = harness.config.lanes["codex-one"]["capacity_key"]
     harness.available["codex-one"] = False
     result = harness.controller.reconcile(REPO)
     assert [(item["agent"], item["issue"]) for item in result["launched"]] == [("claude-one", 1)]
     assert harness.probes == ["claude-one"]
-
 
 def test_future_review_deadline_registered_by_tick_without_waking_brain(harness):
     harness.one_lane()
@@ -413,14 +392,12 @@ def test_future_review_deadline_registered_by_tick_without_waking_brain(harness)
     assert harness.synced[0] == (REPO, [{**action, "agent": "codex-one", "issue": 1}])
     assert harness.probes == [] and mutations(harness) == []
 
-
 @pytest.mark.parametrize("operation", ["tick", "reconcile"])
 def test_duplicate_claims_degrade_before_sync_or_mutation(harness, operation):
     harness.kernel.issues = [issue(n, status="In Progress", agent="codex-one") for n in (1, 2)]
     result = getattr(harness.controller, operation)(REPO)
     assert result["status"] == "degraded" and "multiple active claims" in result["reason"]
     assert harness.probes == [] and harness.synced == [] and mutations(harness) == []
-
 
 @pytest.mark.parametrize("operation", ["tick", "reconcile"])
 @pytest.mark.parametrize("missing", ["capacity_key", "state", "started_at"])
@@ -433,14 +410,12 @@ def test_malformed_worker_degrades_without_launching(harness, operation, missing
     assert result["status"] == "degraded" and "operational worker" in result["reason"]
     assert harness.probes == [] and harness.synced == [] and mutations(harness) == []
 
-
 @pytest.mark.parametrize("queued,expected", [(0, 2), (4, 0)])
 def test_online_busy_ci_uses_bounded_queue_admission(harness, queued, expected):
     harness.kernel.free_runners = 0
     harness.kernel.queued = queued
     result = harness.controller.reconcile(REPO)
     assert len(result["launched"]) == expected
-
 
 def test_event_capacity_blocks_before_creating_native_wake(harness, monkeypatch):
     from aru_project_driver import scheduler, state as state_module
@@ -450,7 +425,6 @@ def test_event_capacity_blocks_before_creating_native_wake(harness, monkeypatch)
     monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: pytest.fail("full journal must not create a wake"))
     with pytest.raises(DriverError, match="receipt capacity"):
         harness.controller.event(REPO, "second", "event")
-
 
 @pytest.mark.parametrize("operation", ["tick", "reconcile"])
 @pytest.mark.parametrize("deadline", ["invalid", "2026-09-05T12:00:00"])
@@ -466,7 +440,6 @@ def test_invalid_review_deadline_degrades_before_sync_or_mutation(harness, opera
     assert result["status"] == "degraded" and "deadline" in result["reason"]
     assert harness.probes == [] and harness.synced == [] and mutations(harness) == []
 
-
 def test_inline_events_are_idempotent_and_stopped_projects_ignore_them(harness):
     first = harness.controller.event(REPO, "delivery-1", "event", inline=True)
     duplicate = harness.controller.event(REPO, "delivery-1", "event", inline=True)
@@ -478,7 +451,6 @@ def test_inline_events_are_idempotent_and_stopped_projects_ignore_them(harness):
     assert stopped["accepted"] is False and stopped["wakeAgent"] is False
     assert len(harness.state.project(REPO)["events"]) == 1
     assert harness.kernel.calls == [] and harness.synced == []
-
 
 @pytest.mark.parametrize("authority,wake", [
     ("claude-code", True), ("openai-codex", True),
@@ -498,7 +470,6 @@ def test_coding_review_assignment_wakes_brain_while_external_wait_stays_silent(h
     assert result["wakeAgent"] is wake
     assert harness.probes == [] and mutations(harness) == []
 
-
 def test_selected_pr_for_another_issue_is_an_ownership_conflict(harness):
     harness.one_lane()
     harness.kernel.issues = [issue(20, status="In Progress", agent="codex-one")]
@@ -513,7 +484,6 @@ def test_selected_pr_for_another_issue_is_an_ownership_conflict(harness):
     assert result["actions"][0]["type"] == "ownership_conflict"
     assert result["actions"][0]["pr"] == 9
     assert harness.probes == [] and mutations(harness) == []
-
 
 def test_in_review_feedback_resumes_owned_worktree_with_exact_pr_context(harness):
     harness.one_lane()
@@ -541,7 +511,6 @@ def test_in_review_feedback_resumes_owned_worktree_with_exact_pr_context(harness
     assert harness.kernel.record(1)["status"] == "In Review"
     assert [call for call in mutations(harness) if call[0] == "claim"] == []
 
-
 def test_project_worker_cap_does_not_count_another_projects_account_holder(harness):
     other = "example/other-project"
     other_dir = harness.repo_dir.parent / "other-project"
@@ -560,7 +529,6 @@ def test_project_worker_cap_does_not_count_another_projects_account_holder(harne
     assert [(item["agent"], item["issue"]) for item in result["launched"]] == [("claude-one", 1)]
     assert harness.controller._worker_count(REPO) == 1
     assert harness.controller._worker_count(other) == 1
-
 
 def test_pending_ci_still_registers_assigned_external_review_deadline_without_brain(harness):
     harness.one_lane()
@@ -585,7 +553,6 @@ def test_pending_ci_still_registers_assigned_external_review_deadline_without_br
     }])
     assert harness.probes == [] and mutations(harness) == []
 
-
 def test_pending_ci_with_ambiguous_review_authority_fails_closed(harness):
     harness.one_lane()
     harness.kernel.issues = [issue(1, status="In Review", agent="codex-one")]
@@ -599,7 +566,6 @@ def test_pending_ci_with_ambiguous_review_authority_fails_closed(harness):
     assert result["status"] == "degraded"
     assert ("reviewer_continuation", 9) not in harness.kernel.calls
     assert harness.synced == [] and harness.probes == [] and mutations(harness) == []
-
 
 def assigned_review(harness):
     harness.kernel.issues = [issue(1, status="In Review", agent="codex-one")]
@@ -616,7 +582,6 @@ def assigned_review(harness):
         "type": "wait", "pr": 9, "head": HEAD, "authority": "claude-code",
         "next_action": "await-authoritative-review", "retry_at": None,
     }
-
 
 def test_assigned_review_executes_once_across_duplicate_delivery_and_restart(harness):
     assigned_review(harness)
@@ -639,14 +604,12 @@ def test_assigned_review_executes_once_across_duplicate_delivery_and_restart(har
     assert restarted.tick(REPO)["wakeAgent"] is False
     assert len(harness.launched) == 1
 
-
 def test_configured_reviewer_can_review_an_external_authors_pr(harness):
     assigned_review(harness)
     harness.config.project(REPO)["lanes"] = ["claude-one"]
     result = harness.controller.reconcile(REPO)
     assert result["launched"][0]["agent"] == "claude-one"
     assert harness.kernel.record(1)["agents"] == ["codex-one"]
-
 
 def test_completed_review_returns_to_existing_merge_and_finalization_actions(harness):
     assigned_review(harness)
@@ -660,7 +623,6 @@ def test_completed_review_returns_to_existing_merge_and_finalization_actions(har
         assert result["launched"] == []
         assert result["actions"][0]["type"] == kind
         assert result["actions"][0]["agent"] == "codex-one"
-
 
 @pytest.mark.parametrize("failure", ["head", "authority", "unavailable", "unknown", "lane", "family", "cap", "stop", "stop-recovery", "probe"])
 def test_review_dispatch_gates_are_owned_and_do_not_claim(harness, failure):
@@ -692,7 +654,6 @@ def test_review_dispatch_gates_are_owned_and_do_not_claim(harness, failure):
     if failure == "stop-recovery":
         assert not any(c[0] == "refresh_reviewer" for c in harness.kernel.calls)
 
-
 @pytest.mark.parametrize("verdict,expected", [(None, "blocked"), ("APPROVE", "completed"), ("REQUEST_CHANGES", "completed")])
 def test_review_exit_or_loss_requires_kernel_verdict_and_routes_continuation(harness, verdict, expected):
     assigned_review(harness)
@@ -720,7 +681,6 @@ def test_review_exit_or_loss_requires_kernel_verdict_and_routes_continuation(har
         assert harness.state.workers(REPO)[0]["review_recovery_attempted"] is True
     assert len(harness.launched) == 1
 
-
 def test_due_external_fallback_is_serialized_and_launches_in_same_activation(harness):
     assigned_review(harness)
     harness.kernel.recovery_target = deepcopy(harness.kernel.binding)
@@ -730,7 +690,6 @@ def test_due_external_fallback_is_serialized_and_launches_in_same_activation(har
     assert len(result["launched"]) == 1 and result["launched"][0]["agent"] == "claude-one"
     assert len([c for c in harness.kernel.calls if c[0] == "refresh_reviewer"]) == 1
     assert harness.synced[-1][1][0]["execution"] == "queued"
-
 
 def test_lost_worker_recovery_runs_once_and_launches_new_bound_reviewer(harness):
     assigned_review(harness)
@@ -748,7 +707,6 @@ def test_lost_worker_recovery_runs_once_and_launches_new_bound_reviewer(harness)
     assert len([c for c in harness.kernel.calls if c[0] == "refresh_reviewer"]) == 1
     assert harness.controller.reconcile(REPO)["launched"] == []
 
-
 def test_shared_subscription_with_two_sessions_admits_two_lanes_and_counts_both(harness):
     shared = harness.config.lanes["codex-one"]["capacity_key"]
     harness.config.lanes["claude-one"]["capacity_key"] = shared
@@ -765,7 +723,6 @@ def test_shared_subscription_with_two_sessions_admits_two_lanes_and_counts_both(
     assert {item["capacity_slot"] for item in harness.launched} == {0, 1}
     assert harness.controller._worker_count(REPO) == 2  # two live reservations on one account
 
-
 @pytest.mark.parametrize("failure", [False, True])
 def test_stop_during_precheck_suppresses_native_brain_even_on_failure(harness, failure):
     original = harness.controller._plan
@@ -780,7 +737,6 @@ def test_stop_during_precheck_suppresses_native_brain_even_on_failure(harness, f
     assert result["wakeAgent"] is False
     assert not harness.state.project(REPO)["enabled"]
     assert harness.synced == []
-
 
 def test_stop_during_event_scheduling_is_not_a_delivered_wake(harness, monkeypatch):
     from aru_project_driver import scheduler

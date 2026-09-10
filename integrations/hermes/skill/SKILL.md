@@ -199,12 +199,25 @@ resuming the consumer's own CI, review or merge workflow.
 See [references/runtime-contract.md](references/runtime-contract.md) when
 installing, checking event delivery, or diagnosing a stalled Loop.
 
-## Reporting
+## Persona integration status: incomplete, not ready for activation
 
-Keep healthy unchanged activations silent (`[SILENT]`). Notify only on useful
-progress, completion, a new failure, or a decision requiring the user. Lead
-with actual running/waiting/stopped state and the verified next continuation.
-Never say the Loop is working solely because source tests pass or a local
-webhook health endpoint responds. Subscription utilization is a means to
-complete useful approved work, not a reason to bypass review or manufacture
-unnecessary tasks.
+The 13-persona policy package exists, but #631 is still being implemented and
+#636 has not established installed/live acceptance. Do not describe a green
+source test suite as an activated fleet.
+
+`personas_required: true` explicitly opts a project into the in-progress
+integration and requires `personas_source_digest` and `personas_policy_digest`.
+Missing task classification, missing scope, broken evidence and conflicting
+review identity must refuse resolution. Projects without this explicit opt-in
+continue their existing legacy lane behavior; that path is outside persona
+enforcement. Package importability alone never enables the integration.
+
+The current source still needs complete account selection and reservation,
+exact authenticated probes, child-spawn revalidation, trusted review metadata
+and operator task wiring. Do not enable this incomplete path in live projects
+or install it as a completed #631 rollout. No `driver.py launch` operation has
+been delivered. Use the installed Driver's `--help` for supported operations.
+
+A human running vendor CLIs directly and non-default Hermes profiles remain
+outside managed enforcement. Keep source, installation, provider access and
+live task acceptance as separate evidence.

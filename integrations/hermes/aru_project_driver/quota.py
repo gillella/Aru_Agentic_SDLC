@@ -10,18 +10,14 @@ from .config import DriverError
 SCHEMA = "aru.quota/v1"
 FAMILIES = {"openai-codex", "claude-code", "xai-cursor", "google-antigravity"}
 
-
 def number(value, low=0, high=float("inf")):
     return type(value) in {int, float} and math.isfinite(value) and low <= value <= high
-
 
 def digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
 
-
 def enabled(config, repo):
     return config.project(repo).get("quota_admission") is not None
-
 
 def validate_config(config):
     accounts, keys = {}, {}
@@ -51,7 +47,6 @@ def validate_config(config):
         if policy is None:
             continue
         validate_project(config, repo, project, policy)
-
 
 def validate_lane(lane, q):
     if (not isinstance(q, dict) or set(q) != {"account_sha256", "pool", "model", "effort", "windows"}
@@ -84,7 +79,6 @@ def validate_lane(lane, q):
             matched = argv.count("--effort") == 1 and argv[argv.index("--effort") + 1:][:1] == [q["effort"]]
         if not matched:
             raise DriverError("quota effort must match an explicit native worker setting or default")
-
 
 def validate_project(config, repo, project, policy):
     required = {"version", "max_age_seconds", "headroom_percent", "unknown_checkpoint_seconds",
@@ -127,7 +121,6 @@ def validate_project(config, repo, project, policy):
             raise DriverError("duplicate quota demand row")
         seen.add(signature)
 
-
 def unknown(lane, now, reason, *, unavailable=False):
     q = lane["quota"]
     return {"schema": SCHEMA, "provider": lane["family"], "account_sha256": q["account_sha256"],
@@ -135,7 +128,6 @@ def unknown(lane, now, reason, *, unavailable=False):
             "observed_at": now, "source": "supported-cli", "confidence": "unknown",
             "state": "unavailable" if unavailable else "unknown", "reason": reason,
             "windows": {}, "identity_verified": False}
-
 
 def validate(observation, lane, now, max_age):
     q = lane["quota"]

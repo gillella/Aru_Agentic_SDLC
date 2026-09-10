@@ -32,20 +32,16 @@ except ImportError:
     kernel = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(kernel)
 
-
 class SchedulerError(RuntimeError):
     """The installed Hermes scheduler cannot safely fulfill the operation."""
 
-
 class _DeadlineExpired(BaseException):
     """Do not let a native CRUD function's broad Exception handler eat expiry."""
-
 
 def deadline_after(seconds: float) -> float:
     if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
         raise SchedulerError("timeout must be a positive finite number of seconds")
     return time.monotonic() + seconds
-
 
 def _restore_alarm(previous_handler, previous_mask) -> bool:
     interrupted = False
@@ -67,7 +63,6 @@ def _restore_alarm(previous_handler, previous_mask) -> bool:
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
     return interrupted
-
 
 @contextlib.contextmanager
 def bounded(deadline: float | None):
@@ -119,7 +114,6 @@ def bounded(deadline: float | None):
     if interrupted or time.monotonic() >= deadline:
         raise SchedulerError("scheduler deadline expired; cleanup/readback is unverified")
 
-
 def _require_stop_generation(hermes_home: Path, project: str, start_nonce=...):
     from .state import State
 
@@ -129,12 +123,10 @@ def _require_stop_generation(hermes_home: Path, project: str, start_nonce=...):
     if nonce != acknowledged:
         raise SchedulerError("project stopped during scheduler admission")
 
-
 def _namespace(project: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", project):
         raise ValueError("project must be a literal owner/repository")
     return "aru-driver:" + hashlib.sha256(project.lower().encode()).hexdigest()[:20] + ":"
-
 
 def _require_wake_gate(runtime: Path) -> None:
     """Refuse a Hermes runtime whose cron scheduler cannot honor ``{"wakeAgent": false}``.
@@ -150,7 +142,6 @@ def _require_wake_gate(runtime: Path) -> None:
     modules = sorted(path for path in (runtime / "cron").glob("*.py") if path.is_file())
     if not any(_wake_gate_nodes(path)[1] for path in modules):
         raise SchedulerError(message)
-
 
 def _wake_gate_nodes(path: Path) -> tuple[bool, bool]:
     """Return (calls, defines) for ``_parse_wake_gate`` using the AST, not text.
@@ -172,7 +163,6 @@ def _wake_gate_nodes(path: Path) -> tuple[bool, bool]:
             name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
             calls |= name == "_parse_wake_gate"
     return calls, defines
-
 
 def _load_api(hermes_home: Path, hermes_repo: Path | None, cron_api: Any):
     if cron_api is not None:
@@ -202,7 +192,6 @@ def _load_api(hermes_home: Path, hermes_repo: Path | None, cron_api: Any):
         raise SchedulerError("Installed Hermes cron API lacks required script and skill support")
     return api
 
-
 @contextlib.contextmanager
 def _locked(hermes_home: Path):
     directory = hermes_home / "state" / "aru_project_driver"
@@ -216,7 +205,6 @@ def _locked(hermes_home: Path):
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
 
-
 def _jobs(api, namespace: str) -> list[dict]:
     jobs = api.list_jobs(include_disabled=True)
     if not isinstance(jobs, list) or any(not isinstance(job, dict) for job in jobs):
@@ -226,18 +214,15 @@ def _jobs(api, namespace: str) -> list[dict]:
         raise SchedulerError("Native scheduler returned a Driver job without an ID")
     return owned
 
-
 def _active(job: dict) -> bool:
     # A failed recurring invocation may still have future runs. The native
     # enabled flag, not the previous run's outcome, owns scheduling intent.
     return bool(job.get("enabled", True))
 
-
 def _must(result, operation: str):
     if result is None or result is False:
         raise SchedulerError(f"Native scheduler failed to {operation}")
     return result
-
 
 def _executable_environment() -> tuple[list[str], Path | None]:
     """Resolve `gh` once, at job-generation time, for a deterministic job PATH.
@@ -257,7 +242,6 @@ def _executable_environment() -> tuple[list[str], Path | None]:
     # it is also a well-known location.
     return list(dict.fromkeys(entries)), gh
 
-
 def _environment_source(entries: list[str], gh: Path | None) -> list[str]:
     """Python lines building `env` for a generated job; brace-free for native templates."""
     lines = [
@@ -268,7 +252,6 @@ def _environment_source(entries: list[str], gh: Path | None) -> list[str]:
     if gh is not None:
         lines.append(f"env[{kernel.GH_ENV!r}] = {str(gh)!r}")
     return lines
-
 
 def _wrapper(hermes_home: Path, project: str, config_path: Path, driver_path: Path) -> str:
     config_path = Path(config_path).expanduser().resolve()
@@ -315,7 +298,6 @@ def _wrapper(hermes_home: Path, project: str, config_path: Path, driver_path: Pa
             os.unlink(temp)
     return str(destination.relative_to(scripts))
 
-
 def _payload(project: str, config_path: Path, driver_path: Path, script: str) -> dict:
     # No model/provider override: inherit the operator's configured Driver brain.
     return {
@@ -339,7 +321,6 @@ def _payload(project: str, config_path: Path, driver_path: Path, script: str) ->
         "no_agent": False,
         "deliver": "local",
     }
-
 
 def webhook_prompt(project: str, config_path: Path, driver_path: Path, route: str) -> str:
     """Render a fixed trigger using native session metadata, never payload substitutions."""
@@ -397,7 +378,6 @@ def webhook_prompt(project: str, config_path: Path, driver_path: Path, route: st
         "when there is no useful change or required user action."
     )
 
-
 def ensure_heartbeat(
     hermes_home: Path, project: str, config_path: Path, driver_path: Path, *,
     hermes_repo: Path | None = None, cron_api=None, start_nonce=...,
@@ -427,7 +407,6 @@ def ensure_heartbeat(
             raise SchedulerError("Heartbeat readback did not prove exactly one enabled job")
         return {"project": project, "heartbeat_job_id": actual[0]["id"], "interval_seconds": 600, "enabled": True}
 
-
 def schedule_wake(
     hermes_home: Path, project: str, config_path: Path, driver_path: Path, *,
     reason: str = "event", delay_minutes: float = 0, event_key: str | None = None,
@@ -454,7 +433,6 @@ def schedule_wake(
         if len(actual) != 1 or actual[0]["id"] != job["id"]:
             raise SchedulerError("Wake readback did not prove exactly one enabled job")
         return {"project": project, "wake_job_id": job["id"], "duplicate": False}
-
 
 def _review_events(events: list[dict], namespace: str) -> dict[str, dict]:
     if not isinstance(events, list):
@@ -487,7 +465,6 @@ def _review_events(events: list[dict], namespace: str) -> dict[str, dict]:
         desired[name] = {"pr": pr, "head": head.lower(), "reviewer": reviewer, "when": when}
         seen_prs.add(pr)
     return desired
-
 
 def sync_review_wakes(
     hermes_home: Path, project: str, config_path: Path, driver_path: Path,
@@ -541,7 +518,6 @@ def sync_review_wakes(
             raise SchedulerError("Pending-review readback contains obsolete or duplicate timers")
         return {"project": project, "review_wakes": results, "paused_job_ids": paused}
 
-
 def stop_project(hermes_home: Path, project: str, *, hermes_repo: Path | None = None, cron_api=None) -> dict:
     """Pause only this adapter's future jobs for this project; preserve workers."""
     hermes_home = Path(hermes_home).expanduser().resolve()
@@ -556,7 +532,6 @@ def stop_project(hermes_home: Path, project: str, *, hermes_repo: Path | None = 
         if any(_active(j) for j in _jobs(api, namespace)):
             raise SchedulerError("Project stop readback still has enabled future jobs")
         return {"project": project, "paused_job_ids": paused, "enabled": False}
-
 
 def scheduler_status(hermes_home: Path, project: str, *, hermes_repo: Path | None = None, cron_api=None) -> dict:
     """Read native job metadata without scheduling or altering jobs."""
