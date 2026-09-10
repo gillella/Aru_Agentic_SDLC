@@ -125,6 +125,47 @@ gate and `probe_command` remains liveness only.
 
 ## Admission, reservations and recovery
 
+### Persistent project reviewer inventory
+
+An operator may set a project's `coding_reviewers` to a nonempty unique list of
+existing, explicitly authorized project lane IDs. For example, with configured
+native Claude subscription lanes `m1`/`m2` and Codex lane `n1`, use
+`"coding_reviewers": ["m1", "m2", "n1"]`. The Driver derives
+`claude-code:m1@1,claude-code:m2@2,openai-codex:n1` from those lanes, sorted by ID.
+Claude worker/probe `claude-sub N` subscriptions and executable paths must agree;
+other families use matching native `codex`, `cursor-agent`, or `agy` executables.
+Duplicate accounts/subscriptions, multiple non-Claude identities of one family,
+unknown or unauthorized IDs, malformed lists and explicit null are refused.
+Executable/model/account evidence still needs operator verification; declarations
+are not enrollment or authentication proof.
+
+This one value overrides inherited `ARU_CODING_REVIEWERS` only in that project's
+canonical helper and supervised worker subprocess environments, including the
+actual child. Direct reconcile, heartbeat and completion wakes reload the same
+config. There is no global environment edit or arbitrary environment map. Omit
+the field to preserve inherited behavior. An invalid explicit value never falls
+back to global inventory. Inventory changes invalidate opted-in worker policy
+fingerprints; non-opted fingerprints retain their previous meaning.
+
+GitHub binding labels and canonical helper assignment remain authoritative.
+Inventory cannot supply an actor, approve self-review, mark capacity available,
+or force the helper to choose the lane holding a review budget reservation.
+
+For #647, migrate the unapplied proposal by selecting only Factory `m1,m2,n1`,
+setting its `coding_reviewers` to that list, and narrowing its Claude-only
+`worker_permissions.lanes` to `m1,m2`. Restore `m3` to its original definition
+without the proposed quota addition; preserve `m3-canary`, shared capacity keys,
+session limits, other project definitions and the permission recovery epoch.
+Add `n1` only after proving its existing repository actor binding, native Codex
+CLI, actual account hash, exact model/effort and current supported quota evidence.
+Add matching cold-start rows for that exact model/effort. Do not infer Astra
+support from a quota pool lacking model evidence or relabel accounts to pass
+validation. A private fixture config passing validation is not live enrollment.
+After independent review, exact-head CI and merge, the parent owns a quiescent
+shared-package installation window, Factory containment, preserved skill/receipt
+migration, original enablement restoration and observation of #637's retained
+m2 claim. This source correction performs no live installation or rollout.
+
 Reconcile ranks eligible authors by known capacity ahead of checkpoint capacity,
 then by the smallest remaining window margin after estimated demand, reservations
 and headroom. It considers aliases before applying worker limits. Existing work

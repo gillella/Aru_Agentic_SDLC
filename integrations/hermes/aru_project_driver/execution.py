@@ -14,7 +14,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from .config import Config, DriverError
-from . import permissions, quota, quota_worker, quota_admission
+from . import permissions, quota, quota_worker, quota_admission, reviewers
 from .kernel import KernelAdapter, KernelAdapterError
 from .state import State, key, read_json, write_json
 
@@ -169,7 +169,7 @@ def worker_environment(kind: str, review: dict | None) -> dict[str, str]:
 
 
 def scoped_environment(config, repo, kind, review, policy):
-    environment = worker_environment(kind, review)
+    environment = reviewers.environment(config, repo, worker_environment(kind, review))
     if policy and (kind != "review" or review["reviewer_actor"].endswith("[bot]")):
         environment[APP_RUNNER_ENV] = config.project(repo)["worker_permissions"]["app_runner"]
     return environment
@@ -179,7 +179,7 @@ def prepare_policy(config: Config, record: dict, repository: Path) -> dict | Non
     if not permissions.enabled(config, record["repo"], record["agent"]):
         return None
     return permissions.compile_policy(config, record,
-        KernelAdapter(config.kernel_root, repository, record["repo"]), run_bounded)
+        config.kernel_adapter(record["repo"], KernelAdapter), run_bounded)
 
 
 def worker_output(config: Config, state: State, record: dict, lane: dict):
@@ -197,7 +197,7 @@ def worker_output(config: Config, state: State, record: dict, lane: dict):
 
 def launch_policy(config, state, record, repository, policy):
     if quota.enabled(config, record["repo"]):
-        quota_worker.prepare(config, state, record, KernelAdapter(config.kernel_root, repository, record["repo"]))
+        quota_worker.prepare(config, state, record, config.kernel_adapter(record["repo"], KernelAdapter))
         policy = prepare_policy(config, record, repository)
     if policy:
         record.update(permission_snapshot=policy, policy_fingerprint=policy["policy_fingerprint"])
@@ -292,8 +292,7 @@ def _revalidate_review_worker(config: Config, record: dict) -> None:
         return
     _validate_review_lane(record["repo"], record["agent"], record["issue"], record.get("pr"),
                           record.get("head"), record.get("review"), config.lane(record["repo"], record["agent"]))
-    adapter = KernelAdapter(config.kernel_root,
-                            Path(config.project(record["repo"])["repo_dir"]), record["repo"])
+    adapter = config.kernel_adapter(record["repo"], KernelAdapter)
     current = adapter.review_binding(record["pr"], record["review"])
     if current.get("verdict"):
         raise DriverError("review already has a current-head verdict")
@@ -303,7 +302,7 @@ def _revalidate_review_worker(config: Config, record: dict) -> None:
 
 def revalidate_worker(config, state, record):
     _revalidate_review_worker(config, record)
-    adapter = KernelAdapter(config.kernel_root, Path(config.project(record["repo"])["repo_dir"]), record["repo"])
+    adapter = config.kernel_adapter(record["repo"], KernelAdapter)
     quota_worker.recheck(config, state, record, adapter)
 
 
@@ -314,13 +313,13 @@ def inherited_reservation(state, lane, record, descriptor):
         raise DriverError("worker capacity reservation is invalid")
 
 
-def _start_agent(state: State, record: dict, argv: list[str], descriptor: int, output=None):
+def _start_agent(state: State, record: dict, argv: list[str], descriptor: int, output=None, *, environment=None):
     # Only local gate reads and process creation occur under this barrier.
     with state.project_lock(record["repo"], spawn=True):
         state.require_admission(record["repo"], record.get("admission_stop"))
         return subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
             argv, cwd=record["worktree"], stdin=subprocess.DEVNULL,
-            pass_fds=(descriptor,), shell=False, start_new_session=True, stdout=output,
+            pass_fds=(descriptor,), shell=False, start_new_session=True, stdout=output, env=environment,
         )
 
 
@@ -363,7 +362,8 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
                 record["reason"] = "project stopped before child execution"
             else:
                 revalidate_worker(config, state, record)
-                process = _start_agent(state, record, argv, descriptor, output)
+                environment = reviewers.environment(config, record["repo"], os.environ)
+                process = _start_agent(state, record, argv, descriptor, output, environment=environment)
                 record["child_pid"] = process.pid
                 write_json(path, record)
         if process is not None:

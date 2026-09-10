@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.operation == "preflight":
             record = {"repo": args.project, "agent": args.agent, "issue": args.issue,
                       "worktree": args.worktree, "kind": "implementation", "prompt": ""}
-            adapter = KernelAdapter(config.kernel_root, Path(config.project(args.project)["repo_dir"]), args.project)
+            adapter = config.kernel_adapter(args.project, KernelAdapter)
             result = permissions.compile_policy(config, record, adapter, execution.run_bounded, preflight=True)
             print(json.dumps({**result, "executed": False, "cwd": args.worktree}, sort_keys=True))
             return 0

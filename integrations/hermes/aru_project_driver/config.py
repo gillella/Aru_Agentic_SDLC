@@ -66,6 +66,9 @@ class Config:
         self._sessions_agree()
         from .quota import validate_config
         validate_config(self)
+        from .reviewers import inventory
+        for repo in self.projects:
+            inventory(self, repo)
         self._bind(bind=bind)
 
     def _permissions(self) -> None:
@@ -190,6 +193,13 @@ class Config:
         if repo not in self.projects:
             raise DriverError("repository is not configured for this Driver")
         return self.projects[repo]
+
+    def kernel_adapter(self, repo: str, factory=None):
+        from .kernel import KernelAdapter
+        from .reviewers import inventory
+        value = inventory(self, repo)
+        options = {} if value is None else {"coding_reviewers": value}
+        return (factory or KernelAdapter)(self.kernel_root, Path(self.project(repo)["repo_dir"]), repo, **options)
 
     def runner_profile(self, repo: str) -> str:
         """Return the one profile this repository verifies on, or refuse.

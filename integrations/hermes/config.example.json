@@ -11,6 +11,7 @@
         "codex-primary",
         "claude-primary"
       ],
+      "coding_reviewers": ["codex-primary", "claude-primary"],
       "max_workers": 2,
       "max_review_backlog": 4,
       "auto_triage": false,
@@ -250,7 +251,8 @@
         "example/project"
       ],
       "command": [
-        "/absolute/path/claude",
+        "/absolute/path/claude-sub",
+        "1",
         "--print",
         "--model",
         "REPLACE_WITH_EXACT_CLAUDE_MODEL_ID",
@@ -264,10 +266,13 @@
         "/absolute/path/hermes-python",
         "/absolute/path/hermes-home/scripts/aru_project_driver/capacity.py",
         "--family",
-        "claude-code"
+        "claude-code",
+        "--claude-profile",
+        "1"
       ],
       "probe_command": [
-        "/absolute/path/claude",
+        "/absolute/path/claude-sub",
+        "1",
         "--print",
         "--model",
         "REPLACE_WITH_EXACT_CLAUDE_MODEL_ID",
