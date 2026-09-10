@@ -153,6 +153,9 @@ def compile_policy(config, record: dict, adapter, run, *, preflight: bool = Fals
               f"Read(/{kernel}/scripts/**)"]
     if not preflight:
         allow += [f"Edit(/{body})"]
+        if record.get("quota_checkpoint") and not reviewing:
+            safe_path(record["quota_checkpoint"])
+            allow += [f"Read(/{record['quota_checkpoint']})", f"Edit(/{record['quota_checkpoint']})"]
         if not reviewing:
             allow += [f"Edit(/{directory}/{p})" for p in task["touches"]]
     lane = config.lane(repo, identity)
@@ -187,8 +190,8 @@ def compile_policy(config, record: dict, adapter, run, *, preflight: bool = Fals
             "policy_fingerprint": fingerprint(config, repo, identity), "result_format": "claude-json"}
 
 
-def observe_result(path: Path, exit_code: int) -> dict:
-    observation = _observe_result(path, exit_code)
+def observe_result(path: Path, exit_code: int, *, quota_errors: bool = False) -> dict:
+    observation = _observe_result(path, exit_code, quota_errors=quota_errors)
     # Reconciliation scans receipts repeatedly; keep full model/tool payloads
     # only in the private result log, never amplified into receipt/status text.
     if len(json.dumps(observation).encode()) > RECEIPT_DETAILS_BYTES:
@@ -201,7 +204,7 @@ def observe_result(path: Path, exit_code: int) -> dict:
     return observation
 
 
-def _observe_result(path: Path, exit_code: int) -> dict:
+def _observe_result(path: Path, exit_code: int, *, quota_errors: bool = False) -> dict:
     """Claude SDK result envelope; reported artifacts still require GitHub reread."""
     try:
         with path.open("r+b") as stream:
@@ -228,6 +231,14 @@ def _observe_result(path: Path, exit_code: int) -> dict:
     if denials:
         return {**observation, "outcome": "permission_denied", "retry_blocked": True,
                 "reason": "Claude permission denial: " + json.dumps(denials, sort_keys=True)}
+    # Only a valid native result envelope, with no denial, can prove quota.
+    # Ambiguous clock text is deliberately not converted to a reset epoch.
+    if quota_errors and result["is_error"] and not result.get("errors") and result.get("api_error_status") not in (401, 403) and isinstance(result.get("result"), str) and re.fullmatch(
+        r"You've hit your (?:session|weekly) limit(?: · resets [^\r\n]{1,100})?", result["result"]
+    ):
+        return {"outcome": "quota_exhausted", "retry_blocked": False,
+                "governed_completion": False, "reason": "authenticated Claude subscription quota exhausted",
+                "quota_reset_at": None}
     if result["is_error"] or result["subtype"] != "success" or exit_code:
         return {**observation, "outcome": "worker_error", "retry_blocked": True,
                 "reason": "Claude worker error: " + json.dumps(result.get("errors") or result.get("result") or result["subtype"])}

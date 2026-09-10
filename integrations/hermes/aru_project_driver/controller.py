@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from . import execution, scheduler, dependencies, permissions
+from . import execution, scheduler, dependencies, permissions, quota, quota_boundary
 from .config import Config, DriverError
 from . import handoff_contract
 from .kernel import KernelAdapter, KernelAdapterError
@@ -62,7 +62,7 @@ class Controller:
         for identity in identities:
             lane = self.config.lane(repo, identity)
             # One free lane per remaining session slot on the shared subscription.
-            if seen.get(lane["capacity_key"], 0) >= self._sessions(identity):
+            if not quota.enabled(self.config, repo) and seen.get(lane["capacity_key"], 0) >= self._sessions(identity):
                 blocked[identity] = {"available": False, "reason": "shared account already represented"}
                 continue
             try:
@@ -127,6 +127,15 @@ class Controller:
         if blocker:
             actions.append({**work, "type": "worker_blocked", "execution": "blocked",
                             "reason": blocker, "worker_id": receipt["id"]})
+        elif quota.enabled(self.config, repo) and receipt.get("outcome") in {"quota_exhausted", "quota_checkpoint"}:
+            try:
+                recovery = quota_boundary.resume(self, repo, work, receipt, available)
+                if recovery:
+                    resumes.append(recovery)
+            except DriverError as exc:
+                actions.append({**work, "type": "worker_blocked", "execution": "blocked",
+                                "reason": str(exc), "worker_id": receipt["id"],
+                                "owner": "Hermes Driver completion/heartbeat"})
         elif work["agent"] in available:
             resumes.append({**work, "worktree": receipt.get("worktree")})
 
@@ -225,6 +234,7 @@ class Controller:
         project, adapter = self.config.project(repo), self.adapter(repo)
         snapshot = adapter.snapshot()
         reasons = self._admission_reasons(repo, snapshot)
+        quota_boundary.recover_results(self, repo)
         free, blocked = self._lane_observations(repo, snapshot)
         actions, resumes = self._existing(repo, snapshot, adapter, free)
         dependency_actions, held = dependencies.actions(self, repo, snapshot)
@@ -245,7 +255,8 @@ class Controller:
                 < self._sessions(item)]
         slots = max(0, project.get("max_workers", 4) - self._worker_count(repo))
         resumes = resumes[:slots]
-        free = free[:max(0, slots - len(resumes))] if not reasons else []
+        limit = len(free) if quota.enabled(self.config, repo) and slots > len(resumes) else max(0, slots - len(resumes))
+        free = free[:limit] if not reasons else []
         candidates = adapter.candidates(snapshot, status="Ready") if free else []
         backlog = adapter.candidates(snapshot, status="Backlog") if (
             free and project.get("auto_triage", False)
@@ -336,27 +347,12 @@ class Controller:
                 if not self.state.project(repo)["enabled"]:
                     return {"status": "stopped", "launched": []}
                 adapter = self.adapter(repo)
+                quota_boundary.settle(self, repo, adapter)
                 actions = [self._converge_review(repo, adapter, a, launched) for a in plan["actions"]]
                 timers = self.sync_reviews(repo, actions)
                 for work in plan["resumes"]:
-                    if not self.state.project(repo)["enabled"]:
-                        break
-                    if self._worker_count(repo) >= self.config.project(repo).get("max_workers", 4):
-                        break
-                    if not self.available(self.config, repo, work["agent"], self.state).get("available"):
-                        continue
-                    if not self.probe(self.config, repo, work["agent"], self.state):
-                        continue
-                    adapter.revalidate(work["issue"], agent=work["agent"])
-                    # Idempotent canonical branch recovery also verifies any
-                    # recorded path; a receipt is never filesystem authority.
-                    worktree = adapter.branch(work["issue"], work["agent"])
-                    adapter.revalidate(work["issue"], agent=work["agent"])
-                    launched.append(self.launch(
-                        self.config, repo, work["agent"], work["issue"], str(worktree),
-                        kind="remediation", pr=work.get("pr"), head=work.get("head"),
-                    ))
-                for identity in plan["free_lanes"]:
+                    self._resume_one(repo, adapter, work, launched)
+                for identity in quota_boundary.ranked(self, repo, adapter, plan["free_lanes"]):
                     self._fill_one(repo, adapter, identity, launched)
                 if not self.state.project(repo)["enabled"]:
                     return {"status": "stopped", "launched": launched,
@@ -372,6 +368,29 @@ class Controller:
             except (KernelAdapterError, DriverError, scheduler.SchedulerError) as exc:
                 result = self._failure(repo, state, exc, precheck=False)
                 return {**result, "launched": launched}
+
+    def _resume_one(self, repo, adapter, work, launched):
+        if not self.state.project(repo)["enabled"]:
+            return
+        if self._worker_count(repo) >= self.config.project(repo).get("max_workers", 4):
+            return
+        identity = work.get("quota_transfer", work["agent"])
+        if not self.available(self.config, repo, identity, self.state).get("available"):
+            return
+        if not self.probe(self.config, repo, identity, self.state):
+            return
+        task = adapter.revalidate(work["issue"], agent=work["agent"])
+        if not quota_boundary.approved(self, repo, adapter, identity, task, "remediation"):
+            return
+        work = quota_boundary.transfer(self, repo, adapter, work)
+        # Idempotent canonical branch recovery also verifies any
+        # recorded path; a receipt is never filesystem authority.
+        worktree = adapter.branch(work["issue"], work["agent"])
+        adapter.revalidate(work["issue"], agent=work["agent"])
+        launched.append(self.launch(
+            self.config, repo, work["agent"], work["issue"], str(worktree),
+            kind="remediation", pr=work.get("pr"), head=work.get("head"),
+        ))
 
     @staticmethod
     def _review_blocked(work: dict, reason: str) -> dict:
@@ -457,6 +476,11 @@ class Controller:
             raise DriverError("assigned reviewer has author work; independent review lane is unavailable")
         if self._worker_count(repo) >= self.config.project(repo).get("max_workers", 4):
             raise DriverError("project worker capacity is fully reserved")
+        if quota.enabled(self.config, repo):
+            task = adapter.revalidate(binding["issue"], agent=binding["author"])
+            if not quota_boundary.decide(self, repo, adapter, identity, task, "review", binding):
+                receipt = quota_boundary.review_failure(self, repo, binding)
+                return self._recover_review(repo, adapter, work, receipt, launched, recover)
         capacity = self.available(self.config, repo, identity, self.state)
         if capacity.get("available") is not True:
             raise DriverError("review capacity unavailable or unknown: " + str(capacity.get("reason", "no observation")))
@@ -505,6 +529,8 @@ class Controller:
         eligible = {item["number"] for item in adapter.candidates(snapshot, status=status)}
         number = candidates[0]["number"]
         if number not in eligible or not self.state.project(repo)["enabled"]:
+            return
+        if quota.enabled(self.config, repo) and not quota_boundary.decide(self, repo, adapter, identity, candidates[0]):
             return
         if promote:
             adapter.promote(number)

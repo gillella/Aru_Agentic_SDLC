@@ -184,6 +184,15 @@ author's.
 
 ## Capacity observations and probes
 
+Projects may explicitly enable [validated quota admission](QUOTA.md) in
+`quota_admission`. The config example shows the opt-in with placeholder account
+hashes and conservative demand rows. It adds native Codex account reads,
+multi-window reservations and bounded exhaustion recovery to the actual launch
+boundaries. Claude's unattended quota, Cursor and Antigravity remain explicit
+unknown. Omit the policy or set it to `null` to retain existing project behavior.
+The observations below remain availability/liveness gates; they cannot satisfy
+the opt-in quota contract or override its rejection.
+
 The supplied `capacity.py --family openai-codex` observer reports local agent
 processes as diagnostics. Supported families are `openai-codex`, `claude-code`,
 `xai-cursor`, and `google-antigravity`; Claude can additionally use
@@ -191,7 +200,7 @@ processes as diagnostics. Supported families are `openai-codex`, `claude-code`,
 session, a process without an observable `CLAUDE_CONFIG_DIR`, or a process on
 another profile is counted in the reason and leaves the lane available. The only
 process-based veto is a live Claude process on exactly the lane's own profile.
-Quota is established solely by the bounded exact-model probe and provider
+Liveness is established by the bounded exact-model probe and provider
 responses; managed workers are protected by the Driver's reservation lock, not
 by process names. An observer that fails, hangs or cannot reach an optional
 remote host blocks only that observation (`observer unavailable`), never the

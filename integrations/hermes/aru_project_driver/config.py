@@ -64,6 +64,8 @@ class Config:
             self._lane(identity, lane)
         self._permissions()
         self._sessions_agree()
+        from .quota import validate_config
+        validate_config(self)
         self._bind(bind=bind)
 
     def _permissions(self) -> None:

@@ -369,6 +369,7 @@ class _Bridge:
             "dependencies": {str(number): dependency_states.get(number, "UNKNOWN") for number in dependencies},
             "errors": sorted(set(errors)), "boundary_errors": boundary_errors,
             "priority": priority,
+            "quota_risk": c.review_risk_tier(touches),
         }
 
     def _self_hosted_capacity(self) -> dict:

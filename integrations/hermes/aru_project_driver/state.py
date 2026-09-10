@@ -86,6 +86,8 @@ def _validate_project(data: dict) -> None:
 
 
 def _validate_worker(data: dict) -> None:
+    from .quota_worker import validate_record
+    validate_record(data)
     if "retry_blocked" in data and (type(data["retry_blocked"]) is not bool
             or not isinstance(data.get("policy_fingerprint"), str)
             or not re.fullmatch(r"[a-f0-9]{64}", data["policy_fingerprint"])

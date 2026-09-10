@@ -28,6 +28,10 @@ def _payload(source_root: Path, hermes_home: Path) -> list[tuple[Path, Path]]:
     skill = source_root / "skill"
     if not (package / "driver.py").is_file() or not (skill / "SKILL.md").is_file():
         raise InstallError("Source package is incomplete: driver.py and skill/SKILL.md are required")
+    quota_modules = [package / (name + ".py") for name in (
+        "quota", "quota_collect", "quota_admission", "quota_boundary", "quota_worker")]
+    if any(path.exists() for path in quota_modules) and not all(path.is_file() for path in quota_modules):
+        raise InstallError("Source quota package is incomplete")
     result = []
     for source in sorted(package.rglob("*.py")):
         if "tests" in source.relative_to(package).parts or "__pycache__" in source.parts:
@@ -35,6 +39,8 @@ def _payload(source_root: Path, hermes_home: Path) -> list[tuple[Path, Path]]:
         result.append((source, hermes_home / "scripts" / "aru_project_driver" / source.relative_to(package)))
     for source in sorted(skill.rglob("*.md")):
         result.append((source, hermes_home / "skills" / "autonomous-ai-agents" / "hermes-project-driver" / source.relative_to(skill)))
+    if (source_root / "QUOTA.md").is_file():
+        result.append((source_root / "QUOTA.md", hermes_home / "skills" / "autonomous-ai-agents" / "hermes-project-driver" / "references" / "quota.md"))
     for source, destination in result:
         if source.is_symlink() or not source.resolve().is_relative_to(source_root.resolve()):
             raise InstallError(f"Refusing linked source outside the reviewed package: {source}")
