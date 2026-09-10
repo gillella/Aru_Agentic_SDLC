@@ -165,8 +165,7 @@ def compile_policy(config, record: dict, adapter, run, *, preflight: bool = Fals
                'Create a missing body with Edit using old_string="" and new_string containing the body; '
                "Read an existing body before editing it. "
                "Canonical access is for reading only. No author review/merge authority. "
-               "CLI grants are not OS isolation; tests/helpers execute trusted project code. "
-               "Stop on any denial and report the exact blocker.")
+               "CLI grants are not OS isolation; tests/helpers execute trusted project code.")
     if preflight:
         prompt = ("No-write capability preflight only. Do not implement, test, submit, or change anything. "
                   f"Read {kernel}/AGENTS.md and {kernel}/docs/KERNEL-CONTRACT.md using Read. "
@@ -174,6 +173,16 @@ def compile_policy(config, record: dict, adapter, run, *, preflight: bool = Fals
                   + "\n".join(shlex.join(c) for c in reads))
         argv += ["--disallowedTools", "Edit", "Write", "--verbose"]
         argv[argv.index("--output-format") + 1] = "stream-json"
+    # Append after either task prompt so preflight cannot drop the shared contract.
+    prompt += ("\nBash.command must equal one listed command byte-for-byte: copy it literally, "
+               "one command per Bash invocation; no extra flags or alternate spellings; "
+               "no shell wrappers, composition, substitutions, pipelines or suffixes. "
+               "Do not append echo/printf or exit-code reporting (including ; echo or ; printf). "
+               "Use native tool output and result metadata for outputs, exit status and failures. "
+               "Wait for each tool result before the next call. "
+               "Stop on the first permission denial and report the exact blocker; "
+               "do not retry with alternate tools (including Glob, Grep or Read), rewritten commands "
+               "or permission changes, and do not execute any remaining commands.")
     return {"argv": [*argv, prompt], "task": task, "commands": commands,
             "policy_fingerprint": fingerprint(config, repo, identity), "result_format": "claude-json"}
 

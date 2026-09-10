@@ -28,6 +28,16 @@ the helper appends it. No issue claiming, reviewer assignment, merge, release,
 deployment or arbitrary helper execution is granted. Exact commands appear in
 the worker prompt; extra flags/alternate spellings may be denied deliberately.
 
+Managed and preflight prompts share the same literal-command contract: each
+`Bash.command` must equal one compiled command byte-for-byte, one command per
+invocation. No extra flags, alternate spellings, shell wrappers, composition,
+substitutions, pipelines or suffixes are permitted, including `; echo` or
+`; printf` to report exit status. Use native tool output and result metadata.
+Wait for each result; stop on the first permission denial and report it without
+trying alternate tools, rewritten commands, permission changes or remaining
+commands. Preflight retains this contract after selecting its no-write prompt;
+the instruction correction changes no grants.
+
 For a missing scratch body, use `Edit` with `old_string=""` and the body in
 `new_string`; read an existing body before editing it. The exact scratch-path
 Edit grant applies to both roles and does not require a broader grant. The
