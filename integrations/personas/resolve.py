@@ -33,16 +33,14 @@ from . import catalog
 from .binding import AccountBinding, FleetBinding
 from .classify import Classification, TaskRequest, classify
 from .errors import (
-    AccountScopeError, AuthorLineageError, CapabilityError, IncompatibleOverrideError,
-    ReviewAuthorityError, HarnessBindingError, ModalityError, NoEligibleCandidateError, OptionalPersonaError, PersonaPolicyError,
-    RiskFloorError, RoleQualificationError, UnsupportedEffortError,
+    AccountScopeError, CapabilityError, HarnessBindingError, IncompatibleOverrideError,
+    ModalityError, NoEligibleCandidateError, OptionalPersonaError, PersonaPolicyError,
+    ReviewAuthorityError, RiskFloorError, RoleQualificationError,
 )
 from .evidence import ProbeRecord
 from .plan import CommandPlan, SkippedCandidate, build_argv, policy_source_digest
 from .prompt import PromptContext, render
-from .registry import (
-    REGISTRY_VERSION, Persona, persona as get_persona, role as get_role, task_class,
-)
+from .registry import REGISTRY_VERSION, Persona
 
 #: Refusals that mean "eligible identity, unusable right now". These are the
 #: bounded-fallback triggers the amendment names.
@@ -94,6 +92,7 @@ def _gate(item: Persona, role_id: str, account: AccountBinding, request: TaskReq
           classification: Classification, binding: FleetBinding,
           now: datetime) -> Selection:
     """Every check that must pass before this candidate may carry the work."""
+    policy = binding.snapshot
     if not item.performs(role_id):
         raise RoleQualificationError(
             f"{item.id} is not allowlisted to perform the {role_id} role"
@@ -106,7 +105,8 @@ def _gate(item: Persona, role_id: str, account: AccountBinding, request: TaskReq
     if role_id != "code_reviewer":
         extend_history(request.author_history, item.id, account.account_id, request.actor,
                        request.handoff_reason or ("approved architect availability fallback"
-                                                 if role_id == "chief_architect" else ""))
+                                                 if role_id == "chief_architect" else ""),
+                       snapshot=policy)
     if item.optional and (item.id not in binding.enabled_optional or not request.allow_optional):
         raise OptionalPersonaError("optional persona requires binding and task enablement")
     harness = binding.harness(item.route)
@@ -119,7 +119,9 @@ def _gate(item: Persona, role_id: str, account: AccountBinding, request: TaskReq
     model_id = item.model_id(effort)
     if request.model_override is not None and request.model_override != model_id:
         raise IncompatibleOverrideError("model override disagrees with persona and effort")
-    catalog.require_effort(item.route, model_id, effort)
+    catalog.require_effort(item.route, model_id, effort,
+                           effort_selection=policy.model_rule(item.route,
+                                                              model_id).effort_selection)
     if account.policy.route != item.route:
         raise AccountScopeError(f"{account.account_id} does not serve the {item.route} route")
     if account.policy.lineage != item.lineage:
@@ -128,17 +130,18 @@ def _gate(item: Persona, role_id: str, account: AccountBinding, request: TaskReq
             f"{item.id} lineage {item.lineage}"
         )
     account.require_project(request.project)
-    account.require_capacity()
+    binding.require_capacity(account)
     probe = binding.evidence.require(account.account_id, item.route, model_id, effort, now,
                                      identity_digest=account.identity_digest,
                                      modalities=classification.required_modalities | item.required_modalities)
     return Selection(item, role_id, account, model_id, effort, effort_reason, probe)
 
 
-def _candidates(classification: Classification, request: TaskRequest) -> tuple[str, ...]:
-    family = task_class(classification.task_class)
+def _candidates(classification: Classification, request: TaskRequest,
+                policy) -> tuple[str, ...]:
+    family = policy.task_class(classification.task_class)
     if request.persona_override is not None:
-        pinned = get_persona(request.persona_override)
+        pinned = policy.persona(request.persona_override)
         if pinned.id not in (*family.candidates, *family.override_candidates):
             raise IncompatibleOverrideError(
                 f"{pinned.id} is not an approved candidate for {family.name} "
@@ -159,9 +162,10 @@ def _resolve(request: TaskRequest, binding: FleetBinding, context: PromptContext
             now: datetime | None = None) -> CommandPlan:
     """Return the one plan this request authorises, or refuse with every reason."""
     moment = now or datetime.now(timezone.utc)
-    classification = classify(request)
-    family = task_class(classification.task_class)
-    candidates = _candidates(classification, request)
+    policy = binding.snapshot
+    classification = classify(request, policy)
+    family = policy.task_class(classification.task_class)
+    candidates = _candidates(classification, request, policy)
     preferred = family.candidates[0]
     if not context.branch or not context.head or len(context.head) != 40 or any(c not in "0123456789abcdef" for c in context.head):
         raise HarnessBindingError("context requires branch and full lowercase commit head")
@@ -176,7 +180,7 @@ def _resolve(request: TaskRequest, binding: FleetBinding, context: PromptContext
     selection: Selection | None = None
 
     for persona_id in candidates:
-        item = get_persona(persona_id)
+        item = policy.persona(persona_id)
         role_id = family.role or ("senior_implementer" if item.id == "sonnet-reviewer"
                                   else item.native_role)
         accounts = binding.accounts_for(item.route)
@@ -214,7 +218,8 @@ def _compile(request: TaskRequest, classification: Classification, selection: Se
              binding: FleetBinding, context: PromptContext, preferred: str,
              skipped: tuple[SkippedCandidate, ...], moment: datetime) -> CommandPlan:
     item, account = selection.persona, selection.account
-    role = get_role(selection.role_id)
+    policy = binding.snapshot
+    role = policy.role(selection.role_id)
     harness = binding.harness(item.route)
     if Path(harness.workspace).resolve() != Path(context.worktree).resolve():
         raise HarnessBindingError("command workspace disagrees with prompt context")
@@ -231,11 +236,14 @@ def _compile(request: TaskRequest, classification: Classification, selection: Se
     )
     argv = build_argv(item.route, harness.executable, selection.model_id,
                       selection.effort, harness.workspace, prompt,
-                      read_only=role.id == "code_reviewer", input_files=request.input_files)
+                      read_only=role.id == "code_reviewer", input_files=request.input_files,
+                      snapshot=policy)
     return CommandPlan(
         registry_version=REGISTRY_VERSION,
         catalog_recorded_on=str(catalog.catalog_metadata().get("recorded_on", "")),
         source_digest=policy_source_digest(),
+        policy_version=policy.version, policy_digest=policy.digest,
+        policy_origin=policy.origin,
         created_at=moment.isoformat(),
         expires_at=min(moment + timedelta(seconds=60),
                        selection.probe.observed_at + binding.evidence.max_age).isoformat(),
@@ -255,7 +263,8 @@ def _compile(request: TaskRequest, classification: Classification, selection: Se
             request.author_history if role.id == "code_reviewer" else
             extend_history(request.author_history, item.id, account.account_id, request.actor,
                            request.handoff_reason or ("approved architect availability fallback"
-                                                     if role.id == "chief_architect" else "")))),
+                                                     if role.id == "chief_architect" else ""),
+                           snapshot=policy))),
         context={"worktree": context.worktree, "branch": context.branch, "head": context.head,
                  "pr": context.pr},
         input_files=request.input_files,
@@ -277,7 +286,8 @@ def _compile(request: TaskRequest, classification: Classification, selection: Se
 
 def resolve(request: TaskRequest, binding: FleetBinding, context: PromptContext,
             now: datetime | None = None) -> CommandPlan:
-    if classify(request).task_class == "code_review":
+    family = classify(request, binding.snapshot).task_class
+    if binding.snapshot.task_class(family).role == "code_reviewer":
         raise ReviewAuthorityError("review requires plan_review and a current kernel assignment")
     return _resolve(request, binding, context, now)
 

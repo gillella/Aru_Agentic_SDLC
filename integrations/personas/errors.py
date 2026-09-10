@@ -123,6 +123,24 @@ class HarnessBindingError(PersonaPolicyError):
     code = "harness-binding"
 
 
+# -- operator policy documents ------------------------------------------------
+
+class PolicyDocumentError(PersonaPolicyError):
+    """An operator policy document is malformed, unknown or self-contradictory.
+
+    Configuration is data, never code: a document that cannot be validated in
+    full is refused outright rather than partially applied.
+    """
+
+    code = "policy-document"
+
+
+class PolicyPrivilegeError(PolicyDocumentError):
+    """A policy document tried to grant authority configuration may never grant."""
+
+    code = "policy-privilege"
+
+
 # -- accounts and capacity ----------------------------------------------------
 
 class AccountError(PersonaPolicyError):
@@ -165,6 +183,17 @@ class CreditsRequiredError(CapabilityError):
 
 class CapacityExhaustedError(CapabilityError):
     code = "capacity-exhausted"
+
+
+class AccountStateError(CapacityExhaustedError):
+    """A disabled or draining account takes no new reservation.
+
+    Draining is deliberately an *availability* refusal: the identity stays
+    approved, already-running work keeps its own account and policy snapshot,
+    and nothing here kills a worker or erases history.
+    """
+
+    code = "account-state"
 
 
 # -- plans --------------------------------------------------------------------

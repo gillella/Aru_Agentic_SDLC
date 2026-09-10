@@ -89,6 +89,132 @@ verification requires high. No sensitive task accepts effort below high.
 Scout, triage, maintenance, UI and pair personas cannot perform Tier 2–3 work.
 Spark requires both binding enablement and `allow_optional` on the request.
 
+## Operator policy documents
+
+Adding an expert, adding or removing a subscription, and enabling another model
+on an already supported harness are **configuration changes with zero Python
+edits**. The table above is the shipped default; it is a baseline, not the only
+expressible fleet.
+
+A policy document is JSON with schema `aru.personas.policy/v1`. It declares a
+`version`, a `base` of `default` or `empty`, and any of `roles`, `task_classes`,
+`models`, `personas` and `accounts`. Each entry **upserts** by identifier;
+`remove` deletes by identifier. Loading one produces an immutable
+`PolicySnapshot` with a content `digest`; every resolution reads the snapshot it
+was handed, so two documents can never leak into each other and there is no
+module dictionary to monkeypatch.
+
+```jsonc
+{
+  "schema": "aru.personas.policy/v1",
+  "version": "1.1.0",
+  "base": "default",
+  "roles": [{
+    "id": "database_expert", "base": "lead_systems_implementer",
+    "title": "Database Migration Expert", "scope": "Schema migrations and backfills.",
+    "output_contract": ["<every inherited line>", "A reversible migration plan."],
+    "escalation": ["<every inherited line>", "Escalate before dropping rows."],
+    "stop_criteria": ["<every inherited line>", "Never migrate a production database."]
+  }],
+  "task_classes": [{
+    "name": "database_migration", "summary": "Schema migrations and backfills.",
+    "candidates": ["atlas-database", "astra-implementer"], "role": "database_expert"
+  }],
+  "models": [{"route": "codex", "id": "gpt-5.6-sol", "vendor": "openai-codex",
+              "effort_selection": "explicit"}],
+  "personas": [{"id": "atlas-database", "route": "codex", "lineage": "openai-codex",
+                "model_ids": {"high": "gpt-5.6-sol"}, "native_role": "database_expert",
+                "primary_task": "database_migration", "max_risk_tier": 3, "…": "…"}],
+  "accounts": [{"id": "claude-subscription-5", "route": "claude-code",
+                "capacity_key": "claude-subscription-5", "lineage": "anthropic-claude",
+                "description": "Fifth personal Claude subscription.",
+                "state": "enabled", "priority": 9, "concurrency": null}]
+}
+```
+
+### Lifecycle commands
+
+```sh
+python -m integrations.personas policy-export                     # current policy as a document
+python -m integrations.personas policy-preview --policy new.json  # explain the change; writes nothing
+python -m integrations.personas policy-publish --policy new.json --to live.json
+python -m integrations.personas validate --policy live.json       # digest, counts, account states
+python -m integrations.personas list --policy live.json
+```
+
+The Python API is `default_snapshot()`, `from_document(raw)`,
+`load_policy_document(path)`, `preview(raw)` and `publish(raw, path)`. A binding
+names its policy once: `{"policy": "live.json"}` or an embedded document in the
+fleet binding. Publication validates first, then writes through a temporary file
+in the destination directory and renames it, so a reader sees the old document
+or the new one and never a partial write.
+
+### Migration and rollback
+
+`from_document(raw)` resolves `base: default` against the shipped 13-persona
+baseline. Pass `base=<snapshot>` to resolve against the policy that is currently
+live instead — that is what a `remove` list names. Removal is fail-closed: it
+must name an entry the base actually has, so a typo, a stale identifier or a
+doubled removal is refused rather than silently ignored. Republishing a document
+whose `base` is `default` and which simply omits an addition drops that addition
+just as well; the two spellings differ only in which policy the document is
+written against.
+
+To roll back, republish the previous document: publication is a single rename,
+so a rollback is the same atomic operation as the change it undoes. Keep the
+digest `publish` returns next to each published document — that digest is what
+names the live policy, `validate --policy` reprints it, and every compiled plan
+records the `policy_digest` it was resolved against. Work already running stays
+bound to its own snapshot, so a rollback never rewrites a running worker's
+policy, its account or its recorded lineage.
+
+Existing default-facing callers stay compatible: the module-level `PERSONAS`,
+`ROLES` and `TASK_CLASSES` still describe the shipped defaults, and every public
+entry point that now takes a snapshot defaults to `default_snapshot()`. A #631
+Driver that wants an operator policy passes it explicitly — as `policy=` on a
+request, `snapshot=` on an identity or binding, or `--policy` on the CLI — and a
+resolution that mixes two snapshots is refused by `require_same_policy()` rather
+than silently preferring one.
+
+### Account enrollment boundary
+
+An account entry carries credential *references* only - the auth-profile
+environment stays in the binding, and no token, credential or command may appear
+in a policy document at any depth. `state` is `enabled`, `draining` or
+`disabled`, and removing the entry is the fourth state. `draining` and
+`disabled` refuse **new reservations**; they do not stop a running worker, erase
+audit history, cancel provider billing or revoke a credential. Actual lock and
+drain execution belong to #631/#636 and are not deployed by this package.
+`priority` orders accounts within a route; `concurrency` caps the whole capacity
+key. Two account identifiers naming one `capacity_key` are an alias: their
+reservations are summed, the lowest observed ceiling wins, and they must agree on
+route, lineage, client scope and concurrency, so an alias can neither create
+quota nor escape the Unum client restriction. Reusing one credential profile
+under a second identifier is refused outright.
+
+### Model and harness boundary
+
+A configured model must already be a recorded, assignable catalog identifier in
+`data/route-catalogs.json`, must be declared with a `vendor` and an
+`effort_selection`, and must still pass an exact-model, exact-effort capability
+probe. Appearing in a document never makes a model exist, and never proves
+access. `vendor` is model authorship and is independent of `lineage`, the access
+harness: an Anthropic model reached through Cursor or Antigravity keeps
+`anthropic-claude` authorship and can never independently review Claude's work.
+A genuinely new harness protocol, flag semantics or modality transport stays in
+reviewed adapter code in `catalog.py` and `plan.py`; configuration contributes no
+argument, executable or approval.
+
+### What configuration can never do
+
+`KERNEL_INVARIANTS` names each non-overridable rule and every one has a negative
+test. In short: a role may add stop criteria but never drop the mandatory fleet
+ones or thin a protected contract; review scope requires the `code_reviewer`
+role and routine scope stays at tier 1; a review family never falls back to
+another identity; the approved architect chain stays an exact ordered prefix; a
+declared risk tier can rise but never fall; and no document may inject a
+command, environment, credential, purchase or review authority.
+
 ## Public Python interface
 
 ```python
