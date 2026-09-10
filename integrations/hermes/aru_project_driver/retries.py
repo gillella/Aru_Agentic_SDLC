@@ -12,12 +12,10 @@ from .state import write_json
 MAX_ATTEMPTS = 3
 BACKOFF_SECONDS = 60
 
-
 def validate_policy(project):
     epoch = project.get("worker_retry_epoch", "initial")
     if not isinstance(epoch, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", epoch):
         raise DriverError("worker_retry_epoch must name an explicit operator recovery revision")
-
 
 def context(config, repo, work):
     """Only a new kernel action/PR/head or explicit operator epoch renews work."""
@@ -27,14 +25,12 @@ def context(config, repo, work):
         "epoch": config.project(repo).get("worker_retry_epoch", "initial"),
     }, sort_keys=True).encode()).hexdigest()
 
-
 def stamp(config, record, work_type):
     if record["kind"] != "review":
         record["retry_context"] = context(config, record["repo"], {
             "issue": record["issue"], "type": work_type,
             "pr": record.get("pr"), "head": record.get("head"),
         })
-
 
 def validate(record):
     if "retry_context" in record and not _fingerprint(record["retry_context"]):
@@ -52,16 +48,13 @@ def validate(record):
                    for k in ("observed_at", "retry_at"))):
         raise DriverError("worker retry observation is invalid")
 
-
 def _fingerprint(value):
     return isinstance(value, str) and re.fullmatch(r"[a-f0-9]{64}", value) is not None
-
 
 def latest_attempt(receipts):
     return max(receipts, key=lambda r: (
         r["started_at"], r["state"] not in {"claiming", "prepared"}, r["id"],
     ))
-
 
 def gate(config, state, repo, work, receipts, now):
     """A released reservation with no governed progress consumes one attempt.

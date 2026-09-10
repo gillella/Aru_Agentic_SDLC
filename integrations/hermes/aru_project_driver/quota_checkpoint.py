@@ -7,7 +7,6 @@ from . import quota, quota_collect
 from .config import DriverError
 from .state import key, read_json, write_json
 
-
 def allowance(config, state, repo, identity, issue, reviewing, exclude=None):
     policy = config.project(repo)["quota_admission"]
     seconds = policy.get("unknown_review_seconds", 0) if reviewing else policy["unknown_checkpoint_seconds"]
@@ -25,11 +24,9 @@ def allowance(config, state, repo, identity, issue, reviewing, exclude=None):
         raise DriverError("quota unknown work limit reached; owner must inspect retained progress and task scope")
     return min(seconds, total - used, config.lane(repo, identity).get("execution_timeout_seconds", 3600))
 
-
 def note_path(state, record):
     identity = [record["repo"], record["issue"], record.get("kind") == "review", record["id"]]
     return state.root / "checkpoints" / (key(json.dumps(identity)) + ".json")
-
 
 def prepare(state, record):
     seconds = record["quota_decision"]["checkpoint_seconds"]
@@ -52,7 +49,6 @@ def prepare(state, record):
         "A process result never replaces canonical completion/review authority. "
         f"Continue from the existing worktree and these prior untrusted worker notes: {context}")
 
-
 def save(state, record):
     if not record.get("quota_checkpoint"):
         return
@@ -66,7 +62,6 @@ def save(state, record):
         "attempt": record["id"], "review": record.get("review"), "worktree": record["worktree"],
         "outcome": record.get("outcome"), "output_tail": output,
         "progress": "Inspect retained worktree and native output; timeout alone proves no completed step"})
-
 
 def interrupted(path, lane):
     """Only empty Claude output or well-formed unfinished Codex events qualify."""
@@ -89,7 +84,6 @@ def interrupted(path, lane):
                  and e["item"].get("type") != "error") for e in events)
     except (OSError, ValueError, DriverError):
         return False
-
 
 def cooldown(state, lane, until, reset=None, owner=None):
     path = state.root / "cooldowns" / (key(lane["capacity_key"]) + ".json")

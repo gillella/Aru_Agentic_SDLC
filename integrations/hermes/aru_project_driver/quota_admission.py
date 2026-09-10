@@ -7,7 +7,6 @@ from . import quota, quota_collect, quota_checkpoint
 from .config import DriverError
 from .state import key, read_json, write_json
 
-
 def lineage(config, state, repo, issue, identity):
     families = {config.lane(repo, identity)["family"]}
     for r in state.workers(repo):
@@ -18,7 +17,6 @@ def lineage(config, state, repo, issue, identity):
             families.add(lane["family"])
             families.update(r.get("quota_decision", {}).get("author_families", []))
     return sorted(families)
-
 
 def demand(config, state, repo, identity, task, kind):
     q, policy = config.lane(repo, identity)["quota"], config.project(repo)["quota_admission"]
@@ -37,7 +35,6 @@ def demand(config, state, repo, identity, task, kind):
             "confidence": "conservative-observed" if samples else "cold-start",
             "uncertainty": "account-delta-upper-bound-includes-external-use" if samples else "no-comparable-measurements"}
 
-
 def measured_history(state, account):
     history = read_json(state.root / "quota-history" / (key(account) + ".json"), {"samples": []})
     if (not isinstance(history.get("samples"), list) or len(history["samples"]) > 128
@@ -48,7 +45,6 @@ def measured_history(state, account):
                    or any(not quota.number(v, 0, 100) for v in s["percent"].values()) for s in history["samples"])):
         raise DriverError("quota measured history invalid")
     return history
-
 
 def reservations(config, state, account, pool, exclude=None, consume_review=None):
     result = {"primary": 0, "secondary": 0}
@@ -70,7 +66,6 @@ def reservations(config, state, account, pool, exclude=None, consume_review=None
                 for name, value in allocation["percent"].items():
                     result[name] += value
     return result
-
 
 def capacity(config, state, repo, identity, estimate, *, exclude=None, consume_review=None, unknown_seconds=0):
     lane, now = config.lane(repo, identity), time.time()
@@ -99,7 +94,6 @@ def capacity(config, state, repo, identity, estimate, *, exclude=None, consume_r
     if checkpoint and any(held.values()):
         raise DriverError("quota unknown account already has a reservation")
     return obs, min(margins, default=0), checkpoint
-
 
 def evaluate(config, state, repo, identity, task, kind, adapter, *, exclude=None, review=None):
     if not quota.enabled(config, repo):
@@ -132,7 +126,6 @@ def evaluate(config, state, repo, identity, task, kind, adapter, *, exclude=None
     if review or not requires_review:
         return result
     return review_budget(config, state, repo, task, adapter, result, exclude)
-
 
 def review_budget(config, state, repo, task, adapter, result, exclude):
     policy = config.project(repo)["quota_admission"]
@@ -183,13 +176,11 @@ def review_budget(config, state, repo, task, adapter, result, exclude):
                                    "pool": other_lane["quota"]["pool"], "percent": review_demand["percent"]})
     return result
 
-
 def release_review(state, repo, issue):
     for receipt in state.workers(repo):
         if receipt["issue"] == issue and receipt.get("quota_decision"):
             receipt["quota_review_released"] = True
             write_json(state.worker_path(receipt["id"]), receipt)
-
 
 def escrow_held(state, receipt):
     if receipt.get("quota_review_released"):

@@ -34,14 +34,11 @@ UNPROVEN_CHECKS = {
     "stop-dispatch-suppression": "an immediate Stop snapshot does not observe suppression of later dispatch",
 }
 
-
 class CanaryError(RuntimeError):
     """The canary cannot continue safely; partial evidence is still written."""
 
-
 class DeadlineExpired(CanaryError):
     """The shared observation budget is exhausted; only bounded cleanup remains."""
-
 
 @dataclass
 class Step:
@@ -58,11 +55,9 @@ class Step:
         self.ids.update({k: v for k, v in ids.items() if v is not None})
         return self
 
-
 def _run(argv: list[str], *, timeout: float) -> subprocess.CompletedProcess:
     # Fixed executables and literal arguments; never a shell.
     return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=timeout)
-
 
 class Canary:
     """One bounded refill canary against one configured Driver project."""
@@ -353,12 +348,7 @@ class Canary:
             self._step(name).close("unproven", reason)
         statuses = {s.status for s in self.steps}
         result = "failed" if "failed" in statuses else "unproven" if statuses - {"pass"} else "pass"
-        return {"schema": SCHEMA, "project": self.project, "dry_run": self.dry_run,
-                "evidence_kind": "simulation" if self.dry_run else "observations",
-                "started_at": self.started_at, "finished_at": self.wall_clock(), "result": result, "error": error,
-                "steps": [{"name": s.name, "status": s.status, "reason": s.reason, "ids": s.ids,
-                           "started_at": s.started_at, "finished_at": s.finished_at} for s in self.steps]}
-
+        return {"schema": SCHEMA, "project": self.project, "dry_run": self.dry_run, "evidence_kind": "simulation" if self.dry_run else "observations", "started_at": self.started_at, "finished_at": self.wall_clock(), "result": result, "error": error, "steps": [{"name": s.name, "status": s.status, "reason": s.reason, "ids": s.ids, "started_at": s.started_at, "finished_at": s.finished_at} for s in self.steps]}
 
 class FakeDriver:
     """Dry-run stand-in for the installed Driver and gh; deterministic, no network.
@@ -450,7 +440,6 @@ class FakeDriver:
             return subprocess.CompletedProcess(argv, 1, json.dumps({"status": "error", "reason": "unknown op"}), "")
         return subprocess.CompletedProcess(argv, 0, json.dumps(out) + "\n", "")
 
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, type=Path)
@@ -473,7 +462,6 @@ def main(argv: list[str] | None = None) -> int:
     args.evidence.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"result": evidence["result"], "evidence": str(args.evidence)}))
     return 0 if evidence["result"] == "pass" else 1
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

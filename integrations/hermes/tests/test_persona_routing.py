@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import hashlib
 import json
 from pathlib import Path
 import sys
@@ -10,8 +9,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from aru_project_driver import execution, persona_routing
-from aru_project_driver.config import Config, DriverError
-from aru_project_driver.state import State, read_json, write_json
+from aru_project_driver.config import Config
+from aru_project_driver.state import State, write_json
 
 try:
     from integrations import personas
@@ -27,61 +26,30 @@ def driver_env(tmp_path):
     repo = tmp_path / "repository"
     worktree = repo / ".worktrees" / "feat-issue-100"
     worktree.mkdir(parents=True)
-    home = tmp_path / "hermes-home"
-    runtime = tmp_path / "hermes-runtime"
+    home, runtime, kernel = tmp_path / "hermes-home", tmp_path / "hermes-runtime", tmp_path / "kernel"
     runtime.mkdir()
-    kernel = tmp_path / "kernel"
     kernel.mkdir()
 
+    specs = [
+        ("claude-opus", "claude-code", "claude-subscription-1"),
+        ("claude-sonnet", "claude-code", "claude-subscription-1"),
+        ("codex-astra", "openai-codex", "openai-codex"),
+        ("cursor-grok", "xai-cursor", "cursor-default"),
+        ("antigravity-gemini", "google-antigravity", "antigravity-default"),
+    ]
     lanes = {
-        "claude-opus": {
-            "family": "claude-code",
-            "capacity_key": "claude-subscription-1",
-            "projects": ["owner/repo"],
-            "command": [sys.executable, "-c", "print('claude-opus')", "{prompt}"],
+        name: {
+            "family": fam, "capacity_key": cap, "projects": ["owner/repo"],
+            "command": [sys.executable, "-c", f"print({name!r})", "{prompt}"],
             "capacity_command": [sys.executable, "-c", 'print(\'{"available": true}\')'],
             "probe_command": [sys.executable, "-c", "print('OK')"],
-        },
-        "claude-sonnet": {
-            "family": "claude-code",
-            "capacity_key": "claude-subscription-1",
-            "projects": ["owner/repo"],
-            "command": [sys.executable, "-c", "print('claude-sonnet')", "{prompt}"],
-            "capacity_command": [sys.executable, "-c", 'print(\'{"available": true}\')'],
-            "probe_command": [sys.executable, "-c", "print('OK')"],
-        },
-        "codex-astra": {
-            "family": "openai-codex",
-            "capacity_key": "openai-codex",
-            "projects": ["owner/repo"],
-            "command": [sys.executable, "-c", "print('codex-astra')", "{prompt}"],
-            "capacity_command": [sys.executable, "-c", 'print(\'{"available": true}\')'],
-            "probe_command": [sys.executable, "-c", "print('OK')"],
-        },
-        "cursor-grok": {
-            "family": "xai-cursor",
-            "capacity_key": "cursor-default",
-            "projects": ["owner/repo"],
-            "command": [sys.executable, "-c", "print('cursor-grok')", "{prompt}"],
-            "capacity_command": [sys.executable, "-c", 'print(\'{"available": true}\')'],
-            "probe_command": [sys.executable, "-c", "print('OK')"],
-        },
-        "antigravity-gemini": {
-            "family": "google-antigravity",
-            "capacity_key": "antigravity-default",
-            "projects": ["owner/repo"],
-            "command": [sys.executable, "-c", "print('antigravity-gemini')", "{prompt}"],
-            "capacity_command": [sys.executable, "-c", 'print(\'{"available": true}\')'],
-            "probe_command": [sys.executable, "-c", "print('OK')"],
-        },
+        }
+        for name, fam, cap in specs
     }
 
     raw = {
-        "version": 1,
-        "state_dir": str(home / "state" / "aru_project_driver"),
-        "hermes_home": str(home),
-        "hermes_repo": str(runtime),
-        "kernel_root": str(kernel),
+        "version": 1, "state_dir": str(home / "state" / "aru_project_driver"),
+        "hermes_home": str(home), "hermes_repo": str(runtime), "kernel_root": str(kernel),
         "projects": {"owner/repo": {"repo_dir": str(repo), "lanes": list(lanes)}},
         "lanes": lanes,
     }
@@ -93,28 +61,20 @@ def driver_env(tmp_path):
     project["enabled"] = True
     state.save("owner/repo", project)
 
-    # Seed valid probe observations for testing matching fleet accounts
     policy = persona_routing.get_policy_snapshot(config, "owner/repo")
     fleet_b = persona_routing.build_fleet_binding(config, state, "owner/repo", worktree=worktree)
-    probe_records = []
-    for p in policy.personas.values():
-        for effort, model in p.model_ids.items():
-            for a in fleet_b.accounts:
-                if a.policy.route == p.route:
-                    probe_records.append({
-                        "account_id": a.account_id,
-                        "route": p.route,
-                        "model_id": model,
-                        "effort": effort,
-                        "observed_at": datetime.now(timezone.utc).isoformat(),
-                        "outcome": "ok",
-                        "source": "SYNTHETIC test probe record",
-                        "authenticated": True,
-                        "identity_digest": a.identity_digest,
-                        "modalities": ["text", "image"],
-                    })
+    probe_records = [
+        {
+            "account_id": a.account_id, "route": p.route, "model_id": model, "effort": effort,
+            "observed_at": datetime.now(timezone.utc).isoformat(), "outcome": "ok",
+            "source": "SYNTHETIC test probe record", "authenticated": True,
+            "identity_digest": a.identity_digest, "modalities": ["text", "image"],
+        }
+        for p in policy.personas.values()
+        for effort, model in p.model_ids.items()
+        for a in fleet_b.accounts if a.policy.route == p.route
+    ]
     write_json(state.root / "probe_records.json", {"records": probe_records})
-
     return config, state, worktree
 
 
@@ -143,15 +103,33 @@ def test_fleet_binding_construction(driver_env):
 
 def test_probe_records_observation(driver_env):
     config, state, _ = driver_env
+    write_json(state.root / "probe_records.json", {"records": []})
     ok = execution.probe(config, "owner/repo", "codex-astra", state)
     assert ok
     raw = json.loads((state.root / "probe_records.json").read_text())
     records = raw if isinstance(raw, list) else raw.get("records", [])
-    assert len(records) >= 1
-    rec = next(r for r in records if r.get("account_id") == "openai-codex" and r.get("route") == "codex")
+    assert len(records) == 1
+    rec = records[0]
     assert rec["route"] == "codex"
     assert rec["model_id"] == "gpt-6-astra"
     assert rec["outcome"] == "ok"
+    assert rec["account_id"] == "openai-codex"
+    assert rec["authenticated"] is True
+    assert "observed_at" in rec
+    assert "identity_digest" in rec
+
+
+def test_probe_records_failure_observation(driver_env):
+    config, state, _ = driver_env
+    write_json(state.root / "probe_records.json", {"records": []})
+    config.raw["lanes"]["codex-astra"]["probe_command"] = [sys.executable, "-c", "import sys; sys.exit(1)"]
+    ok = execution.probe(config, "owner/repo", "codex-astra", state)
+    assert not ok
+    raw = json.loads((state.root / "probe_records.json").read_text())
+    records = raw if isinstance(raw, list) else raw.get("records", [])
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["outcome"] == "error"
     assert rec["account_id"] == "openai-codex"
 
 
@@ -286,6 +264,19 @@ def test_tamper_detection_rejects_corrupted_policy(driver_env):
     bad_doc["forbidden_executable"] = "/bin/sh"
     with pytest.raises(Exception):
         persona_routing._personas.from_document(bad_doc)
+
+
+def test_verify_policy_integrity_validates(driver_env):
+    config, _, _ = driver_env
+    snapshot = persona_routing.get_policy_snapshot(config, "owner/repo")
+    persona_routing.verify_policy_integrity(snapshot)
+
+
+def test_verify_policy_integrity_rejects_tampered_source(monkeypatch):
+    monkeypatch.setattr(persona_routing, "policy_source_digest", lambda: "bad_digest")
+    from aru_project_driver.config import DriverError
+    with pytest.raises(DriverError, match="invalid policy source digest"):
+        persona_routing.verify_policy_integrity()
 
 
 def test_installer_packages_personas_payload(tmp_path):

@@ -18,7 +18,6 @@ import sys
 from datetime import datetime, timezone
 from typing import Any
 
-
 SCHEMA = "aru.driver.snapshot/v1"
 PAGE_SIZE = 100
 MAX_PAGES = 10
@@ -37,7 +36,6 @@ ACCOUNT_RUNNER_PROFILES = {
 SELF_HOSTED_LABELS = {"self-hosted", "macos", "arm64", "aru-ci"}
 GOVERNED_WORKFLOW_PATH = ".github/workflows/governed-pr.yml"
 
-
 def runner_profile_for_account(repo: str) -> str | None:
     """Return the profile assigned to a repository's account, or None.
 
@@ -47,10 +45,8 @@ def runner_profile_for_account(repo: str) -> str | None:
     owner, _, _ = repo.partition("/")
     return ACCOUNT_RUNNER_PROFILES.get(owner.casefold())
 
-
 class KernelAdapterError(RuntimeError):
     """An observation or transition could not be safely established."""
-
 
 # Explicit override for the GitHub CLI used by every Driver subprocess.
 GH_ENV = "ARU_DRIVER_GH"
@@ -60,10 +56,8 @@ GH_ENV = "ARU_DRIVER_GH"
 GH_LOCATIONS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/home/linuxbrew/.linuxbrew/bin")
 SYSTEM_PATH = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
 
-
 def _executable(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
-
 
 def resolve_gh(hint: str | None = None) -> Path:
     """Return one validated `gh` executable without depending on an interactive shell.
@@ -90,7 +84,6 @@ def resolve_gh(hint: str | None = None) -> Path:
         f"set {GH_ENV} to its absolute path or install gh in a well-known location"
     )
 
-
 def bounded_environment(gh: Path, base: dict[str, str] | None = None) -> dict[str, str]:
     """Copy of the environment whose PATH resolves the validated `gh` first, deterministically.
 
@@ -102,7 +95,6 @@ def bounded_environment(gh: Path, base: dict[str, str] | None = None) -> dict[st
     environment["PATH"] = os.pathsep.join(dict.fromkeys(entry for entry in ordered if entry))
     environment[GH_ENV] = str(gh)
     return environment
-
 
 def _overlap(left: list[str], right: list[str]) -> bool:
     # Canonical touches semantics are exact paths and terminal '/**' only.
@@ -120,7 +112,6 @@ def _overlap(left: list[str], right: list[str]) -> bool:
             if b_tree and a_root.startswith(b_root + "/"):
                 return True
     return False
-
 
 def _conflicts(snapshot: dict, record: dict, agent: str | None = None) -> list[str]:
     errors: list[str] = []
@@ -151,7 +142,6 @@ def _conflicts(snapshot: dict, record: dict, agent: str | None = None) -> list[s
         elif _overlap(effective_touches, pr["touches"]):
             errors.append(f"write boundary overlaps open PR #{pr['number']}")
     return sorted(set(errors))
-
 
 class KernelAdapter:
     def __init__(self, kernel_root: Path, repo_dir: Path, repo: str, *, coding_reviewers: str | None = None):
@@ -230,47 +220,39 @@ class KernelAdapter:
 
     def revalidate(self, number: int, agent: str | None = None) -> dict:
         return self._invoke("revalidate", number=number, agent=agent)
-
     def promote(self, number: int) -> dict:
         return self._invoke("promote", number=number)
 
     def claim(self, number: int, agent: str) -> dict:
         return self._invoke("claim", number=number, agent=agent)
-
     def release(self, number: int, agent: str) -> dict:
         """Explicit caller operation; caller must first prove no live worker."""
         return self._invoke("release", number=number, agent=agent)
 
     def branch(self, number: int, agent: str) -> str:
         return self._invoke("branch", number=number, agent=agent)
-
     def next_work(self, agent: str) -> dict:
         return self._invoke("next_work", agent=agent)
 
     def reviewer_continuation(self, number: int, *, expected_head: str | None = None) -> dict:
         return self._invoke("reviewer_continuation", number=number, expected_head=expected_head)
-
     def reviewer_status(self) -> dict:
         return self._invoke("reviewer_status")
 
     def review_binding(self, number: int, expected: dict | None = None) -> dict:
         return self._invoke("review_binding", number=number, expected=expected)
-
     def review_worktree(self, binding: dict) -> str:
         return self._invoke("review_worktree", number=binding["pr"], expected=binding)
 
     def refresh_reviewer(self, number: int, expected: dict, reason: str | None = None) -> dict:
         return self._invoke("refresh_reviewer", number=number, expected=expected, reason=reason)
-
     def issue_summary(self, number: int) -> dict:
         return self._invoke("issue_summary", number=number)
 
     def dependency_evidence(self, request: dict) -> dict:
         return self._invoke("dependency_evidence", request=request)
-
     def source_pr(self, number: int) -> dict:
         return self._invoke("source_pr", number=number)
-
 
 class _Bridge:
     """One invocation, one repository, no persistent module/global state."""
@@ -366,15 +348,7 @@ class _Bridge:
             errors.append("issue has multiple agent claims")
         if "needs-design" in labels:
             errors.append("needs-design requires a resolved design decision before dispatch")
-        return {
-            "number": normalized["number"], "title": normalized["title"],
-            "body": normalized["body"], "state": normalized["state"],
-            "labels": labels, "status": status, "agents": agents, "touches": touches,
-            "dependencies": {str(number): dependency_states.get(number, "UNKNOWN") for number in dependencies},
-            "errors": sorted(set(errors)), "boundary_errors": boundary_errors,
-            "priority": priority,
-            "quota_risk": c.review_risk_tier(touches),
-        }
+        return {"number": normalized["number"], "title": normalized["title"], "body": normalized["body"], "state": normalized["state"], "labels": labels, "status": status, "agents": agents, "touches": touches, "dependencies": {str(number): dependency_states.get(number, "UNKNOWN") for number in dependencies}, "errors": sorted(set(errors)), "boundary_errors": boundary_errors, "priority": priority, "quota_risk": c.review_risk_tier(touches)}
 
     def _self_hosted_capacity(self) -> dict:
         """Operator-owned Macs prove capacity through repository runner inventory."""
@@ -522,12 +496,7 @@ class _Bridge:
             or self.common.label_names(live_pr) != labels
         ):
             raise KernelAdapterError("open PR authority changed during snapshot")
-        return {
-            "number": number, "head": head, "author_agent": authors[0] if authors else None,
-            "author_actor": pr["user"]["login"], "labels": labels,
-            "issue": linked[0] if len(linked) == 1 else None, "issues": linked,
-            "touches": touches, "errors": [] if touches else ["unknown PR write boundary"],
-        }
+        return {"number": number, "head": head, "author_agent": authors[0] if authors else None, "author_actor": pr["user"]["login"], "labels": labels, "issue": linked[0] if len(linked) == 1 else None, "issues": linked, "touches": touches, "errors": [] if touches else ["unknown PR write boundary"]}
 
     def snapshot(self) -> dict:
         self.identity()
@@ -541,14 +510,7 @@ class _Bridge:
         if len({pr["number"] for pr in prs}) != len(prs):
             raise KernelAdapterError("open PR inventory has duplicate identities")
         ci = self._ci()
-        return {
-            "schema": SCHEMA, "repo": self.repo, "complete": True,
-            "observed_at": datetime.now(timezone.utc).isoformat(),
-            "status_source": "issue-label; target Project card reread before dispatch",
-            "issues": sorted(issues, key=lambda item: item["number"]),
-            "prs": sorted(prs, key=lambda item: item["number"]),
-            "ci_available": ci["available"], "ci": ci,
-        }
+        return {"schema": SCHEMA, "repo": self.repo, "complete": True, "observed_at": datetime.now(timezone.utc).isoformat(), "status_source": "issue-label; target Project card reread before dispatch", "issues": sorted(issues, key=lambda item: item["number"]), "prs": sorted(prs, key=lambda item: item["number"]), "ci_available": ci["available"], "ci": ci}
 
     def revalidate(self, number: int, agent: str | None = None) -> dict:
         if type(number) is not int or number <= 0:
@@ -767,7 +729,6 @@ class _Bridge:
             raise KernelAdapterError("In Review issue has no verified worktree; preserve and reconcile")
         return self.branches.create_worktree(number, "feat", agent)["path"]
 
-
 def _main() -> int:
     try:
         if len(sys.argv) != 6 or sys.argv[1] != "--kernel-bridge":
@@ -782,7 +743,6 @@ def _main() -> int:
     except Exception as exc:
         print(json.dumps({"error": str(exc)}, sort_keys=True))
         return 1
-
 
 if __name__ == "__main__":
     raise SystemExit(_main())

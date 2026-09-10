@@ -19,7 +19,6 @@ from .controller import Controller
 from .kernel import KernelAdapter, KernelAdapterError
 from .state import State
 
-
 def start(config: Config, repo: str) -> dict:
     config.project(repo)
     state = State(config.state_dir)
@@ -51,7 +50,6 @@ def start(config: Config, repo: str) -> dict:
         state.require_admission(repo, observed_stop)
         return {"status": "started", "project": repo, "heartbeat": heartbeat, "wake": wake}
 
-
 def stop(config: Config, repo: str, *, timeout_seconds: float = 20) -> dict:
     config.project(repo)
     state = State(config.state_dir)
@@ -79,7 +77,6 @@ def stop(config: Config, repo: str, *, timeout_seconds: float = 20) -> dict:
         result.update(status="partial", reason=str(exc))
     # Do not turn a deadline into another unbounded scheduler observation.
     return result
-
 
 def status(config: Config, repo: str, *, timeout_seconds: float = 20) -> dict:
     config.project(repo)
@@ -109,7 +106,6 @@ def status(config: Config, repo: str, *, timeout_seconds: float = 20) -> dict:
         result.update(status="partial", reason=str(exc), scheduler={"verified": False})
     return result
 
-
 def _honest_health(config: Config, repo: str, result: dict) -> dict:
     """Never let a quiet or cooling-down precheck launder a recorded Driver failure.
 
@@ -124,7 +120,6 @@ def _honest_health(config: Config, repo: str, result: dict) -> dict:
     if data.get("enabled") and data.get("last_error"):
         return {**result, "status": "degraded", "last_error": data["last_error"]}
     return result
-
 
 def parser() -> argparse.ArgumentParser:
     cli = argparse.ArgumentParser(description=__doc__)
@@ -155,7 +150,6 @@ def parser() -> argparse.ArgumentParser:
     worker.add_argument("--worker-id", required=True)
     worker.add_argument("--capacity-fd", type=int, required=True)
     return cli
-
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
@@ -190,7 +184,6 @@ def main(argv: list[str] | None = None) -> int:
         busy = isinstance(exc, DriverError) and str(exc).startswith("another Driver activation")
         print(json.dumps({"wakeAgent": False, "status": "busy" if busy else "error", "reason": str(exc)}))
         return 0 if busy else 1
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

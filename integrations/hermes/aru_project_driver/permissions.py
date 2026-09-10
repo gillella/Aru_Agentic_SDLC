@@ -14,18 +14,14 @@ COMPILER = "factory-claude/v1"
 RESULT_BYTES = 8 * 1024 * 1024
 RECEIPT_DETAILS_BYTES = 8192
 
-
 def digest(value: object) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
-
-
 def safe_path(value: object) -> str:
     if (not isinstance(value, str) or not re.fullmatch(r"/[A-Za-z0-9_./-]+", value)
             or any(p in {".", ".."} for p in value.split("/"))
             or Path.home().is_relative_to(Path(value).resolve())):
         raise DriverError("worker_permissions requires literal absolute paths, never home or shell patterns")
     return value
-
 
 def validate(config, repo: str, project: dict) -> None:
     policy = project.get("worker_permissions")
@@ -55,11 +51,9 @@ def validate(config, repo: str, project: dict) -> None:
                                 "--permission-prompts", "none", "{prompt}"]):
             raise DriverError("worker_permissions requires claude-sub N --model MODEL --print --permission-mode acceptEdits --permission-prompts none {prompt}")
 
-
 def enabled(config, repo: str, identity: str) -> bool:
     policy = config.project(repo).get("worker_permissions")
     return bool(policy and identity in policy["lanes"])
-
 
 def fingerprint(config, repo: str, identity: str) -> str:
     from .reviewers import inventory
@@ -69,7 +63,6 @@ def fingerprint(config, repo: str, identity: str) -> str:
                    "repo_dir": config.project(repo)["repo_dir"], "kernel": str(config.kernel_root),
                    "lane": config.lane(repo, identity)})
 
-
 def retry_blocker(config, receipt: dict, work: dict) -> str | None:
     if not receipt.get("retry_blocked"):
         return None
@@ -78,7 +71,6 @@ def retry_blocker(config, receipt: dict, work: dict) -> str | None:
         return (receipt.get("reason") or "worker result unavailable") + (
             "; operator must approve a worker_permissions revision/recovery_epoch or changed PR task; unchanged retries blocked")
     return None
-
 
 def _task(config, record: dict, adapter, run) -> dict:
     repo, identity, issue = record["repo"], record["agent"], record["issue"]
@@ -114,7 +106,6 @@ def _task(config, record: dict, adapter, run) -> dict:
                 or ".." in Path(path).parts):
             raise DriverError("worker permission scope contains unsafe touches")
     return {"branch": branch, "touches": scope, "worktree": str(directory)}
-
 
 def compile_policy(config, record: dict, adapter, run, *, preflight: bool = False) -> dict:
     repo, identity, issue = record["repo"], record["agent"], record["issue"]
@@ -189,7 +180,6 @@ def compile_policy(config, record: dict, adapter, run, *, preflight: bool = Fals
     return {"argv": [*argv, prompt], "task": task, "commands": commands,
             "policy_fingerprint": fingerprint(config, repo, identity), "result_format": "claude-json"}
 
-
 def observe_result(path: Path, exit_code: int, *, quota_errors: bool = False) -> dict:
     observation = _observe_result(path, exit_code, quota_errors=quota_errors)
     # Reconciliation scans receipts repeatedly; keep full model/tool payloads
@@ -202,7 +192,6 @@ def observe_result(path: Path, exit_code: int, *, quota_errors: bool = False) ->
     elif len(observation["reason"].encode()) > 2048:
         observation["reason"] = "Claude " + observation["outcome"] + "; full details in worker result_path log"
     return observation
-
 
 def _observe_result(path: Path, exit_code: int, *, quota_errors: bool = False) -> dict:
     """Claude SDK result envelope; reported artifacts still require GitHub reread."""

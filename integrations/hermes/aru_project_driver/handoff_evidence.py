@@ -7,7 +7,6 @@ import hashlib
 import re
 from urllib.parse import quote
 
-
 def issue_summary(bridge, number: int) -> dict:
     """Return one issue and its linked Project status from the kernel identity."""
     common = bridge.common
@@ -26,7 +25,6 @@ def issue_summary(bridge, number: int) -> dict:
         ),
     }
 
-
 def _read(bridge, repo: str, suffix: str) -> dict:
     if not isinstance(repo, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise ValueError("dependency evidence repository is invalid")
@@ -34,7 +32,6 @@ def _read(bridge, repo: str, suffix: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError("dependency evidence is unreadable")
     return value
-
 
 def source_pr(bridge, number: int) -> dict:
     record = _read(bridge, bridge.repo, f"pulls/{number}")
@@ -44,14 +41,12 @@ def source_pr(bridge, number: int) -> dict:
             "head": (record.get("head") or {}).get("sha"),
             "issues": bridge.merge_state.linked_issues(record.get("body") or "")}
 
-
 def _commit(bridge, repo: str, ref: str) -> str:
     record = _read(bridge, repo, "commits/" + quote(ref, safe=""))
     sha = record.get("sha")
     if not isinstance(sha, str) or not re.fullmatch(r"[a-fA-F0-9]{40}", sha):
         raise ValueError("dependency ref did not resolve to a full commit")
     return sha.lower()
-
 
 def _published(bridge, repo: str, tag: str) -> dict:
     release = _read(bridge, repo, "releases/tags/" + quote(tag, safe=""))
@@ -64,7 +59,6 @@ def _published(bridge, repo: str, tag: str) -> dict:
         "url": release.get("html_url"),
     }
 
-
 def _merged(bridge, repo: str, pr: int, head: str) -> dict:
     record = _read(bridge, repo, f"pulls/{pr}")
     if record.get("number") != pr or (record.get("head") or {}).get("sha") != head:
@@ -76,7 +70,6 @@ def _merged(bridge, repo: str, pr: int, head: str) -> dict:
         "head": head,
         "merge_commit": record.get("merge_commit_sha") if merged else None,
     }
-
 
 def _artifact(bridge, repo: str, ref: str, path: str) -> tuple[str, str]:
     commit = _commit(bridge, repo, ref)
@@ -93,7 +86,6 @@ def _artifact(bridge, repo: str, ref: str, path: str) -> tuple[str, str]:
     if len(raw) > 2_000_000:
         raise ValueError("dependency artifact exceeds the bounded comparison size")
     return commit, hashlib.sha256(raw).hexdigest()
-
 
 def evidence(bridge, request: dict) -> dict:
     """Evaluate one already-validated condition; never executes issue text."""

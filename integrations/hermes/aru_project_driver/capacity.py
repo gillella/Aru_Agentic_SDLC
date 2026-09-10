@@ -8,12 +8,10 @@ import re
 import subprocess
 from pathlib import Path
 
-
 NAMES = {
     "openai-codex": {"codex"}, "claude-code": {"claude"},
     "xai-cursor": {"cursor-agent"}, "google-antigravity": {"agy", "antigravity"},
 }
-
 
 def observe(family: str, profile: str | None = None) -> dict:
     """Report local agent processes as diagnostics; only the lane's own Claude profile vetoes.
@@ -53,7 +51,6 @@ def observe(family: str, profile: str | None = None) -> dict:
                 "reason": f"{unrelated} unrelated local agent process(es) observed; quota not yet probed"}
     return {"available": True, "reason": "no matching local agent; quota not yet probed"}
 
-
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--family", choices=sorted(NAMES), required=True)
@@ -65,7 +62,6 @@ def main() -> int:
         observation = {"available": False, "reason": "process evidence unavailable"}
     print(json.dumps(observation))
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
