@@ -469,3 +469,8 @@ deliveries, unavailable capacity, and a stopped target. A failed canary uses
 the quiescent rollback and disabled-state migration procedure above, preserving
 all GitHub claims and worktrees for review. Source merge, a green test suite, or a
 healthy listener is not live acceptance evidence.
+
+The opt-in [Factory worker permission repair and operator rollout](WORKER-PERMISSIONS.md)
+compiles task-bound Claude grants, records structured results separately from
+process exit, and contains unchanged failed retries. Installation does not enable
+the policy or prove live task capabilities.

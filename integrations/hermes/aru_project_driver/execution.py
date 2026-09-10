@@ -14,6 +14,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from .config import Config, DriverError
+from . import permissions
 from .kernel import KernelAdapter, KernelAdapterError
 from .state import State, key, read_json, write_json
 
@@ -164,6 +165,33 @@ def worker_environment(kind: str, review: dict | None) -> dict[str, str]:
     return environment
 
 
+def scoped_environment(config, repo, kind, review, policy):
+    environment = worker_environment(kind, review)
+    if policy and (kind != "review" or review["reviewer_actor"].endswith("[bot]")):
+        environment[APP_RUNNER_ENV] = config.project(repo)["worker_permissions"]["app_runner"]
+    return environment
+
+
+def prepare_policy(config: Config, record: dict, repository: Path) -> dict | None:
+    if not permissions.enabled(config, record["repo"], record["agent"]):
+        return None
+    return permissions.compile_policy(config, record,
+        KernelAdapter(config.kernel_root, repository, record["repo"]), run_bounded)
+
+
+def worker_output(config: Config, state: State, record: dict, lane: dict):
+    policy = record.get("permission_snapshot")
+    if not policy:
+        return [part.replace("{prompt}", record["prompt"]) for part in lane["command"]], None
+    if policy["policy_fingerprint"] != permissions.fingerprint(config, record["repo"], record["agent"]):
+        raise DriverError("worker policy changed after admission; reconcile against the new policy")
+    result_path = state.root / "logs" / f"{record['id']}.result.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    output = os.fdopen(os.open(result_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w")
+    record["result_path"] = str(result_path)
+    return policy["argv"], output
+
+
 def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
            *, kind: str = "implementation", pr: int | None = None,
            head: str | None = None, review: dict | None = None) -> dict:
@@ -179,6 +207,11 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
     repository = Path(config.project(repo)["repo_dir"]).resolve()
     if not directory.is_dir() or not directory.is_relative_to(repository / ".worktrees"):
         raise DriverError("worker requires an isolated worktree inside the configured repository")
+    prepared = {"repo": repo, "agent": identity, "issue": issue, "worktree": str(directory),
+                "kind": kind, "pr": pr, "head": head, "review": review,
+                "prompt": prompt_for(repo, issue, identity, config.kernel_root, str(directory),
+                                     kind, pr, head, review)}
+    policy = prepare_policy(config, prepared, repository)
     # Take the first free session slot on the subscription; each slot is one
     # exclusive lock inherited by the supervised child. Slot count is bounded by
     # the lane's max_sessions and shared by every lane on the same capacity_key.
@@ -196,6 +229,7 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
         break
     if descriptor is None:
         raise DriverError("shared subscription was reserved by another worker")
+    environment = scoped_environment(config, repo, kind, review, policy)
     worker_id = uuid.uuid4().hex
     os.ftruncate(descriptor, 0)
     os.write(descriptor, worker_id.encode())
@@ -209,6 +243,8 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
         "prompt": prompt_for(repo, issue, identity, config.kernel_root, str(directory),
                              kind, pr, head, review),
     }
+    if policy:
+        record.update(permission_snapshot=policy, policy_fingerprint=policy["policy_fingerprint"])
     write_json(state.worker_path(worker_id), record)
     log = state.root / "logs" / f"{worker_id}.log"
     log.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -223,7 +259,7 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
                      "--capacity-fd", str(descriptor)],
                     cwd=directory, stdin=subprocess.DEVNULL, stdout=stream, stderr=stream,
                     start_new_session=True, pass_fds=(descriptor,), shell=False,
-                    env=worker_environment(kind, review),
+                    env=environment,
                 )
     except (OSError, DriverError) as exc:
         record.update(state="launch_failed", error=type(exc).__name__,
@@ -250,14 +286,27 @@ def _revalidate_review_worker(config: Config, record: dict) -> None:
         raise DriverError("review worktree changed before child execution")
 
 
-def _start_agent(state: State, record: dict, argv: list[str], descriptor: int):
+def _start_agent(state: State, record: dict, argv: list[str], descriptor: int, output=None):
     # Only local gate reads and process creation occur under this barrier.
     with state.project_lock(record["repo"], spawn=True):
         state.require_admission(record["repo"], record.get("admission_stop"))
         return subprocess.Popen(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
             argv, cwd=record["worktree"], stdin=subprocess.DEVNULL,
-            pass_fds=(descriptor,), shell=False, start_new_session=True,
+            pass_fds=(descriptor,), shell=False, start_new_session=True, stdout=output,
         )
+
+
+def finish_worker(path: Path, record: dict, output, exit_code: int) -> None:
+    if output is not None:
+        output.close()
+        # Stop can fence admission after the result file is opened. No child
+        # means no result was expected; preserve the admission reason so Start
+        # can revalidate and resume through the existing controller.
+        if record.get("child_pid") is not None:
+            record["process_reason"] = record.get("reason")
+            record.update(permissions.observe_result(Path(record["result_path"]), exit_code))
+    record.update(state="exited", exit_code=exit_code, finished_at=time.time())
+    write_json(path, record)
 
 
 def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
@@ -265,6 +314,7 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
     state = State(config.state_dir)
     path, record = state.worker_path(worker_id), state.worker(worker_id)
     exit_code = 1
+    output = None
     try:
         lane = config.lane(record["repo"], record["agent"])
         # Invalid inheritance is a supervised failure with the same durable
@@ -275,7 +325,7 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
             raise DriverError("worker capacity reservation is invalid")
         record.update(pid=os.getpid(), state="running")
         write_json(path, record)
-        argv = [part.replace("{prompt}", record["prompt"]) for part in lane["command"]]
+        argv, output = worker_output(config, state, record, lane)
         process = None
         # Review revalidation can be slow; keep it outside the short spawn
         # barrier. Stop fences this worker without waiting for coordination.
@@ -284,7 +334,7 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
                 record["reason"] = "project stopped before child execution"
             else:
                 _revalidate_review_worker(config, record)
-                process = _start_agent(state, record, argv, descriptor)
+                process = _start_agent(state, record, argv, descriptor, output)
                 record["child_pid"] = process.pid
                 write_json(path, record)
         if process is not None:
@@ -300,9 +350,8 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
             str(exc) if isinstance(exc, (DriverError, KernelAdapterError)) else type(exc).__name__
         )
     finally:
-        record.update(state="exited", exit_code=exit_code, finished_at=time.time())
         try:
-            write_json(path, record)
+            finish_worker(path, record, output, exit_code)
         finally:
             with suppress(OSError):
                 os.close(descriptor)

@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from . import execution, scheduler, dependencies
+from . import execution, scheduler, dependencies, permissions
 from .config import Config, DriverError
 from . import handoff_contract
 from .kernel import KernelAdapter, KernelAdapterError
@@ -107,19 +107,28 @@ class Controller:
             if issues:
                 work["issue"] = issues[0]["number"]
             if work["type"] in RESUMABLE:
-                owned = [r for r in receipts if r.get("issue") == work.get("issue")]
-                if not owned:
-                    actions.append({**work, "type": "unmanaged_claim",
-                                    "reason": "existing work needs explicit owner adoption"})
-                elif identity in available:
-                    receipt = max(owned, key=lambda r: r["started_at"])
-                    resumes.append({**work, "worktree": receipt.get("worktree")})
+                self._resume_action(repo, work, receipts, available, actions, resumes)
             elif work["type"] not in {"wait", "idle", "issue"} or work.get("next_action") or work.get("execution"):
                 actions.append(work)
             elif not issues and work["type"] in {"idle", "issue"}:
                 actions.append({"type": "ownership_conflict", "agent": identity,
                                 "reason": "authored PR exists but picker did not resume it"})
         return actions, resumes
+
+    def _resume_action(self, repo, work, receipts, available, actions, resumes):
+        owned = [r for r in receipts if r.get("issue") == work.get("issue")]
+        if not owned:
+            actions.append({**work, "type": "unmanaged_claim",
+                            "reason": "existing work needs explicit owner adoption"})
+            return
+        receipt = max(owned, key=lambda r: r["started_at"])
+        blocker = next((reason for r in owned
+                        if (reason := permissions.retry_blocker(self.config, r, work))), None)
+        if blocker:
+            actions.append({**work, "type": "worker_blocked", "execution": "blocked",
+                            "reason": blocker, "worker_id": receipt["id"]})
+        elif work["agent"] in available:
+            resumes.append({**work, "worktree": receipt.get("worktree")})
 
     def _settle_live_review(self, work: dict, managed: list) -> dict:
         active = next((r for r in managed if r.get("kind") == "review" and r.get("pr") == work.get("pr")
@@ -199,6 +208,8 @@ class Controller:
             return action.get("authority") in {
                 "claude-code", "openai-codex", "xai-cursor", "google-antigravity",
             }
+        if action.get("type") == "worker_blocked":
+            return False
         retry = action.get("retry_at")
         if retry:
             try:
@@ -277,12 +288,16 @@ class Controller:
             wake |= needs_attention and plan["fingerprint"] != state.get("last_fingerprint")
             if wake:
                 state["wake_pending_until"] = self.now() + 120
+            blocked = [a for a in plan["actions"] if a.get("type") == "worker_blocked"]
+            if blocked:
+                state["last_error"] = "; ".join(a["reason"] for a in blocked)
             state["last_checked_at"] = self.now()
             state["last_observation"] = {"actionable": plan["actionable"], "reasons": plan["reasons"]}
             self.state.save(repo, state)
             if not self.state.project(repo)["enabled"]:
                 return {"wakeAgent": False, "reason": "project stopped"}
-            return {"wakeAgent": bool(wake), "project": repo, "plan": plan if wake else None}
+            return {"wakeAgent": bool(wake), "project": repo, "plan": plan if wake else None,
+                    **({"status": "degraded", "blockers": blocked} if blocked else {})}
 
     def _failure(self, repo: str, state: dict, exc: Exception, *, precheck: bool) -> dict:
         if not self.state.project(repo)["enabled"]:
@@ -346,11 +361,12 @@ class Controller:
                 if not self.state.project(repo)["enabled"]:
                     return {"status": "stopped", "launched": launched,
                             "actions": [a for a in actions if a.get("execution") == "blocked"]}
+                blocked = [a for a in actions if a.get("type") == "worker_blocked"]
                 state.update(last_fingerprint=plan["fingerprint"], wake_pending_until=0,
-                             last_reconciled_at=self.now(), last_error=None,
+                             last_reconciled_at=self.now(), last_error="; ".join(a["reason"] for a in blocked) or None,
                              handled_generation=state["generation"])
                 self.state.save(repo, state)
-                return {"status": "running" if launched or self._worker_count(repo) else "waiting",
+                return {"status": "degraded" if blocked else "running" if launched or self._worker_count(repo) else "waiting",
                         "launched": launched, "actions": actions, "review_timers": timers,
                         "blocked_lanes": plan["blocked_lanes"], "reasons": plan["reasons"]}
             except (KernelAdapterError, DriverError, scheduler.SchedulerError) as exc:
@@ -396,7 +412,10 @@ class Controller:
             if any(self._holds_reservation(r) for r in receipts):
                 return {**work, "execution": "running", "owner": "Hermes Driver",
                         "next_step": "Existing worker completion event or recovery heartbeat"}
-            matching = [r for r in receipts if r.get("review") == binding]
+            matching = sorted((r for r in receipts if r.get("review") == binding),
+                              key=lambda r: r["started_at"])
+            if matching and matching[-1].get("retry_blocked") and not permissions.retry_blocker(self.config, matching[-1], work):
+                return self._start_review(repo, adapter, work, binding, launched, recover)
             if matching:
                 return self._recover_review(repo, adapter, work, matching[-1], launched, recover)
             return self._start_review(repo, adapter, work, binding, launched, recover)
