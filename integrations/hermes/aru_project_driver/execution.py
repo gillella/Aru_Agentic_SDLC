@@ -90,6 +90,34 @@ def probe(config: Config, repo: str, identity: str, state: State) -> bool:
         write_json(state.root / "cooldowns" / f"{key(lane['capacity_key'])}.json", {
             "until": time.time() + 600, "reason": "bounded exact-model probe did not succeed",
         })
+    from . import persona_routing
+    if persona_routing.is_available():
+        try:
+            route = lane.get("family", "")
+            if route == "openai-codex":
+                route = "codex"
+            elif route == "xai-cursor":
+                route = "cursor"
+            elif route == "google-antigravity":
+                route = "antigravity"
+            model_id = lane.get("quota", {}).get("model", "gpt-6-astra" if route == "codex" else "claude-opus-5")
+            effort = lane.get("quota", {}).get("effort", "high")
+            account_id = lane["capacity_key"]
+            rec = persona_routing._personas.ProbeRecord(
+                account_id=account_id,
+                route=route,
+                model_id=model_id,
+                effort=effort,
+                observed_at=datetime.now(timezone.utc),
+                outcome="ok" if ok else "error",
+                source="Hermes Driver bounded probe",
+                authenticated=True,
+                identity_digest=hashlib.sha256(json.dumps({"account": account_id}, sort_keys=True).encode()).hexdigest(),
+                modalities=frozenset({"text"}),
+            )
+            persona_routing.record_probe_result(state, rec)
+        except Exception:
+            pass
     return ok
 
 
@@ -184,6 +212,12 @@ def prepare_policy(config: Config, record: dict, repository: Path) -> dict | Non
 
 def worker_output(config: Config, state: State, record: dict, lane: dict):
     policy = record.get("permission_snapshot")
+    if record.get("plan_argv") and not policy and not record.get("quota_decision"):
+        result_path = state.root / "logs" / f"{record['id']}.result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        output = os.fdopen(os.open(result_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w")
+        record["result_path"] = str(result_path)
+        return record["plan_argv"], output
     if not policy and not record.get("quota_decision"):
         return [part.replace("{prompt}", record["prompt"]) for part in lane["command"]], None
     if record["policy_fingerprint"] != permissions.fingerprint(config, record["repo"], record["agent"]):
@@ -257,11 +291,41 @@ def launch(config: Config, repo: str, identity: str, issue: int, worktree: str,
         "prompt": prompt_for(repo, issue, identity, config.kernel_root, str(directory),
                              kind, pr, head, review),
     }
+    from . import persona_routing
+    plan = None
+    if persona_routing.is_available():
+        try:
+            if kind == "review":
+                plan = persona_routing.resolve_review_plan(config, state, repo, review, str(directory), head or "0" * 40)
+            else:
+                task_data = {"issue": issue, "number": issue}
+                plan = persona_routing.resolve_task_plan(config, state, repo, task_data, identity, str(directory),
+                                                        branch="feat/issue-" + str(issue), head=head or "0" * 40,
+                                                        kind=kind, pr=pr)
+            if plan:
+                record.update(
+                    persona=plan.persona,
+                    model_id=plan.model_id,
+                    effort=plan.effort,
+                    effective_role=plan.effective_role,
+                    plan_digest=plan.digest,
+                    policy_digest=plan.policy_digest,
+                    fallback_reason=plan.fallback_reason,
+                    skipped=[s.to_dict() for s in plan.skipped],
+                    plan_argv=list(plan.argv),
+                    plan_prompt=plan.prompt,
+                    plan_env=dict(plan.env),
+                )
+        except Exception:
+            pass
     retries.stamp(config, record, work_type)
     log = state.root / "logs" / f"{worker_id}.log"
     try:
         policy = launch_policy(config, state, record, repository, policy)
         environment = scoped_environment(config, repo, kind, review, policy)
+        if record.get("plan_env"):
+            environment = dict(environment)
+            environment.update(record["plan_env"])
         # The new reservation replaces this task's previous review escrow only
         # after all current admission checks succeed under both locks.
         write_json(state.worker_path(worker_id), record)
@@ -365,6 +429,8 @@ def worker_main(config: Config, worker_id: str, descriptor: int) -> int:
             else:
                 revalidate_worker(config, state, record)
                 environment = reviewers.environment(config, record["repo"], os.environ)
+                if record.get("plan_env"):
+                    environment.update(record["plan_env"])
                 process = _start_agent(state, record, argv, descriptor, output, environment=environment)
                 record["child_pid"] = process.pid
                 write_json(path, record)

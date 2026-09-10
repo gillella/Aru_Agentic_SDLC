@@ -199,6 +199,34 @@ resuming the consumer's own CI, review or merge workflow.
 See [references/runtime-contract.md](references/runtime-contract.md) when
 installing, checking event delivery, or diagnosing a stalled Loop.
 
+## Approved persona routing and model execution
+
+The Driver routes author and review workloads through the approved 13-persona
+catalog and expert policy snapshot (`integrations/personas/`). Managed fleet
+entry points enforce exact route capabilities, deterministic task classification,
+reviewer independence, and model flags.
+
+- **Enforcement boundary:** Managed fleet entry points (`driver.py reconcile`,
+  `driver.py launch`, and worker supervisor processes) strictly validate persona
+  policy source digests, bind fleet subscriptions, and enforce exact model and
+  effort parameters. Raw vendor CLI tools or manual local commands outside the
+  managed Driver boundary remain unmanaged and must not bypass governed routing.
+- **Author task resolution:** Tasks are classified strictly from issue metadata
+  and risk classification, resolving to primary persona candidates (e.g.,
+  `architecture_decision` -> `fable-architect`, `backend_feature` -> `astra-implementer`,
+  `security_hotfix` -> `sonnet-security-reviewer`).
+- **Architectural fallback chain:** When the primary candidate for an architectural
+  decision is unavailable, the deterministic fallback chain is traversed:
+  `fable-architect` -> `astra-implementer` -> `opus-implementer` (acting Chief Architect).
+- **Reviewer lineage independence:** Review dispatch enforces strict separation:
+  author and reviewer cannot share lineage (e.g., Claude-authored PRs cannot be
+  reviewed by Sonnet/Opus/Haiku; Codex-authored PRs cannot be reviewed by
+  Astra/Sol/Terra/Luna/Spark).
+- **Operator routing inspection:**
+  - Check persona catalog: `python3 -m integrations.personas catalog`
+  - Plan author routing: `python3 -m integrations.personas plan-task --repo OWNER/REPO --issue N`
+  - Plan review routing: `python3 -m integrations.personas plan-review --repo OWNER/REPO --pr N --author AUTHOR`
+
 ## Reporting
 
 Keep healthy unchanged activations silent (`[SILENT]`). Notify only on useful

@@ -69,7 +69,14 @@ class Config:
         from .reviewers import inventory
         for repo in self.projects:
             inventory(self, repo)
+        self._persona_policy()
         self._bind(bind=bind)
+
+    def _persona_policy(self) -> None:
+        from . import persona_routing
+        if persona_routing.is_available():
+            for repo in self.projects:
+                persona_routing.get_policy_snapshot(self, repo)
 
     def _permissions(self) -> None:
         from .permissions import validate

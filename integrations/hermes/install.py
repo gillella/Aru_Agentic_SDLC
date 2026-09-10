@@ -41,8 +41,23 @@ def _payload(source_root: Path, hermes_home: Path) -> list[tuple[Path, Path]]:
         result.append((source, hermes_home / "skills" / "autonomous-ai-agents" / "hermes-project-driver" / source.relative_to(skill)))
     if (source_root / "QUOTA.md").is_file():
         result.append((source_root / "QUOTA.md", hermes_home / "skills" / "autonomous-ai-agents" / "hermes-project-driver" / "references" / "quota.md"))
+    personas_dir = None
+    if (source_root.parent / "personas").is_dir():
+        personas_dir = (source_root.parent / "personas").resolve()
+    elif (source_root / "personas").is_dir():
+        personas_dir = (source_root / "personas").resolve()
+    if personas_dir:
+        for ext in ("*.py", "*.json"):
+            for source in sorted(personas_dir.rglob(ext)):
+                rel = source.relative_to(personas_dir)
+                if "tests" in rel.parts or "__pycache__" in rel.parts or "examples" in rel.parts:
+                    continue
+                result.append((source, hermes_home / "scripts" / "personas" / rel))
+    allowed_roots = [source_root.resolve()]
+    if personas_dir:
+        allowed_roots.append(personas_dir)
     for source, destination in result:
-        if source.is_symlink() or not source.resolve().is_relative_to(source_root.resolve()):
+        if source.is_symlink() or not any(source.resolve().is_relative_to(root) for root in allowed_roots):
             raise InstallError(f"Refusing linked source outside the reviewed package: {source}")
         _inside(destination, hermes_home)
         if destination.exists() and not destination.is_file():
