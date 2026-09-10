@@ -141,6 +141,23 @@ Commands must keep their children in that process group; detached background
 workers are unsupported. An inherited capacity lock held by a surviving process
 continues to block reuse until it exits.
 
+Standard author workers have a shared retry safeguard regardless of provider:
+at most three attempts at the same kernel action, issue, PR and head, with
+60-second and 120-second backoffs before the two retries. The recovery heartbeat
+owns the next eligible activation; these delays are minimums, not timing promises.
+Exit zero, changed log prose, duplicate events and Stop/Start do not count as
+governed progress. Lost workers whose reservation has gone also consume an attempt.
+A new kernel action or PR/head starts a new bounded task. After the limit, the
+Driver reports an operator-owned blocker and preserves the claim and worktree.
+An operator who has inspected and corrected the cause may change the project's
+optional `worker_retry_epoch` to a new explicit revision (1–64 letters, digits,
+underscores or hyphens). Do not bump it repeatedly to conceal the same failure.
+Retry observations stay in existing private worker receipts across restarts;
+do not delete them to retry. Legacy receipts begin accounting when first observed.
+Claim/branch preparation and a Stop-fenced child that never ran remain recoverable.
+Existing structured permission denials and quota recovery bounds retain their
+stricter rules. These receipts cannot authorize a claim, review or merge.
+
 `handoff_to` is an optional allowlist of other configured projects. It does not
 move a claim or create lifecycle state. A source issue may carry one typed,
 machine-readable marker in its body after the human requirements, for example:
@@ -184,6 +201,15 @@ author's.
 
 ## Capacity observations and probes
 
+Projects may explicitly enable [validated quota admission](QUOTA.md) in
+`quota_admission`. The config example shows the opt-in with placeholder account
+hashes and conservative demand rows. It adds native Codex account reads,
+multi-window reservations and bounded exhaustion recovery to the actual launch
+boundaries. Claude's unattended quota, Cursor and Antigravity remain explicit
+unknown. Omit the policy or set it to `null` to retain existing project behavior.
+The observations below remain availability/liveness gates; they cannot satisfy
+the opt-in quota contract or override its rejection.
+
 The supplied `capacity.py --family openai-codex` observer reports local agent
 processes as diagnostics. Supported families are `openai-codex`, `claude-code`,
 `xai-cursor`, and `google-antigravity`; Claude can additionally use
@@ -191,7 +217,7 @@ processes as diagnostics. Supported families are `openai-codex`, `claude-code`,
 session, a process without an observable `CLAUDE_CONFIG_DIR`, or a process on
 another profile is counted in the reason and leaves the lane available. The only
 process-based veto is a live Claude process on exactly the lane's own profile.
-Quota is established solely by the bounded exact-model probe and provider
+Liveness is established by the bounded exact-model probe and provider
 responses; managed workers are protected by the Driver's reservation lock, not
 by process names. An observer that fails, hangs or cannot reach an optional
 remote host blocks only that observation (`observer unavailable`), never the
@@ -469,3 +495,8 @@ deliveries, unavailable capacity, and a stopped target. A failed canary uses
 the quiescent rollback and disabled-state migration procedure above, preserving
 all GitHub claims and worktrees for review. Source merge, a green test suite, or a
 healthy listener is not live acceptance evidence.
+
+The opt-in [Factory worker permission repair and operator rollout](WORKER-PERMISSIONS.md)
+compiles task-bound Claude grants, records structured results separately from
+process exit, and contains unchanged failed retries. Installation does not enable
+the policy or prove live task capabilities.

@@ -9,15 +9,25 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from integrations.personas import *
+from integrations.personas import (
+    AccountBinding, AuthorIdentity, EvidenceStore, HarnessBinding, PERSONAS,
+    PersonaPolicyError, plan_review, resolve, validate_assignment, validate_registry,
+    verify_payload,
+)
 from integrations.personas import catalog
-from integrations.personas.classify import derive_risk_tier, tier_for_path
-from integrations.personas.errors import *
+from integrations.personas.classify import tier_for_path
+from integrations.personas.errors import (
+    AccountScopeError, CapabilityError, CatalogError, HarnessBindingError, HeadMismatchError,
+    IncompatibleOverrideError, ModalityError, NoEligibleCandidateError, PlanTamperedError,
+    ReviewAuthorityError, ReviewIndependenceError, StaleProbeError, UnsafeScopeError,
+    UnsupportedEffortError, UnsupportedModelError,
+)
 from integrations.personas.evidence import archived, FAILURE_OUTCOMES
-from integrations.personas.plan import _digest, build_argv, policy_source_digest, POLICY_SOURCES
+from integrations.personas.plan import _digest, build_argv, POLICY_SOURCES
 from integrations.personas.registry import ACCOUNTS, TASK_CLASSES, personas_for_capacity
-from integrations.personas.review import require_author_continuity
-from .support import *
+from .support import (
+    CONTEXT, HEAD, NOW, PROJECT, WORKTREE, assignment, change_probes, fleet, packet, request,
+)
 
 
 class RoutingTests(unittest.TestCase):

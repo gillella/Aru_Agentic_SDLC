@@ -28,7 +28,7 @@ def command(value: object, name: str) -> list[str]:
 
 
 class Config:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, bind: bool = True):
         self.path = Path(path).resolve()
         try:
             raw = json.loads(self.path.read_text())
@@ -62,8 +62,21 @@ class Config:
             self._project(repo, project)
         for identity, lane in self.lanes.items():
             self._lane(identity, lane)
+        self._permissions()
         self._sessions_agree()
-        self._bind()
+        from .quota import validate_config
+        validate_config(self)
+        from .reviewers import inventory
+        for repo in self.projects:
+            inventory(self, repo)
+        self._bind(bind=bind)
+
+    def _permissions(self) -> None:
+        from .permissions import validate
+        from .retries import validate_policy
+        for repo, project in self.projects.items():
+            validate(self, repo, project)
+            validate_policy(project)
 
     def _sessions_agree(self) -> None:
         # Every lane on one subscription must agree on how many managed sessions
@@ -75,7 +88,9 @@ class Config:
             if len(values) != 1:
                 raise DriverError(f"lanes sharing capacity_key {account} declare different max_sessions")
 
-    def _bind(self) -> None:
+    def _bind(self, *, bind: bool = True) -> None:
+        if not bind:
+            return
         from .state import State, read_json, write_json
 
         path = self.state_dir / "binding.json"
@@ -180,6 +195,13 @@ class Config:
         if repo not in self.projects:
             raise DriverError("repository is not configured for this Driver")
         return self.projects[repo]
+
+    def kernel_adapter(self, repo: str, factory=None):
+        from .kernel import KernelAdapter
+        from .reviewers import inventory
+        value = inventory(self, repo)
+        options = {} if value is None else {"coding_reviewers": value}
+        return (factory or KernelAdapter)(self.kernel_root, Path(self.project(repo)["repo_dir"]), repo, **options)
 
     def runner_profile(self, repo: str) -> str:
         """Return the one profile this repository verifies on, or refuse.

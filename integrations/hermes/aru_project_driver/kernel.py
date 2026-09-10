@@ -154,7 +154,8 @@ def _conflicts(snapshot: dict, record: dict, agent: str | None = None) -> list[s
 
 
 class KernelAdapter:
-    def __init__(self, kernel_root: Path, repo_dir: Path, repo: str):
+    def __init__(self, kernel_root: Path, repo_dir: Path, repo: str, *, coding_reviewers: str | None = None):
+        self.coding_reviewers = coding_reviewers
         self.kernel_root = Path(kernel_root).resolve()
         self.repo_dir = Path(repo_dir).resolve()
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
@@ -165,6 +166,9 @@ class KernelAdapter:
         # Fail closed before spawning: a bridge that cannot execute `gh` is a
         # degraded observation, never a healthy empty one.
         gh = resolve_gh()
+        environment = bounded_environment(gh)
+        if self.coding_reviewers is not None:
+            environment["ARU_CODING_REVIEWERS"] = self.coding_reviewers
         command = [
             sys.executable, str(Path(__file__).resolve()), "--kernel-bridge",
             str(self.kernel_root), str(self.repo_dir), self.repo, operation,
@@ -173,7 +177,7 @@ class KernelAdapter:
             # Fixed interpreter/bridge entrypoint; untrusted payload is JSON stdin.
             result = subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
                 command, input=json.dumps(payload), text=True, capture_output=True,
-                check=False, timeout=180, shell=False, env=bounded_environment(gh),
+                check=False, timeout=180, shell=False, env=environment,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise KernelAdapterError(
@@ -369,6 +373,7 @@ class _Bridge:
             "dependencies": {str(number): dependency_states.get(number, "UNKNOWN") for number in dependencies},
             "errors": sorted(set(errors)), "boundary_errors": boundary_errors,
             "priority": priority,
+            "quota_risk": c.review_risk_tier(touches),
         }
 
     def _self_hosted_capacity(self) -> dict:

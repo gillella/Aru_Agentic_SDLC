@@ -49,7 +49,7 @@ jobs:
 
       - name: Run deterministic verification
         run: |
-          "$RUNNER_TEMP/aru-ci-venv/bin/python" -m ruff check scripts hooks tests integrations/hermes
+          "$RUNNER_TEMP/aru-ci-venv/bin/python" -m ruff check scripts hooks tests integrations
           "$RUNNER_TEMP/aru-ci-venv/bin/python" -m pytest -q
 
       - name: Enforce the issue write boundary against the actual diff

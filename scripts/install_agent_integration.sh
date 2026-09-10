@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 text = Path(sys.argv[1]).read_text()
 text, count = re.subn(
-    r"This repository is scaffolded.*?whose declared profile and `runs-on:` disagree\.\n",
+    r"This repository is scaffolded.*?whose declared profile and `runs-on:` disagree\.\s*",
     "Each repository must use its declared runner profile and trust boundary. "
     "Read its local AGENTS.md and .aru/verify.sh; global guidance does not "
     "select or change a repository's runner profile.\n",

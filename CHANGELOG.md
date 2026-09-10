@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased - Manual audit corrections
+
+- Revalidate linked Project card and current dependency authorization before merge.
+- Protect Kernel helper paths and executable README-like files with appropriate review tiers.
+- Require configured consumer product verification; retain framework checks and upgrade guidance.
+- Bound unchanged worker retries and align quota review reservations with required risk.
+- Add a read-only consumer comparison tool and consumer-owned deployment guidance.
+- Reconcile current release/freeze instructions and broaden integration verification.
+- Prepared as an explicitly authorized one-time manual maintenance change.
+  This source entry does not claim publication, installation, or live Driver acceptance.
+
 ## v2.0.0 - Reviewer-policy and verification migration - 2026-09-09
 
 - Withdraw the previously declared merge-queue capability: verification is
@@ -7,7 +18,7 @@
   before submission. Missing queue evidence is not absence. Confirmed direct
   merges retain `--finalize` recovery; historical queue work is refused instead
   of being closed from PR-head checks. This compatibility change belongs to
-  the unreleased v2 migration and does not activate or reconfigure a live queue.
+  the v2.0.0 migration and does not activate or reconfigure a live queue.
 - Retire Sourcery and CodeAnt while retaining historical evidence.
 - Prefer CodeRabbit with bounded current-head App capability; otherwise select
   independent coding fallback immediately. Completed generic green checks are

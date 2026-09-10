@@ -13,10 +13,10 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     __package__ = "aru_project_driver"
 
-from . import execution, scheduler
+from . import execution, scheduler, permissions
 from .config import Config, DriverError
 from .controller import Controller
-from .kernel import KernelAdapterError
+from .kernel import KernelAdapter, KernelAdapterError
 from .state import State
 
 
@@ -90,11 +90,18 @@ def status(config: Config, repo: str, *, timeout_seconds: float = 20) -> dict:
             data = state.project(repo)
             workers = [{key: r.get(key) for key in (
                 "id", "agent", "issue", "pr", "head", "state", "pid", "exit_code", "worktree",
-                "started_at", "finished_at", "wake_error",
+                "started_at", "finished_at", "wake_error", "outcome", "reason", "retry_blocked",
+                "policy_fingerprint", "result_path", "quota_decision", "quota_continuation", "quota_measurement",
+                "retry_observation",
             )} for r in state.workers(repo)]
             result.update(enabled=data["enabled"], last_checked_at=data.get("last_checked_at"),
                           last_error=data.get("last_error"), last_observation=data.get("last_observation"),
                           workers=workers)
+            if config.project(repo).get("quota_admission"):
+                from .state import key, read_json
+                result["quota"] = read_json(state.root / "quota-decisions" / (key(repo) + ".json"), {"decisions": []})
+                result["quota"]["cooldowns"] = {i: read_json(state.root / "cooldowns" / (
+                    key(config.lane(repo, i)["capacity_key"]) + ".json"), {"until": 0}) for i in config.project(repo)["lanes"]}
             result["scheduler"] = scheduler.scheduler_status(
                 config.hermes_home, repo, hermes_repo=config.hermes_repo,
             )
@@ -139,6 +146,11 @@ def parser() -> argparse.ArgumentParser:
     handoff.add_argument("--source-issue", required=True, type=int)
     handoff.add_argument("--dependency-event", action="store_true",
                          help="prove the contract and wake the source project when satisfied")
+    preflight = sub.add_parser("preflight", help="print a no-write Claude capability probe; never execute it")
+    preflight.add_argument("--project", required=True)
+    preflight.add_argument("--agent", required=True)
+    preflight.add_argument("--issue", type=int, required=True)
+    preflight.add_argument("--worktree", required=True)
     worker = sub.add_parser("_worker", help=argparse.SUPPRESS)
     worker.add_argument("--worker-id", required=True)
     worker.add_argument("--capacity-fd", type=int, required=True)
@@ -148,7 +160,14 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        config = Config(args.config)
+        config = Config(args.config, bind=args.operation != "preflight")
+        if args.operation == "preflight":
+            record = {"repo": args.project, "agent": args.agent, "issue": args.issue,
+                      "worktree": args.worktree, "kind": "implementation", "prompt": ""}
+            adapter = config.kernel_adapter(args.project, KernelAdapter)
+            result = permissions.compile_policy(config, record, adapter, execution.run_bounded, preflight=True)
+            print(json.dumps({**result, "executed": False, "cwd": args.worktree}, sort_keys=True))
+            return 0
         if args.operation == "_worker":
             return execution.worker_main(config, args.worker_id, args.capacity_fd)
         controller = Controller(config)

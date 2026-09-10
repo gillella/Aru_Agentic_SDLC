@@ -17,14 +17,13 @@ from .catalog import MODALITIES
 from .errors import (
     ContradictoryTaskError, RiskEvidenceError, UnknownTaskError, UnsafeScopeError,
 )
+from .lineage import AuthorIdentity
 from .policy import PolicySnapshot, default_snapshot
 from .registry import PROJECT_RE
+from .risk import review_risk_tier
 
 TASK_LABEL_PREFIX = "aru-task:"
 RISK_LABEL_PREFIX = "aru-risk:"
-
-from .risk import review_risk_tier
-from .lineage import AuthorIdentity
 
 
 def tier_for_path(path: str) -> int:

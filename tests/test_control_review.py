@@ -9,6 +9,11 @@ from test_governed_merge import HEAD, install_low_risk_gate, ready_pr
 
 @pytest.mark.parametrize("path", [
     "scripts/review_policy.py",
+    "scripts/install_hooks.sh",
+    "scripts/cleanup_worktrees.py",
+    "scripts/legacy_recovery.py",
+    "scripts/new_gate.py",
+    "scripts/subdirectory/future_gate.sh",
     "integrations/hermes/aru_project_driver/controller.py",
     "integrations/hermes/aru_project_driver/execution.py",
     "integrations/hermes/aru_project_driver/scheduler.py",

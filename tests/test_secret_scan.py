@@ -39,6 +39,12 @@ def repository(tmp_path, mode, content=b"safe content\n"):
 
 
 def scan(repo, env=None):
+    # These fixtures isolate scanner behavior; consumer execution is covered
+    # separately with an actual failing and passing application check.
+    consumer = repo / ".aru/verify-project.sh"
+    consumer.parent.mkdir(exist_ok=True)
+    consumer.write_text("#!/usr/bin/env bash\nexit 0\n")
+    consumer.chmod(0o755)
     return subprocess.run(
         ["bash", str(VERIFY)], cwd=repo, env=env,
         capture_output=True, text=True, check=False,

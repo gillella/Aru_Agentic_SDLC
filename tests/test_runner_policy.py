@@ -113,6 +113,7 @@ def _verify(tmp_path, profile, mutate=None):
     git("config", "user.email", "test@example.com")
     init_project.scaffold("consumer", tmp_path, runner_profile=profile)
     workflow = tmp_path / ".github/workflows/governed-pr.yml"
+    (tmp_path / ".aru/verify-project.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
     if mutate is not None:
         workflow.write_text(mutate(workflow.read_text(encoding="utf-8")), encoding="utf-8")
     git("add", ".")

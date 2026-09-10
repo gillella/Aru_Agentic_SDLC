@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -45,6 +46,10 @@ from review_evidence import (  # noqa: F401 -- compatibility exports
 )
 from reviewer_probe import ProbeRunner, _default_probe
 from merge_state import pull_changed_paths
+from legacy_recovery import (  # shared label readers and the recovery CLI surface
+    LegacyRecoveryError, label_values, one_label_value as _one_label_value,
+    recover_from_args, recovery_failure, require_exclusive_mode,
+)
 from review_policy import (
     ACTIVITY_GRACE_SECONDS,
     ReviewPolicy,
@@ -139,17 +144,9 @@ def _attempted_reviewer_keys(number: int, pr: dict[str, Any]) -> set[str]:
     )
 
 def _optional_authority(pr: dict[str, Any]) -> str | None:
-    authorities = [
-        name[len(REVIEW_PREFIX) :]
-        for name in label_names(pr)
-        if name.startswith(REVIEW_PREFIX)
-    ]
-    reviewer_identities = [
-        name for name in label_names(pr) if name.startswith(REVIEWER_PREFIX)
-    ]
-    reviewer_actors = [
-        name for name in label_names(pr) if name.startswith(REVIEWER_ACTOR_PREFIX)
-    ]
+    authorities = label_values(pr, REVIEW_PREFIX)
+    reviewer_identities = label_values(pr, REVIEWER_PREFIX)
+    reviewer_actors = label_values(pr, REVIEWER_ACTOR_PREFIX)
     if not authorities:
         if reviewer_identities or reviewer_actors:
             raise KernelError("reviewer metadata exists without a review authority")
@@ -171,21 +168,15 @@ def _one_authority(pr: dict[str, Any]) -> str:
         raise KernelError("PR must have exactly one supported review authority")
     return authority
 
-def _one_label_value(pr: dict[str, Any], prefix: str) -> str:
-    values = [name[len(prefix) :] for name in label_names(pr) if name.startswith(prefix)]
-    if len(values) != 1:
-        raise KernelError(f"PR must have exactly one {prefix} identity label")
-    return values[0]
-
 def _same_assignment(reference: dict[str, Any], live: dict[str, Any]) -> bool:
     return bool(
         isinstance(live, dict)
         and live.get("headRefOid") == reference.get("headRefOid")
         and _optional_authority(live) == _optional_authority(reference)
-        and _one_label_value(live, AUTHOR_PREFIX)
-        == _one_label_value(reference, AUTHOR_PREFIX)
-        and _one_label_value(live, AUTHOR_FAMILY_PREFIX)
-        == _one_label_value(reference, AUTHOR_FAMILY_PREFIX)
+        and all(
+            _one_label_value(live, prefix) == _one_label_value(reference, prefix)
+            for prefix in (AUTHOR_PREFIX, AUTHOR_FAMILY_PREFIX)
+        )
         and {name for name in label_names(live) if name.startswith((REVIEWER_PREFIX, REVIEWER_ACTOR_PREFIX))}
         == {name for name in label_names(reference) if name.startswith((REVIEWER_PREFIX, REVIEWER_ACTOR_PREFIX))}
         and same_github_actor(
@@ -697,6 +688,9 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("--title", "--body", "--body-file", "--agent", "--author-family", "--author-github-login"):
         parser.add_argument(name)
     parser.add_argument("--refresh-reviewer", type=int, metavar="PR")
+    parser.add_argument("--recover-legacy", type=int, metavar="PR")
+    parser.add_argument("--expected-head")
+    parser.add_argument("--apply", action="store_true")
     parser.add_argument("--coding-reviewer-unavailable")
     parser.add_argument("--reviewer-status", action="store_true")
     parser.add_argument("--probe-reviewers", action="store_true")
@@ -712,30 +706,13 @@ def _resolve_body_argument(args: argparse.Namespace) -> str | None:
     return args.body
 
 
-def _reject_unexpected_args(args: argparse.Namespace, message: str, names: tuple[str, ...]) -> None:
-    if any(getattr(args, name) for name in names):
-        raise KernelError(message)
-
-
 def main() -> int:
     parser = _parser()
     args = parser.parse_args()
     plain_output = ""
     try:
+        require_exclusive_mode(args)
         if args.reviewer_status:
-            _reject_unexpected_args(
-                args,
-                "reviewer status cannot include PR mutation arguments",
-                (
-                    "issue",
-                    "title",
-                    "body",
-                    "body_file",
-                    "author_family",
-                    "refresh_reviewer",
-                    "coding_reviewer_unavailable",
-                ),
-            )
             result = reviewer_status(
                 probe=args.probe_reviewers,
                 author_identity=args.agent or "",
@@ -749,24 +726,16 @@ def main() -> int:
                 f"{', '.join(policy['coding_fallbacks']) or 'none'} "
                 f"({policy['timeout_seconds']}s timeout; valid={result['valid']})"
             )
+        elif args.recover_legacy:
+            result = recover_from_args(args)
+            plain_output = (f"legacy recovery {result['action']}: "
+                            f"planned {result['planned'] or 'nothing'}")
         elif args.refresh_reviewer:
-            _reject_unexpected_args(
-                args,
-                "review refresh cannot include PR creation arguments",
-                (
-                    "issue",
-                    "title",
-                    "body",
-                    "body_file",
-                    "agent",
-                    "author_family",
-                    "author_github_login",
-                ),
-            )
             result = refresh_assignment(
                 args.refresh_reviewer,
                 coding_unavailable_reason=args.coding_reviewer_unavailable,
             )
+            plain_output = f"review authority: {result['authority']} ({result['reason']})"
         else:
             if args.coding_reviewer_unavailable:
                 raise KernelError("coding reviewer unavailability requires --refresh-reviewer")
@@ -784,12 +753,13 @@ def main() -> int:
                 author_actor=args.author_github_login or "",
             )
             plain_output = str(result["url"])
+    except LegacyRecoveryError as exc:
+        print(recovery_failure(exc, args.json), file=sys.stderr)
+        return 1
     except KernelError as exc:
         parser.error(str(exc))
     if args.json:
         json_print(result)
-    elif args.refresh_reviewer:
-        print(f"review authority: {result['authority']} ({result['reason']})")
     else:
         print(plain_output)
     return 0

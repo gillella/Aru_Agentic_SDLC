@@ -17,6 +17,9 @@ def semantic_issue(monkeypatch):
     }
     monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("external call"))
     monkeypatch.setattr(merge_state, "issue", lambda _number: dict(record))
+    monkeypatch.setattr(merge_state, "project_item_evidence", lambda _n: {
+        "project_id": "PVT_1", "item_id": "PVTI_7", "status_field_id": "FIELD_1", "status": "In Review",
+    })
     return record
 
 

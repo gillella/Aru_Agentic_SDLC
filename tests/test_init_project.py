@@ -98,6 +98,7 @@ def test_scaffold_creates_only_minimal_governance(tmp_path):
         ".github/PULL_REQUEST_TEMPLATE.md",
         ".github/workflows/governed-pr.yml",
         ".aru/verify.sh",
+        ".aru/verify-project.sh",
         ".aru/lib/touches.py",
         ".gitignore",
         ".aru/hooks/pre-push",
@@ -296,6 +297,7 @@ def test_scaffold_consumer_drift_fixtures_and_permissions(tmp_path):
         ".github/PULL_REQUEST_TEMPLATE.md": framework / "templates" / "pull_request.md",
         ".github/workflows/governed-pr.yml": framework / "templates" / "governed-pr.yml",
         ".aru/verify.sh": framework / "templates" / "verify.sh",
+        ".aru/verify-project.sh": framework / "templates" / "verify-project.sh",
         ".aru/lib/touches.py": framework / "scripts" / "touches.py",
         ".aru/hooks/pre-push": framework / "hooks" / "pre-push",
         ".aru/hooks/enforce_touches.py": framework / "hooks" / "enforce_touches.py",
@@ -316,7 +318,7 @@ def test_scaffold_consumer_drift_fixtures_and_permissions(tmp_path):
         assert actual_hash == expected_hash, f"Hash mismatch for {relative}"
 
     # Executable permissions binding
-    executable_files = {".aru/verify.sh", ".aru/hooks/pre-push", ".aru/hooks/enforce_touches.py"}
+    executable_files = {".aru/verify.sh", ".aru/verify-project.sh", ".aru/hooks/pre-push", ".aru/hooks/enforce_touches.py"}
     for relative in written:
         dest_file = target / relative
         mode = dest_file.stat().st_mode
@@ -593,6 +595,7 @@ def test_verify_template_secret_scan_catches_binary_credentials_end_to_end(tmp_p
 def test_verify_template_secret_scan_allows_safe_binary_control_end_to_end(tmp_path):
     _init_git_repo(tmp_path)
     init_project.scaffold("consumer", tmp_path, runner_profile="self-hosted-mac")
+    (tmp_path / ".aru/verify-project.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(
@@ -624,6 +627,7 @@ def test_verify_template_secret_scan_allows_safe_binary_control_end_to_end(tmp_p
 def test_verify_template_secret_scan_fallback_tree_mode_with_binary_content_end_to_end(tmp_path):
     _init_git_repo(tmp_path)
     init_project.scaffold("consumer", tmp_path, runner_profile="self-hosted-mac")
+    (tmp_path / ".aru/verify-project.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
     safe_binary = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256))
     (tmp_path / "image.png").write_bytes(safe_binary)
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
@@ -671,6 +675,7 @@ def test_verify_template_secret_scan_fallback_tree_mode_with_binary_content_end_
 def test_verify_template_executable_rejects_indented_write_permission_on_macos(tmp_path):
     _init_git_repo(tmp_path)
     init_project.scaffold("consumer", tmp_path, runner_profile="self-hosted-mac")
+    (tmp_path / ".aru/verify-project.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
 

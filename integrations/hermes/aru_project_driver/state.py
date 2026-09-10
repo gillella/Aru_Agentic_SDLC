@@ -86,6 +86,15 @@ def _validate_project(data: dict) -> None:
 
 
 def _validate_worker(data: dict) -> None:
+    from .quota_worker import validate_record
+    from . import retries
+    validate_record(data)
+    retries.validate(data)
+    if "retry_blocked" in data and (type(data["retry_blocked"]) is not bool
+            or not isinstance(data.get("policy_fingerprint"), str)
+            or not re.fullmatch(r"[a-f0-9]{64}", data["policy_fingerprint"])
+            or not isinstance(data.get("reason"), str)):
+        raise DriverError("worker retry blocker requires typed outcome and policy evidence")
     if data.get("admission_stop") is not None and not _nonce(data["admission_stop"]):
         raise DriverError("worker Stop admission is invalid")
     if any(not isinstance(data.get(field), str) or not data[field] for field in (

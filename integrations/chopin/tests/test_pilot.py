@@ -389,8 +389,15 @@ def test_migration_runs_explicitly_once(config):
 
 @pytest.fixture
 def hermes_runtime(config, tmp_path):
-    python = Path(os.environ.get('HERMES_TEST_PYTHON', str(Path.home() / '.hermes/hermes-agent/venv/bin/python')))
-    assert python.is_file(), 'Actual Hermes Python required: set HERMES_TEST_PYTHON; this compatibility test must not be skipped.'
+    require_telegram = os.environ.get('CHOPIN_REQUIRE_TELEGRAM', '0')
+    assert require_telegram in {'0', '1'}, 'CHOPIN_REQUIRE_TELEGRAM must be 0 or 1'
+    selected = os.environ.get('HERMES_TEST_PYTHON')
+    if selected is None:
+        if require_telegram == '1':
+            pytest.fail('Required Telegram acceptance needs an explicit HERMES_TEST_PYTHON installation; it cannot be skipped.')
+        pytest.skip('External Hermes compatibility is opt-in: set HERMES_TEST_PYTHON to its installed Python. Source tests do not prove runtime readiness.')
+    python = Path(selected)
+    assert python.is_absolute() and python.is_file(), 'Actual Hermes Python required: set HERMES_TEST_PYTHON to an existing absolute path; explicitly requested compatibility must not be skipped.'
     home = tmp_path / 'hermes-fixture'
     home.mkdir()
     (home / 'OFFLINE_FIXTURE').touch()
@@ -401,6 +408,27 @@ def hermes_runtime(config, tmp_path):
     env = {'PATH': '/opt/homebrew/bin:/usr/bin:/bin', 'HOME': str(home), 'HERMES_HOME': str(home),
            'PYTHONPATH': str(python.parents[2]), 'CHOPIN_PILOT_CONFIG': str(config_path), 'PYTHONDONTWRITEBYTECODE': '1'}
     return [str(python), str(ROOT / 'integrations/chopin/hermes_probe.py')], home, env
+
+
+@pytest.mark.parametrize('selected', [None, '', 'relative/python', '/missing/hermes/python'])
+def test_external_runtime_selection_is_explicit(config, tmp_path, monkeypatch, selected):
+    monkeypatch.setenv('CHOPIN_REQUIRE_TELEGRAM', '0')
+    if selected is None:
+        monkeypatch.delenv('HERMES_TEST_PYTHON', raising=False)
+        expected = pytest.skip.Exception
+    else:
+        monkeypatch.setenv('HERMES_TEST_PYTHON', selected)
+        expected = AssertionError
+    with pytest.raises(expected):
+        hermes_runtime.__wrapped__(config, tmp_path)
+    assert not (tmp_path / 'hermes-fixture').exists()
+
+
+def test_required_telegram_acceptance_cannot_skip_runtime(config, tmp_path, monkeypatch):
+    monkeypatch.delenv('HERMES_TEST_PYTHON', raising=False)
+    monkeypatch.setenv('CHOPIN_REQUIRE_TELEGRAM', '1')
+    with pytest.raises(pytest.fail.Exception, match='cannot be skipped'):
+        hermes_runtime.__wrapped__(config, tmp_path)
 
 
 def run_hermes_probe(runtime, *args):

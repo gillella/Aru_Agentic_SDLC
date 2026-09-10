@@ -19,7 +19,7 @@ requires a new major version. Private helper internals, evidence documents,
 consumer verification commands, external Driver cadence, and consumer release
 or deployment systems are not part of the public API.
 
-The unreleased v2 migration withdraws previously declared merge-queue support.
+The v2.0.0 migration withdrew previously declared merge-queue support.
 The workflow verifies same-repository PR heads only; it cannot prove a combined
 queue revision and all constituent issue scopes. The helper therefore refuses
 configured queues or pending queue/auto-merge requests before submission. It
@@ -98,7 +98,8 @@ The PR scope hook binds its final head reread to the same single parsed closing
 issue directive, then rereads the issue and compares its parsed touches scope.
 Benign issue prose and declaration formatting or ordering remain compatible.
 Merge submission compares two full gate evaluations, including
-the actual changed paths, declared touches, claimant, and each parsed acceptance
+the actual changed paths, declared touches, claimant, linked Project card
+identity/status, resolved dependency identities/states, and each parsed acceptance
 item's text and completion state. Criterion counts alone are not authorization
 evidence. After CI and review reads, one bounded final PR/issue validation checks
 the open, ready PR, exact head and base, closing issue, and current issue gate
@@ -224,6 +225,10 @@ statuses or labels:
 | **2 — sensitive/contract** | Agent rules, skills, workflows, `.aru/`, hooks, Kernel gate scripts, auth, security, migrations, dependencies, configuration, trading, payments, infrastructure, or unrecognized safe paths | One distinct authoritative review | Targeted integration, migration, compatibility, or security evidence |
 | **3 — production/destructive** | Deploy, production, destructive, rollback, or revert paths; empty, malformed, or unsafe paths | One distinct authoritative review | Human/domain approval, broader release evidence, rollback rehearsal, staged deployment, and observability |
 
+All `scripts/` paths are conservatively classified as sensitive control surfaces.
+Documentation-name exceptions apply only to documentation; executable files such
+as `README.py` retain a code tier. Production/destructive matches still take precedence.
+
 Record extra evidence in the consumer issue, `.aru/verify.sh`, branch rules, or
 runbook. Consumers may add stricter parallel checks, approvals, or deployment
 controls, but they do not rewrite the Kernel's path-derived tier. The Kernel
@@ -275,6 +280,13 @@ that is missing, unreadable, or malformed leaves capacity unknown and blocks
 admission. Before checkout, every job rejects a cross-repository fork PR and
 proves that Python 3.11+, pip, and `gh` are present.
 
+New scaffolds require executable `.aru/verify-project.sh` for consumer product
+checks; its generated starter fails until the consumer replaces it. The framework
+verifier runs those checks before reporting success. Existing consumers preserve
+their verification policy while reconciling this split. Aru itself verifies its
+Kernel and integrations directly in its repository workflow; it does not use the
+consumer scaffold as its own application test suite.
+
 A profile is a verification decision, not a deployment decision. Neither
 profile authorizes a release, a deployment, or production access; those remain
 consumer-owned and are never implied by merge.
@@ -305,8 +317,13 @@ A component enters the Kernel only when it directly authorizes or blocks a
 lifecycle transition, no simpler GitHub/Git primitive solves it, the default
 path uses it now, and evidence from three governed consumers shows the need.
 
-Production Python and hooks are limited to 6,000 lines; tests to 9,000; source
+Production Python and hooks are limited to 6,500 lines; tests to 10,500; source
 files to 800 lines; supported scripts to 12-14; runtime skills to six; and
 active operating documents to `README.md`, `AGENTS.md`, `CHANGELOG.md`,
 `docs/KERNEL-CONTRACT.md`, `docs/ENFORCEMENT-REGISTER.md`,
 `docs/OPERATIONS.md`, and `docs/DEGRADED-MODE.md`.
+
+The audit corrections expand the test allowance to retain explicit negative-path
+coverage. The separately bounded Hermes integration keeps its 6,000 production
+line limit and allows 6,500 test lines. Production and per-file limits stay in
+place; tests must not be deleted or compressed to hide a growing safety surface.
