@@ -8,6 +8,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = ROOT / "scripts" / "install_hooks.sh"
+# Byte-for-byte copies of each released hook, tracked in this repository. They were
+# read from git history once; the test must not read history itself, because 2b55cfc
+# is reachable from no ref and is absent from every fresh clone.
+HISTORICAL_HOOKS = Path(__file__).resolve().parent / "fixtures" / "historical_hooks"
 
 
 def repository(tmp_path: Path) -> tuple[Path, Path]:
@@ -34,8 +38,7 @@ def install_result(target: Path) -> subprocess.CompletedProcess[str]:
 @pytest.mark.parametrize("location", ["pre-push", "pre-push.pre-aru", "both"])
 def test_installer_upgrades_authentic_historical_hooks(push_repo, revision, location):
     target, hooks, remote = push_repo
-    # CI already fetches full history; these immutable source versions are the fixtures.
-    historical = subprocess.check_output(["git", "show", f"{revision}:hooks/pre-push"], cwd=ROOT)
+    historical = (HISTORICAL_HOOKS / f"{revision}.pre-push").read_bytes()
     install(target)
     names = ["pre-push", "pre-push.pre-aru"] if location == "both" else [location]
     for name in names:
