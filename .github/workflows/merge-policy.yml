@@ -1,0 +1,77 @@
+name: Aru merge policy
+# aru-runner-profile: self-hosted-mac
+
+# `pull_request_target` runs the copy of this file that is on the base branch, so a
+# pull request cannot change what this check does to its own head. That is the whole
+# point of this workflow: `aru-governed-pr` runs from the pull-request head, so a pull
+# request that rewrites it keeps the check name and goes green without running anything.
+#
+# The safety rule that makes `pull_request_target` acceptable: nothing here checks out,
+# installs, or executes pull-request code. The base branch is checked out, and the write
+# boundary is recomputed from the GitHub API by the trusted copy of the enforcement
+# script. Do not add a step that reads the head ref, runs the branch's tests, or installs
+# its dependencies.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  statuses: write
+
+concurrency:
+  group: aru-merge-policy-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  merge-policy:
+    name: aru-merge-policy
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: [self-hosted, macOS, ARM64, aru-ci]
+    timeout-minutes: 10
+    steps:
+      - name: Validate self-hosted runner trust boundary
+        env:
+          ARU_EVENT_NAME: ${{ github.event_name }}
+          ARU_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          ARU_REPOSITORY: ${{ github.repository }}
+        run: |
+          if [[ "$ARU_EVENT_NAME" != "pull_request_target" || -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ]]; then
+            echo "::error::Only verified pull_request events from this repository may execute on persistent self-hosted runners."
+            exit 1
+          fi
+          command -v python3
+          python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+
+      - name: Check out the base branch, never the pull-request head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Enforce the issue write boundary with the base branch's own checker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARU_PR_NUMBER: ${{ github.event.pull_request.number }}
+          ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python3 hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
+          --expected-head "$ARU_EXPECTED_HEAD"
+
+      # The job's own check run is attached to the base commit, not to the pull-request
+      # head, so it can never be a required check. Publish the verdict as a commit status
+      # on the head instead, which is what the branch ruleset requires. `always()` so a
+      # refusal is published as a failure rather than leaving the head with no status.
+      - name: Publish the verdict on the pull-request head
+        if: ${{ always() && job.status != 'cancelled' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARU_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          ARU_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
+          ARU_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          gh api --method POST "repos/${{ github.repository }}/statuses/$ARU_HEAD_SHA"
+          -f state="$ARU_STATE" -f context=aru-merge-policy -f target_url="$ARU_RUN_URL"
+          -f description="Write boundary checked by the base branch"

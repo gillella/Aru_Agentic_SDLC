@@ -7,6 +7,7 @@
 | five statuses | invariant-bearing lifecycle transitions | `triage_backlog.py`, `claim_issue.py`, `create_pr.py`, `merge_pr.py` |
 | exclusive claim | Ready -> In Progress | `claim_issue.py` |
 | path budget | writes outside `touches:` | `hooks/enforce_touches.py`, `aru-governed-pr` actual-diff check |
+| path budget, unrewritable | writes outside `touches:` when the pull request edits its own workflow | `aru-merge-policy` runs the base branch copy of itself on `pull_request_target`, never reads the head, and posts its verdict as a required status on the head |
 | default-branch protection | direct push to the resolved remote default branch | `hooks/pre-push` |
 | worktree isolation | first implementation edit | `create_branch.py` |
 | closure link | PR creation | `create_pr.py` |
