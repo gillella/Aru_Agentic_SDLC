@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
-from check_ci import ci_verdict, finalization_verdict, check_name, check_state, check_run_inventory
+from check_ci import ci_verdict, finalization_verdict, check_run_inventory
 from common import (
     AUTHOR_FAMILY_PREFIX, AUTHOR_PREFIX, CODING_REVIEWERS, REVIEW_PREFIX,
     REVIEWER_ACTOR_PREFIX, REVIEWER_PREFIX, REVIEW_AUTHORITIES, REVIEW_SERVICES, RETIRED_EXTERNAL_REVIEWERS,
@@ -23,15 +23,9 @@ from merge_state import (
     pull_changed_paths, pull_request,
 )
 from review_evidence import (
-    UNAVAILABLE, authority_assigned_at, evidence_time, external_state,
-    EXTERNAL_APP_SLUGS as REVIEW_APP_SLUGS, _trusted_actor, check_service,
+    UNAVAILABLE, authority_assigned_at, evidence_time, external_state, _trusted_actor,
 )
 
-CODEANT_STATUS_MARKER_RE = re.compile(r"<!--\s*codeant-review-status:(.*?)-->", re.DOTALL)
-CODEANT_MARKER_PREFIX_RE = re.compile(r"<!--\s*codeant-review-status", re.IGNORECASE)
-CODEANT_STATUS_RECORD_KEYS = {"label", "commit", "started", "finished", "done"}
-CODEANT_FULL_REVIEW_LABEL = "Reviewed your PR"
-CODEANT_STATUS_LABELS = {CODEANT_FULL_REVIEW_LABEL, "Incremental review completed"}
 CODING_REVIEW_MARKER_RE = re.compile(r"<!--\s*aru-coding-review:v1\s+(.*?)-->", re.DOTALL)
 CODING_REVIEW_MARKER_PREFIX_RE = re.compile(r"<!--\s*aru-coding-review:", re.IGNORECASE)
 CODING_REVIEW_KEYS = {
@@ -44,15 +38,6 @@ CODING_REVIEW_KEYS = {
 CODING_FINDING_KEYS = {"severity", "file", "line", "summary", "resolved"}
 CODING_FINDING_SEVERITIES = {"critical", "high", "medium", "low", "info"}
 GENERIC_APPROVALS = {"approve", "approved", "looks good", "lgtm", "no issues"}
-
-
-def _parse_ts(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
 
 
 def _actor_is_trusted(actor: Any, service: str) -> bool:
@@ -75,41 +60,6 @@ def assigned_service(pr: dict[str, Any]) -> str:
     if service in REVIEW_SERVICES and (reviewer_labels or actor_labels):
         raise KernelError("external review authority conflicts with coding reviewer metadata")
     return service
-
-
-def review_check_matches(record: dict[str, Any], service: str) -> bool:
-    check_name(record)  # Preserve refusal of nameless rollup/check records.
-    return check_service(record, service)
-
-
-def successful_service_check(
-    pr: dict[str, Any],
-    service: str,
-    checks: list[dict[str, Any]],
-    assigned_at: datetime,
-) -> bool:
-    head = str(pr.get("headRefOid") or "")
-    summary = pr.get("statusCheckRollup")
-    if not isinstance(summary, list):
-        raise KernelError("review check state is incomplete")
-    if any(not isinstance(record, dict) for record in checks):
-        raise KernelError("review check inventory is malformed")
-    for inventory in (summary, checks):
-        matches = [record for record in inventory
-                   if isinstance(record, dict) and review_check_matches(record, service)]
-        if len(matches) > 1:
-            raise KernelError("assigned review service returned ambiguous checks")
-        if len(matches) != 1 or check_state(matches[0]) != "success":
-            return False
-    match = matches[0]
-    app = match.get("app")
-    return bool(
-        isinstance(app, dict)
-        and app.get("slug") in REVIEW_APP_SLUGS[service]
-        and match.get("head_sha") == head
-        and not review_evidence_unavailable(match)
-        and evidence_time(match, subject="external reviewer check") >= assigned_at
-    )
 
 
 def _pull_records(kind: str, number: int) -> list[dict[str, Any]]:
@@ -166,39 +116,6 @@ def _trusted_changes_requested_at_head(reviews: list[dict], head: str, service: 
                for record in _service_reviews(reviews, head, service))
 
 
-def trusted_codeant_review_history(
-    reviews: list[dict[str, Any]], head: str, assigned_at: datetime
-) -> bool:
-    if _trusted_changes_requested_at_head(reviews, head, "codeant", assigned_at):
-        return False
-    for review in reviews:
-        actor = review.get("user") or review.get("author")
-        commit_id = review.get("commit_id") or (review.get("commit") or {}).get("oid")
-        state = str(review.get("state") or "").upper()
-        if (
-            _actor_is_trusted(actor, "codeant")
-            and isinstance(commit_id, str)
-            and re.fullmatch(r"[0-9a-fA-F]{40}", commit_id)
-            and state in {"COMMENTED", "APPROVED", "CHANGES_REQUESTED"}
-            and evidence_time(review, subject="external reviewer evidence")
-            >= assigned_at
-        ):
-            return True
-    return False
-
-
-def _valid_codeant_record(record: Any) -> bool:
-    if not isinstance(record, dict) or set(record.keys()) != CODEANT_STATUS_RECORD_KEYS:
-        return False
-    commit = record.get("commit")
-    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
-        return False
-    if _parse_ts(record.get("started")) is None or _parse_ts(record.get("finished")) is None:
-        return False
-    if record.get("label") not in CODEANT_STATUS_LABELS:
-        return False
-    return isinstance(record.get("done"), bool)
-
 def _marker_payload(body: Any, prefix: re.Pattern, pattern: re.Pattern, validate) -> tuple:
     """Share strict marker cardinality, JSON and schema validation."""
     if not isinstance(body, str):
@@ -213,60 +130,6 @@ def _marker_payload(body: Any, prefix: re.Pattern, pattern: re.Pattern, validate
     except (json.JSONDecodeError, ValueError):
         return False, None
     return (True, payload) if validate(payload) else (False, None)
-
-
-def parse_codeant_status_payload(comment: dict[str, Any]) -> tuple[bool, list[dict[str, Any]] | None]:
-    if not _actor_is_trusted(comment.get("user") or comment.get("author"), "codeant"):
-        return True, None
-    return _marker_payload(
-        comment.get("body"), CODEANT_MARKER_PREFIX_RE, CODEANT_STATUS_MARKER_RE,
-        lambda payload: isinstance(payload, list) and all(_valid_codeant_record(r) for r in payload),
-    )
-
-def validate_codeant_status_comments(
-    comments: list[dict[str, Any]], head: str, assigned_at: datetime
-) -> bool:
-    trusted_payloads: list[list[dict[str, Any]]] = []
-    for comment in comments:
-        if not isinstance(comment, dict):
-            raise KernelError("comment evidence is malformed")
-        actor = comment.get("user") or comment.get("author")
-        valid, payload = parse_codeant_status_payload(comment)
-        if _actor_is_trusted(actor, "codeant") and (not valid or payload is not None) and (
-            evidence_time(comment, subject="external reviewer evidence") < assigned_at
-        ):
-            continue
-        if not valid:
-            return False
-        if payload is not None:
-            trusted_payloads.append(payload)
-    if len(trusted_payloads) != 1:
-        return False
-
-    records = trusted_payloads[0]
-    if any(record["done"] is not True for record in records):
-        return False
-    full_head_records = [
-        record
-        for record in records
-        if record["label"] == CODEANT_FULL_REVIEW_LABEL
-        and record["commit"].lower() == head.lower()
-        and _parse_ts(record["finished"]) >= assigned_at
-    ]
-    if len(full_head_records) != 1:
-        return False
-    return True
-
-
-def successful_codeant_status_review(
-    head: str,
-    reviews: list[dict[str, Any]],
-    comments: list[dict[str, Any]],
-    assigned_at: datetime,
-) -> bool:
-    if not trusted_codeant_review_history(reviews, head, assigned_at):
-        return False
-    return validate_codeant_status_comments(comments, head, assigned_at)
 
 
 def _one_identity_label(pr: dict[str, Any], prefix: str) -> str | None:
@@ -447,13 +310,9 @@ def exact_head_review(
         return False
     if _trusted_changes_requested_at_head(reviews, head, service, assigned_at):
         return False
-    if _successful_service_review(reviews, head, service, assigned_at):
-        return True
-    if service == "coderabbit":
-        return False  # green/no-op check is not a substantive current-head verdict
-    if service == "codeant":
-        return successful_codeant_status_review(head, reviews, comments, assigned_at)
-    return successful_service_check(pr, service, checks, assigned_at)
+    # Only an approving exact-head review counts; a green/no-op check is not a
+    # verdict, and assigned_service() refuses retired services before this point.
+    return _successful_service_review(reviews, head, service, assigned_at)
 
 
 def require_mergeable(pr: dict[str, Any], queue: dict[str, object]) -> None:
