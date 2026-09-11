@@ -873,7 +873,31 @@ Then remove only eligible clean, closed Factory worktrees:
 python3 "$ARU_SDLC_HOME/scripts/cleanup_worktrees.py" --json
 ```
 
-Dirty, unregistered, open-PR, and user-created worktrees are retained.
+Cleanup is local to the host that owns the worktree and runs after the PR is
+confirmed merged or closed. The issue can reach Done before every host has
+cleaned up. The helper retains a worktree that is:
+
+- locked with `git worktree lock` (lock the worktree while a worker runs and
+  unlock it when the worker exits);
+- dirty, or holding any ignored path that is not a reserved tool cache. The
+  reserved cache directories are `__pycache__`, `.pytest_cache`, `.ruff_cache`
+  and `.mypy_cache`; whatever they contain is disposable along with them. The
+  only disposable ignored file is `.DS_Store`. A name counts only in the role it
+  actually has, so a *directory* named `.DS_Store`, a stray `reports/data.pyc`
+  outside `__pycache__`, and a `.venv` or `node_modules` are all treated as
+  unique data and keep the worktree;
+- linked to an open or absent PR, or checked out at a head that differs from
+  the PR head;
+- missing its directory, unregistered, or user-created.
+
+A failure on one worktree is reported with the stage it happened in, the sweep
+continues with the others, and the command exits non-zero. If the local branch
+cannot be deleted after its worktree was removed, the removal is still reported.
+Cleanup never deletes remote branches.
+
+Only a verified checkpoint is durable: commit the work, push it, and confirm
+`git ls-remote --heads origin <branch>` returns the local `HEAD`. Uncommitted or
+unpushed edits can be lost if the host fails.
 
 ## 11. Use the six agent skills
 
@@ -904,7 +928,7 @@ create a scheduler, autonomous loop, or second work queue.
 | `check_ci.py` | Read exact-head governed verification state | Fails closed on a missing, stale, or failing required server check |
 | `fetch_pr_feedback.py` | Read unresolved review findings | Rejects truncated review-thread inventory |
 | `merge_pr.py` | Evaluate, perform, or recover a confirmed direct merge | Requires expected head, exact-head server verification, a non-author exact-head approval, clean threads, and complete queue-state evidence; queue admission and historical queue close-out are refused |
-| `cleanup_worktrees.py` | Remove eligible Factory worktrees | Retains dirty, open, and ambiguous worktrees |
+| `cleanup_worktrees.py` | Remove eligible Factory worktrees | Retains locked, dirty, ignored-data, open, and ambiguous worktrees; reports per-worktree failures and exits non-zero |
 | `revert_merge.py` | Create governed reverse gear | Requires a separate approved revert issue |
 
 ### Installation commands

@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Remove only clean Factory worktrees whose PR is closed or merged."""
+"""Remove only clean Factory worktrees whose PR is closed or merged.
+
+A worktree is kept when git reports it locked (a worker holds it) or its
+directory is missing, when it is dirty or holds ignored files other than
+regenerable tool caches, when its PR is open or absent, or when its HEAD differs
+from the PR head. A failure is recorded with the stage it happened in, the sweep
+continues, and the command exits non-zero. A removal that succeeded is reported
+even if deleting the local branch afterwards fails.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +18,13 @@ from pathlib import Path
 from common import KernelError, gh_json, git, json_print, primary_worktree
 
 FACTORY_BRANCH = re.compile(r"^(?:feat|fix|docs)/issue-\d+-|^codex/")
+# Regenerable tool caches that may be deleted with a worktree. Any other ignored path,
+# including a .venv or node_modules that may hold local changes, keeps the worktree.
+# Matching is by role, not by name alone: a cache name counts only as a directory and
+# .DS_Store only as a file, so an unrelated `.DS_Store/backup.json` or `reports/data.pyc`
+# is unique data and keeps the worktree.
+DISPOSABLE_CACHE_DIRS = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+DISPOSABLE_FILES = {".DS_Store"}
 
 
 def parse_worktrees(raw: str) -> list[dict[str, str]]:
@@ -50,6 +65,47 @@ def pr_for_branch(branch: str) -> dict | None:
     return data[0]
 
 
+def disposable(entry: str, *, is_dir: bool) -> bool:
+    """Whether one ignored path is a regenerable tool cache rather than unique local data."""
+    parts = entry.split("/")
+    # Anything under a tool cache directory is that cache's own content.
+    if set(parts[:-1]) & DISPOSABLE_CACHE_DIRS:
+        return True
+    return parts[-1] in (DISPOSABLE_CACHE_DIRS if is_dir else DISPOSABLE_FILES)
+
+
+def local_state(path: Path) -> tuple[bool, list[str]]:
+    """Whether the worktree is dirty, and which ignored paths are not disposable caches."""
+    dirty, kept = False, []
+    # -z reports paths verbatim. Without it porcelain C-quotes names containing quotes,
+    # newlines or backslashes, and unquoting by hand would misclassify them.
+    for record in git(["status", "--porcelain", "-z", "--ignored"], cwd=path).split("\0"):
+        if not record:
+            continue
+        if not record.startswith("!! "):
+            dirty = True
+            continue
+        entry = record[3:]
+        if not disposable(entry.rstrip("/"), is_dir=entry.endswith("/")):
+            kept.append(entry.rstrip("/"))
+    return dirty, kept
+
+
+def inspect(path: Path, branch: str) -> tuple[str | None, dict | None]:
+    """Return why the worktree must be retained (None when eligible) and its PR record."""
+    dirty, kept = local_state(path)
+    if dirty:
+        return "dirty", None
+    if kept:
+        return "ignored data " + ", ".join(kept[:5]) + (" ..." if len(kept) > 5 else ""), None
+    pr = pr_for_branch(branch)
+    if not pr or (pr.get("state") != "CLOSED" and not pr.get("mergedAt")):
+        return "PR open or absent", pr
+    if pr.get("headRefOid") != git(["rev-parse", "HEAD"], cwd=path):
+        return "head differs from preserved PR", pr
+    return None, pr
+
+
 def sweep(*, dry_run: bool = False) -> dict[str, list[str]]:
     root = primary_worktree()
     worktree_root = (root / ".worktrees").resolve()
@@ -57,6 +113,7 @@ def sweep(*, dry_run: bool = False) -> dict[str, list[str]]:
     records = parse_worktrees(git(["worktree", "list", "--porcelain"], cwd=root))
     removed: list[str] = []
     retained: list[str] = []
+    failed: list[str] = []
     for record in records:
         path = Path(record.get("worktree", "")).resolve()
         branch = record.get("branch", "").removeprefix("refs/heads/")
@@ -65,23 +122,35 @@ def sweep(*, dry_run: bool = False) -> dict[str, list[str]]:
         if worktree_root not in path.parents or not FACTORY_BRANCH.search(branch):
             retained.append(f"{path}: outside Factory ownership")
             continue
-        if git(["status", "--porcelain"], cwd=path):
-            retained.append(f"{path}: dirty")
+        if "locked" in record:
+            reason = record["locked"].strip()
+            retained.append(f"{path}: locked" + (f" ({reason})" if reason else ""))
             continue
-        pr = pr_for_branch(branch)
-        if not pr or (pr.get("state") != "CLOSED" and not pr.get("mergedAt")):
-            retained.append(f"{path}: PR open or absent")
+        if "prunable" in record:
+            retained.append(f"{path}: directory missing; inspect, then git worktree prune")
             continue
-        head = git(["rev-parse", "HEAD"], cwd=path)
-        if pr.get("headRefOid") != head:
-            retained.append(f"{path}: head differs from preserved PR")
+        try:
+            reason, pr = inspect(path, branch)
+        except (KernelError, OSError) as exc:
+            failed.append(f"{path}: inspect: {exc}")
+            continue
+        if reason:
+            retained.append(f"{path}: {reason}")
             continue
         if not dry_run:
-            git(["worktree", "remove", str(path)], cwd=root)
-            if pr.get("mergedAt"):
-                git(["branch", "-d", branch], cwd=root)
+            try:
+                # No --force: git itself still refuses a tree that became dirty or locked meanwhile.
+                git(["worktree", "remove", str(path)], cwd=root)
+            except (KernelError, OSError) as exc:
+                failed.append(f"{path}: remove worktree: {exc}")
+                continue
         removed.append(str(path))
-    return {"removed": removed, "retained": retained}
+        if not dry_run and pr and pr.get("mergedAt"):
+            try:
+                git(["branch", "-d", branch], cwd=root)
+            except (KernelError, OSError) as exc:
+                failed.append(f"{path}: worktree removed, local branch {branch} kept: {exc}")
+    return {"removed": removed, "retained": retained, "failed": failed}
 
 
 def main() -> int:
@@ -100,7 +169,9 @@ def main() -> int:
             print(("would remove " if args.dry_run else "removed ") + path)
         for note in result["retained"]:
             print("retained " + note)
-    return 0
+        for note in result["failed"]:
+            print("failed " + note)
+    return 1 if result["failed"] else 0
 
 
 if __name__ == "__main__":
