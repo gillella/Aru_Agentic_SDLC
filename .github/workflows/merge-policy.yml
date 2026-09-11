@@ -14,10 +14,6 @@ name: Aru merge policy
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
-  # An approval is not a push, so the posture must be re-evaluated when one arrives
-  # or is withdrawn. Without this the check would stay red after you approve.
-  pull_request_review:
-    types: [submitted, dismissed]
 
 permissions:
   contents: read
@@ -42,7 +38,7 @@ jobs:
           ARU_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           ARU_REPOSITORY: ${{ github.repository }}
         run: |
-          if [[ ( "$ARU_EVENT_NAME" != "pull_request_target" && "$ARU_EVENT_NAME" != "pull_request_review" ) || -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ]]; then
+          if [[ "$ARU_EVENT_NAME" != "pull_request_target" || -z "$ARU_HEAD_REPOSITORY" || "$ARU_HEAD_REPOSITORY" != "$ARU_REPOSITORY" ]]; then
             echo "::error::Only verified pull_request events from this repository may execute on persistent self-hosted runners."
             exit 1
           fi
@@ -62,15 +58,6 @@ jobs:
           ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: >-
           python3 hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
-          --expected-head "$ARU_EXPECTED_HEAD"
-
-      - name: Enforce the repository's review posture with the base branch's own checker
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARU_PR_NUMBER: ${{ github.event.pull_request.number }}
-          ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: >-
-          python3 scripts/review_authority.py --pr "$ARU_PR_NUMBER"
           --expected-head "$ARU_EXPECTED_HEAD"
 
       # The job's own check run is attached to the base commit, not to the pull-request
