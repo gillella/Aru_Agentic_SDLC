@@ -3,7 +3,6 @@
 | Control | Blocks or authorizes | Mechanism |
 | --- | --- | --- |
 | issue contract | Backlog -> Ready | `triage_backlog.py` |
-| Ready contract pin | merge after criteria or `touches:` changed since promotion | `triage_backlog.py` stamps `ready:<digest>`; `merge_state.issue_gate` recomputes it |
 | five statuses | invariant-bearing lifecycle transitions | `triage_backlog.py`, `claim_issue.py`, `create_pr.py`, `merge_pr.py` |
 | exclusive claim | Ready -> In Progress | `claim_issue.py` |
 | path budget | writes outside `touches:` | `hooks/enforce_touches.py`, `aru-governed-pr` actual-diff check |

@@ -65,14 +65,20 @@ The issue contract is:
 - exactly one safe `touches:` declaration of repository-relative paths;
 - no unresolved `depends-on: #N` issue.
 
-Promotion pins that contract: `triage_backlog.py` labels the issue
-`ready:<digest>`, a digest of the issue number, the criteria text and the
-`touches:` paths. Ticking criteria does not change it. The merge gate recomputes
-the digest from the live issue and refuses on a mismatch or on more than one pin,
-so a claimant cannot widen its own scope or reword its criteria mid-flight; that
-needs a return to Backlog and a fresh promotion. Issues promoted before pinning
-carry no pin and are checked as before; removing a pin is hand-editing lifecycle
-labels, which this contract forbids. Close-out deletes the pin label.
+The merge gate reads the declaration that is live at merge time and refuses any
+changed path outside it, and records the declaration it enforced as merge
+evidence. The scope is not frozen at promotion: a claimant who finds the work
+needs a path the declaration omits corrects the declaration, and the gate judges
+the corrected one.
+
+That is deliberate, and it rests on the approval. Promotion was previously pinned
+by a digest, which refused a body edited afterwards and directed the operator to
+return the issue to Backlog — a transition the kernel does not implement, and one
+that is impossible once a pull request exists, because the issue is then In
+Review and releasing the claim is refused. What the pin guarded is covered by the
+merge gate itself: an approval of the exact head by an authorized account, over a
+diff that lists every changed path. A widened scope is visible in the thing the
+approver is reading.
 
 ## Required lifecycle
 

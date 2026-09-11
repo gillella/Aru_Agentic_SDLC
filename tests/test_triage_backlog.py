@@ -9,7 +9,6 @@ from common import KernelError
 @pytest.fixture(autouse=True)
 def no_ready_pin_writes(monkeypatch):
     """These tests cover the status transaction; tests/test_ready_pin.py covers pinning."""
-    monkeypatch.setattr(triage_backlog, "pin_ready_contract", lambda *_args: None)
 
 
 def backlog_issue(number: int, *labels: str, body: str | None = None) -> dict:
