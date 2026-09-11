@@ -249,3 +249,46 @@ def test_provenance_aware_duplicate_ci_does_not_bypass_review_or_merge(monkeypat
     reason = "exact-head verdict" if ci_state == "success" else "untrusted source" if ci_state == "untrusted" else "required GitHub checks"
     with pytest.raises(merge_pr.KernelError, match=reason):
         merge_pr.evaluate(3, "a" * 40)
+
+
+PAUSED_SUMMARY = "## Walkthrough\n<!-- review paused by coderabbit.ai -->\n> ## Reviews paused\n"
+
+
+def install_coderabbit_evidence(monkeypatch, *, review_commit=None, approved=True, body=PAUSED_SUMMARY):
+    """PR #655: CodeRabbit approved the head, then edited "Reviews paused" into its summary."""
+    pr = base_pr(createdAt="2026-09-11T00:43:20Z")
+    reviews = [{"id": 1, "state": "APPROVED" if approved else "COMMENTED", "body": "",
+                "commit_id": review_commit or pr["headRefOid"], "submitted_at": "2026-09-11T00:44:54Z",
+                "user": {"login": "coderabbitai[bot]", "type": "Bot"}}]
+    comments = [{"id": 2, "created_at": "2026-09-11T00:43:40Z", "updated_at": "2026-09-11T00:48:05Z",
+                 "body": body, "user": {"login": "coderabbitai[bot]", "type": "Bot"}}]
+    events = [{"event": "labeled", "label": {"name": "review:coderabbit"}, "created_at": "2026-09-11T00:43:26Z"}]
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _n: reviews)
+    monkeypatch.setattr(merge_pr, "pull_comments", lambda _n: comments)
+    monkeypatch.setattr(merge_pr, "pull_events", lambda _n: events)
+    monkeypatch.setattr(merge_pr, "pull_review_checks", lambda _head: [])
+    return pr
+
+
+def test_later_pause_notice_does_not_retract_an_exact_head_approval(monkeypatch):
+    import review_evidence
+
+    pr = install_coderabbit_evidence(monkeypatch)
+    since = review_evidence.authority_assigned_at(pr, merge_pr.pull_events(655), "coderabbit")
+    # Reviewer refresh still reads the pause as unavailability; only the verdict stands.
+    assert review_evidence.external_state(
+        "coderabbit", reviews=merge_pr.pull_reviews(655), comments=merge_pr.pull_comments(655),
+        checks=[], head=pr["headRefOid"], since=since,
+    ) == review_evidence.UNAVAILABLE
+    assert merge_pr.exact_head_review(pr, 655, "coderabbit") is True
+
+
+@pytest.mark.parametrize("review_commit, approved", [("b" * 40, True), (None, False)])
+def test_pause_notice_still_blocks_without_a_current_head_approval(monkeypatch, review_commit, approved):
+    pr = install_coderabbit_evidence(monkeypatch, review_commit=review_commit, approved=approved)
+    assert merge_pr.exact_head_review(pr, 655, "coderabbit") is False
+
+
+def test_pause_notice_with_another_unavailability_signal_still_retracts(monkeypatch):
+    pr = install_coderabbit_evidence(monkeypatch, body=PAUSED_SUMMARY + "\nRate limit exceeded.\n")
+    assert merge_pr.exact_head_review(pr, 655, "coderabbit") is False

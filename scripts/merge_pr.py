@@ -14,8 +14,8 @@ from check_ci import ci_verdict, finalization_verdict, check_run_inventory
 from common import (
     AUTHOR_FAMILY_PREFIX, AUTHOR_PREFIX, CODING_REVIEWERS, REVIEW_PREFIX,
     REVIEWER_ACTOR_PREFIX, REVIEWER_PREFIX, REVIEW_AUTHORITIES, REVIEW_SERVICES, RETIRED_EXTERNAL_REVIEWERS,
-    KernelError, gh_paginated, gh_json, json_print, label_names, same_github_actor,
-    review_risk_tier, review_evidence_unavailable, repo_slug, run,
+    KernelError, REVIEW_UNAVAILABLE_RE, gh_paginated, gh_json, json_print, label_names,
+    same_github_actor, review_risk_tier, review_evidence_unavailable, repo_slug, run,
 )
 from fetch_pr_feedback import fetch_feedback
 from merge_state import (
@@ -38,10 +38,19 @@ CODING_REVIEW_KEYS = {
 CODING_FINDING_KEYS = {"severity", "file", "line", "summary", "resolved"}
 CODING_FINDING_SEVERITIES = {"critical", "high", "medium", "low", "info"}
 GENERIC_APPROVALS = {"approve", "approved", "looks good", "lgtm", "no issues"}
+PAUSE_NOTICE_RE = re.compile(r"\breviews? paused\b", re.IGNORECASE)
 
 
 def _actor_is_trusted(actor: Any, service: str) -> bool:
     return isinstance(actor, dict) and _trusted_actor({"user": actor}, service)
+
+
+def _pause_notice_only(record: Any) -> bool:
+    """A record whose only unavailability signal is a pause notice."""
+    if not isinstance(record, dict):
+        return False  # external_state must still see and refuse malformed records
+    body = str(record.get("body") or "")
+    return bool(PAUSE_NOTICE_RE.search(body)) and not REVIEW_UNAVAILABLE_RE.search(PAUSE_NOTICE_RE.sub("", body))
 
 
 def assigned_service(pr: dict[str, Any]) -> str:
@@ -305,7 +314,11 @@ def exact_head_review(
     events = pull_events(number)
     checks = pull_review_checks(head)
     assigned_at = authority_assigned_at(pr, events, service)
-    if external_state(service, reviews=reviews, comments=comments, checks=checks,
+    # A pure pause notice (CodeRabbit edits "Reviews paused" into its summary once
+    # it stops following new pushes) speaks for future heads: it cannot retract an
+    # approval already given for this one. Any other newer unavailability still does.
+    signals = [record for record in comments if not _pause_notice_only(record)]
+    if external_state(service, reviews=reviews, comments=signals, checks=checks,
                       head=head, since=assigned_at) == UNAVAILABLE:
         return False
     if _trusted_changes_requested_at_head(reviews, head, service, assigned_at):
