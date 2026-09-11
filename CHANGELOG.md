@@ -4,8 +4,12 @@
 
 - `cleanup_worktrees.py` retains worktrees that git reports locked (a worker
   holds them) in both dry-run and real runs, and retains worktrees whose ignored
-  files include anything other than disposable caches. A failure on one worktree
-  is reported, the sweep continues, and the command exits non-zero.
+  files include anything other than disposable caches. A cache counts only in the
+  role it really has -- a cache name as a directory, `.DS_Store` as a file -- so an
+  unrelated `.DS_Store/backup.json` or `reports/data.pyc` keeps the worktree, and
+  ignored paths are read NUL-delimited so unusual names classify correctly. A
+  failure on one worktree is reported, the sweep continues, and the command exits
+  non-zero.
 - The operations guide documents verified checkpoints, worktree locks and
   host-local cleanup.
 

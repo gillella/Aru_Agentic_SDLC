@@ -20,7 +20,11 @@ from common import KernelError, gh_json, git, json_print, primary_worktree
 FACTORY_BRANCH = re.compile(r"^(?:feat|fix|docs)/issue-\d+-|^codex/")
 # Regenerable tool caches that may be deleted with a worktree. Any other ignored path,
 # including a .venv or node_modules that may hold local changes, keeps the worktree.
-DISPOSABLE_IGNORED = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".DS_Store"}
+# Matching is by role, not by name alone: a cache name counts only as a directory and
+# .DS_Store only as a file, so an unrelated `.DS_Store/backup.json` or `reports/data.pyc`
+# is unique data and keeps the worktree.
+DISPOSABLE_CACHE_DIRS = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+DISPOSABLE_FILES = {".DS_Store"}
 
 
 def parse_worktrees(raw: str) -> list[dict[str, str]]:
@@ -61,16 +65,29 @@ def pr_for_branch(branch: str) -> dict | None:
     return data[0]
 
 
+def disposable(entry: str, *, is_dir: bool) -> bool:
+    """Whether one ignored path is a regenerable tool cache rather than unique local data."""
+    parts = entry.split("/")
+    # Anything under a tool cache directory is that cache's own content.
+    if set(parts[:-1]) & DISPOSABLE_CACHE_DIRS:
+        return True
+    return parts[-1] in (DISPOSABLE_CACHE_DIRS if is_dir else DISPOSABLE_FILES)
+
+
 def local_state(path: Path) -> tuple[bool, list[str]]:
     """Whether the worktree is dirty, and which ignored paths are not disposable caches."""
     dirty, kept = False, []
-    for line in git(["status", "--porcelain", "--ignored"], cwd=path).splitlines():
-        if not line.startswith("!! "):
+    # -z reports paths verbatim. Without it porcelain C-quotes names containing quotes,
+    # newlines or backslashes, and unquoting by hand would misclassify them.
+    for record in git(["status", "--porcelain", "-z", "--ignored"], cwd=path).split("\0"):
+        if not record:
+            continue
+        if not record.startswith("!! "):
             dirty = True
             continue
-        entry = line[3:].strip('"').rstrip("/")
-        if not (set(entry.split("/")) & DISPOSABLE_IGNORED or entry.endswith(".pyc")):
-            kept.append(entry)
+        entry = record[3:]
+        if not disposable(entry.rstrip("/"), is_dir=entry.endswith("/")):
+            kept.append(entry.rstrip("/"))
     return dirty, kept
 
 

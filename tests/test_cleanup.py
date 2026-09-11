@@ -87,12 +87,24 @@ def test_one_failed_worktree_does_not_stop_the_sweep(monkeypatch, tmp_path, caps
 
 def test_ignored_data_is_kept_but_disposable_caches_are_not(monkeypatch, tmp_path):
     root, _ = fake_repo(monkeypatch, tmp_path, {"data": [], "caches": []}, status={
-        "data": "!! .env\n!! .venv/\n!! __pycache__/\n",
-        "caches": "!! __pycache__/\n!! src/.pytest_cache/\n!! build/module.pyc\n",
+        "data": "!! .env\0!! .venv/\0!! __pycache__/\0",
+        "caches": "!! __pycache__/\0!! src/.pytest_cache/\0!! __pycache__/m.pyc\0!! .DS_Store\0",
     })
     result = cleanup_worktrees.sweep()
     assert result["retained"] == [f"{root}/.worktrees/data: ignored data .env, .venv"]
     assert result["removed"] == [f"{root}/.worktrees/caches"]
+
+
+@pytest.mark.parametrize("entry", [
+    ".DS_Store/backup.json",  # a directory named .DS_Store is not Finder metadata
+    "reports/data.pyc",       # a .pyc suffix outside __pycache__ proves nothing
+    '"data".json',            # -z keeps the name verbatim; quote-stripping mangled it
+])
+def test_cache_lookalikes_are_kept_as_unique_data(monkeypatch, tmp_path, entry):
+    root, calls = fake_repo(monkeypatch, tmp_path, {"tree": []}, status={"tree": f"!! {entry}\0"})
+    result = cleanup_worktrees.sweep()
+    assert result["retained"] == [f"{root}/.worktrees/tree: ignored data {entry}"]
+    assert not removals(calls)
 
 
 @pytest.mark.parametrize("case,extra,expected", [
