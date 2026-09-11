@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased - Merge authority
+
+- Add an optional merge-authority App. With `ARU_MERGE_APP_RUNNER` and
+  `ARU_MERGE_APP_ID` set, `merge_pr.py` posts `aru-merge-authorized` at the exact
+  head after every gate, and the ruleset requires it pinned to that App, so
+  `gh pr merge` alone can no longer complete a governed merge. Unset, behaviour
+  is unchanged.
+- Bootstrap pins the check only when the App can already act on the new
+  repository, and new consumer rulesets allow merge commits only.
+- A later "Reviews paused" note from the external reviewer no longer retracts an
+  approval already given for the exact head; any other unavailability still does.
+- New repositories no longer get the retired `review:sourcery` / `review:codeant`
+  labels, and the scaffolded secret scan matches any `*API_SECRET*` assignment
+  instead of naming one client's variable.
+
 ## Unreleased - Manual audit corrections
 
 - Revalidate linked Project card and current dependency authorization before merge.

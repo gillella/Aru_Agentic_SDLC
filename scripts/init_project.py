@@ -9,6 +9,7 @@ import re
 import tempfile
 from pathlib import Path
 
+import merge_authority
 from common import PROJECT_AUTH, REPOSITORY_AUTH, KernelError, run
 
 STATUSES = ("Backlog", "Ready", "In Progress", "In Review", "Done")
@@ -27,8 +28,6 @@ LABELS = {
     "priority:p2": ("fbca04", "Current phase, not critical path"),
     "priority:p3": ("c5def5", "Opportunistic"),
     "review:coderabbit": ("0e8a16", "External review: CodeRabbit"),
-    "review:sourcery": ("0e8a16", "External review: Sourcery"),
-    "review:codeant": ("0e8a16", "External review: CodeAnt"),
     "review:claude-code": ("5319e7", "Coding-agent review: Claude Code"),
     "review:openai-codex": ("5319e7", "Coding-agent review: OpenAI Codex"),
     "review:xai-cursor": ("5319e7", "Coding-agent review: xAI Cursor"),
@@ -281,8 +280,11 @@ def scaffold(name: str, directory: Path, *, runner_profile: str) -> list[str]:
     return written
 
 
-def ruleset_payload() -> dict[str, object]:
+def ruleset_payload(merge_app_id: int | None = None) -> dict[str, object]:
     """Return the minimal server-enforced merge boundary for consumers."""
+    checks = [{"context": "aru-governed-pr", "integration_id": GITHUB_ACTIONS_APP_ID}]
+    if merge_app_id is not None:
+        checks.append({"context": merge_authority.MERGE_AUTHORITY_CHECK, "integration_id": merge_app_id})
     return {
         "name": "aru-protect-default",
         "target": "branch",
@@ -297,7 +299,7 @@ def ruleset_payload() -> dict[str, object]:
             {
                 "type": "pull_request",
                 "parameters": {
-                    "allowed_merge_methods": ["merge", "squash", "rebase"],
+                    "allowed_merge_methods": ["merge"],
                     "dismiss_stale_reviews_on_push": True,
                     "require_code_owner_review": False,
                     "require_last_push_approval": False,
@@ -309,12 +311,7 @@ def ruleset_payload() -> dict[str, object]:
                 "type": "required_status_checks",
                 "parameters": {
                     "do_not_enforce_on_create": True,
-                    "required_status_checks": [
-                        {
-                            "context": "aru-governed-pr",
-                            "integration_id": GITHUB_ACTIONS_APP_ID,
-                        }
-                    ],
+                    "required_status_checks": checks,
                     "strict_required_status_checks_policy": True,
                 },
             },
@@ -322,13 +319,13 @@ def ruleset_payload() -> dict[str, object]:
     }
 
 
-def provision_ruleset(slug: str, directory: Path) -> dict[str, object] | str:
+def provision_ruleset(slug: str, directory: Path, merge_app_id: int | None = None) -> dict[str, object] | str:
     temporary: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
             mode="w", encoding="utf-8", suffix=".json", delete=False
         ) as handle:
-            json.dump(ruleset_payload(), handle, sort_keys=True)
+            json.dump(ruleset_payload(merge_app_id), handle, sort_keys=True)
             temporary = Path(handle.name)
         return command(
             [
@@ -355,6 +352,10 @@ def github_setup(
     profile_spec(runner_profile)
     if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?", owner):
         raise BootstrapError(f"unsafe GitHub owner: {owner!r}")
+    try:
+        merge_app = merge_authority.configured()
+    except KernelError as exc:
+        raise BootstrapError(str(exc)) from exc
     visibility = "--private" if private else "--public"
     command(
         [
@@ -463,13 +464,17 @@ def github_setup(
         cwd=directory,
         auth=PROJECT_AUTH,
     )
-    ruleset = provision_ruleset(slug, directory)
+    # Pin the merge-authority check only once its App can act on the new repository:
+    # a required check that nothing can post would deadlock the first pull request.
+    pinned = merge_app is not None and merge_authority.installed(slug)
+    ruleset = provision_ruleset(slug, directory, merge_app[1] if pinned else None)
     return {
         "repository": slug,
         "project": project.get("url"),
         "ruleset": ruleset.get("_links", {}).get("html", {}).get("href")
         if isinstance(ruleset, dict)
         else None,
+        "merge_authority": "required" if pinned else "not-installed" if merge_app else "off",
     }
 
 

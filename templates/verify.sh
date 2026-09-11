@@ -134,7 +134,7 @@ sed 's/^/  /' "${display_file}"
 # Always: no credential-shaped literal enters the repository
 # ---------------------------------------------------------------------------
 section "Secret scan"
-secret_re="gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{50,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|sk-[A-Za-z0-9]{32,}|sk-proj-[A-Za-z0-9_-]{20,}|(API_SECRET_KEY|JMC_API_SECRET)[[:space:]]*=[[:space:]]*['\"]?[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]{0,20}PRIVATE KEY-----"
+secret_re="gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{50,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{20,}|sk-[A-Za-z0-9]{32,}|sk-proj-[A-Za-z0-9_-]{20,}|[A-Z0-9_]*API_SECRET[A-Z0-9_]*[[:space:]]*=[[:space:]]*['\"]?[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]{0,20}PRIVATE KEY-----"
 scan_file="${scope_dir}/secret-scan.tmp"
 if [ -n "${base}" ]; then
   # Collect first so an empty filter result cannot conceal a Git read failure.

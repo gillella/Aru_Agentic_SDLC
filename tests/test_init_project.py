@@ -41,13 +41,13 @@ def test_bootstrap_provisions_priority_labels():
 def test_bootstrap_provisions_external_and_coding_review_authorities():
     assert {
         "review:coderabbit",
-        "review:sourcery",
-        "review:codeant",
         "review:claude-code",
         "review:openai-codex",
         "review:xai-cursor",
         "review:google-antigravity",
     }.issubset(init_project.LABELS)
+    # Retired providers are refused at merge; new repositories never get their labels.
+    assert not {"review:sourcery", "review:codeant"} & set(init_project.LABELS)
     assert not any(label.startswith("reviewer-registered:") for label in init_project.LABELS)
     assert not any(label.startswith("reviewer-binding:") for label in init_project.LABELS)
 
@@ -351,6 +351,7 @@ def test_verify_template_secret_scan_positives_and_negatives():
         + "c4d9e32e4518ff6adffb23ba8cc224450e9ec6ffefd862451d449d85331480e2"
         + '"',
         "JMC_API_SECRET=" + "c4d9e32e4518ff6adffb23ba8cc224450e9ec6ffefd862451d449d85331480e2",
+        "PAYMENTS_API_SECRET=" + "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
         "-----BEGIN RSA " + "PRIVATE KEY-----",
     ]
 

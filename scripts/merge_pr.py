@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import time
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any
 
+import merge_authority
 from check_ci import ci_verdict, finalization_verdict, check_run_inventory
 from common import (
     AUTHOR_FAMILY_PREFIX, AUTHOR_PREFIX, CODING_REVIEWERS, REVIEW_PREFIX,
@@ -39,6 +41,7 @@ CODING_FINDING_KEYS = {"severity", "file", "line", "summary", "resolved"}
 CODING_FINDING_SEVERITIES = {"critical", "high", "medium", "low", "info"}
 GENERIC_APPROVALS = {"approve", "approved", "looks good", "lgtm", "no issues"}
 PAUSE_NOTICE_RE = re.compile(r"\breviews? paused\b", re.IGNORECASE)
+MERGEABLE_STATES = {"CLEAN", "UNSTABLE"}
 
 
 def _actor_is_trusted(actor: Any, service: str) -> bool:
@@ -334,8 +337,34 @@ def require_mergeable(pr: dict[str, Any], queue: dict[str, object]) -> None:
     merge_state = pr.get("mergeStateStatus")
     if pr.get("mergeable") != "MERGEABLE":
         raise KernelError("PR is not currently mergeable")
-    if merge_state not in {"CLEAN", "UNSTABLE"}:
+    # With the merge-authority gate on, its required check is absent until merge()
+    # posts it, so GitHub reports BLOCKED for every PR. GitHub still refuses the
+    # submission if anything else blocks, and await_unblocked() names that case.
+    allowed = MERGEABLE_STATES | ({"BLOCKED"} if merge_authority.configured() else set())
+    if merge_state not in allowed:
         raise KernelError(f"PR merge state is {merge_state}")
+
+
+def await_unblocked(number: int, head: str, attempts: int = 6) -> None:
+    """Give GitHub a bounded moment to recompute mergeability after authorization."""
+    for attempt in range(attempts):
+        pr = pull_request(number)
+        if pr.get("headRefOid") != head:
+            raise KernelError("PR head changed after merge authorization")
+        if pr.get("mergeStateStatus") in MERGEABLE_STATES:
+            return
+        if attempt + 1 < attempts:
+            time.sleep(2)
+    raise KernelError("PR is still blocked after merge authorization; another ruleset requirement is unmet")
+
+
+def _revoke_authorization(head: str, cause: KernelError) -> None:
+    # A newer failed run supersedes the success, so a bare `gh pr merge` cannot
+    # finish a submission this helper abandoned.
+    try:
+        merge_authority.post(head, "failure", "Merge submission failed; re-run merge_pr.py")
+    except KernelError as revoke_error:
+        raise KernelError(f"{revoke_error}; original merge failure: {cause}") from cause
 
 
 def evaluate(number: int, expected_head: str) -> dict[str, object]:
@@ -437,7 +466,15 @@ def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str
     ):
         raise KernelError("merge queue or pending request changed before merge submission")
     revalidate_review(final_pr, number, gates, issue_numbers)
-    run(command)
+    authorized = merge_authority.post(expected_head, "success", f"merge_pr.py gates passed for PR #{number}")
+    try:
+        if authorized is not None:
+            await_unblocked(number, expected_head)
+        run(command)
+    except KernelError as exc:
+        if authorized is not None:
+            _revoke_authorization(expected_head, exc)
+        raise
     merged = pull_request(number)
     if merged.get("headRefOid") != expected_head:
         raise KernelError("PR head changed during merge submission")
