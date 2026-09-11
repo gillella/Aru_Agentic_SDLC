@@ -399,9 +399,14 @@ Authenticated worker-completion, review, check, merge and dependency events
 provide the fast path. Native event session metadata supplies delivery IDs;
 issue/comment text is never executable instruction or project authorization.
 The ten-minute heartbeat discovers missed events and newly recovered capacity.
-Both paths use the same coordination and account locks. A healthy tick with no
-action available stays silent. Unfinished actionable work is retried even when
-its observation repeats after a failed attempt.
+Both paths use the same coordination and account locks. Incoming events retry
+coordination for up to 20 seconds. If contention persists, the command returns
+exit code 75 with `accepted: false` and `retryable: true`; the caller must retry
+the same delivery ID. No event is acknowledged or consumed on that failure.
+Busy ticks and reconciliations also return 75 rather than reporting success;
+the existing heartbeat provides recovery if the caller misses a retry.
+A healthy tick with no action available stays silent. Unfinished actionable
+work is retried even when its observation repeats after a failed attempt.
 Waiting for review has no Driver deadline and does not launch a reviewer.
 
 ## Returned PR actions

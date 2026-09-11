@@ -11,6 +11,9 @@ from .kernel import RUNNER_PROFILES, runner_profile_for_account
 class DriverError(RuntimeError):
     """An action cannot safely proceed."""
 
+class DriverBusy(DriverError):
+    """Another activation owns coordination; the caller may retry unchanged."""
+
 def absolute(value: object, name: str) -> Path:
     if not isinstance(value, str) or not Path(value).is_absolute():
         raise DriverError(f"{name} must be an absolute path")

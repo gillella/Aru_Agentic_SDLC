@@ -381,7 +381,9 @@ class Controller:
         self.config.project(repo)
         if not event_id or len(event_id) > 512:
             raise DriverError("event requires a bounded unique delivery id")
-        with self.state.lock():
+        # Brief contention must not discard an event. A longer collision is an
+        # explicit retryable failure; never acknowledge a delivery we did not store.
+        with self.state.lock(timeout_seconds=20):
             return self._event_locked(repo, event_id, reason, inline=inline)
 
     def _event_locked(self, repo: str, event_id: str, reason: str, *, inline=False) -> dict:

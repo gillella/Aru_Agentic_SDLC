@@ -14,7 +14,7 @@ if __package__ in {None, ""}:
     __package__ = "aru_project_driver"
 
 from . import execution, scheduler, permissions
-from .config import Config, DriverError
+from .config import Config, DriverBusy, DriverError
 from .controller import Controller
 from .kernel import KernelAdapter, KernelAdapterError
 from .state import State
@@ -181,9 +181,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, sort_keys=True))
         return 1 if result.get("status") == "partial" else 0
     except (DriverError, KernelAdapterError, scheduler.SchedulerError, OSError, ValueError) as exc:
-        busy = isinstance(exc, DriverError) and str(exc).startswith("another Driver activation")
-        print(json.dumps({"wakeAgent": False, "status": "busy" if busy else "error", "reason": str(exc)}))
-        return 0 if busy else 1
+        busy = isinstance(exc, DriverBusy)
+        print(json.dumps({"wakeAgent": False, "status": "busy" if busy else "error", "reason": str(exc),
+                          **({"accepted": False, "retryable": True} if busy else {})}))
+        return 75 if busy else 1
 
 if __name__ == "__main__":
     raise SystemExit(main())

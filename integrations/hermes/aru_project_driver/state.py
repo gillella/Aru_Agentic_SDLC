@@ -13,7 +13,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-from .config import DriverError
+from .config import DriverBusy, DriverError
 
 MAX_EVENT_KEYS = 65_536
 
@@ -113,13 +113,22 @@ class State:
         self.root = root
 
     @contextmanager
-    def lock(self, *, blocking: bool = False):
+    def lock(self, *, blocking: bool = False, timeout_seconds: float = 0):
+        if (type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds)
+                or timeout_seconds < 0 or (blocking and timeout_seconds)):
+            raise DriverError("coordination timeout must be finite, nonnegative and nonblocking")
+        deadline = time.monotonic() + timeout_seconds
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with (self.root / "coordination.lock").open("a+") as stream:
-            try:
-                fcntl.flock(stream, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
-            except BlockingIOError as exc:
-                raise DriverError("another Driver activation is coordinating work") from exc
+            while True:
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+                    break
+                except BlockingIOError as exc:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise DriverBusy("another Driver activation is coordinating work") from exc
+                    time.sleep(min(.05, remaining))
             try:
                 yield
             finally:
