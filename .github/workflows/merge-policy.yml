@@ -19,7 +19,6 @@ permissions:
   contents: read
   issues: read
   pull-requests: read
-  statuses: write
 
 concurrency:
   group: aru-merge-policy-${{ github.event.pull_request.number }}
@@ -60,18 +59,3 @@ jobs:
           python3 hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
           --expected-head "$ARU_EXPECTED_HEAD"
 
-      # The job's own check run is attached to the base commit, not to the pull-request
-      # head, so it can never be a required check. Publish the verdict as a commit status
-      # on the head instead, which is what the branch ruleset requires. `always()` so a
-      # refusal is published as a failure rather than leaving the head with no status.
-      - name: Publish the verdict on the pull-request head
-        if: ${{ always() && job.status != 'cancelled' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARU_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          ARU_STATE: ${{ job.status == 'success' && 'success' || 'failure' }}
-          ARU_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: >-
-          gh api --method POST "repos/${{ github.repository }}/statuses/$ARU_HEAD_SHA"
-          -f state="$ARU_STATE" -f context=aru-merge-policy -f target_url="$ARU_RUN_URL"
-          -f description="Write boundary checked by the base branch"

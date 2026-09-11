@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased - Less machinery around the review gate
+
+- `review_authority.py` no longer carries a command-line entry point. It existed for the
+  base-branch workflow step that was removed when that workflow stopped applying the
+  posture; nothing has invoked it since.
+- `aru-merge-policy` publishes its verdict once, through its own check run, and no longer
+  requests `statuses: write`. The explicit commit-status step was written on the belief
+  that the check run attached to the base commit and could never be required; the head
+  carries both, so it was a duplicate.
+- The operations guide now records which check gates a pull request and why the workflow
+  triggers on `pull_request_target` alone.
+
+
 ## Unreleased - An approval says something
 
 - Under the `human` posture an approval must carry a written body of at least twelve

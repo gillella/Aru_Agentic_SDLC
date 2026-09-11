@@ -250,6 +250,23 @@ is posted, the helper posts a newer failed run so the head cannot be merged by
 hand; re-run the helper. For break-glass, an administrator edits the ruleset,
 which the ruleset history records.
 
+### Which check gates a pull request
+
+Two workflows publish required checks. `aru-governed-pr` runs the pull request's own copy
+of its workflow and verifies the branch: lint, tests and the write boundary. `aru-merge-policy`
+runs the copy on the default branch, so a pull request cannot change what it does to itself,
+and re-checks the write boundary and the single closing-issue directive from the API.
+
+`aru-merge-policy` is required by its own job's check run, which attaches to the
+pull-request head even though the workflow runs against the base. It publishes no separate
+commit status; an earlier version did, on the mistaken belief that the check run landed on
+the base commit and could never be required.
+
+The workflow triggers on `pull_request_target` alone. Do not add `pull_request_review` to
+make it re-evaluate after an approval: GitHub runs the pull request's own copy of a
+workflow for that event, which would hand a change control of the check that judges it.
+Approval is enforced by `merge_pr.py`, the only path that submits a merge.
+
 ### Who may approve, and what to do when nobody can
 
 A repository declares its review posture in `.aru/review.json` on its default branch:
