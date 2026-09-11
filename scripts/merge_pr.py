@@ -68,6 +68,9 @@ def authority_refusal(pr: dict[str, Any], reviews: list[dict[str, Any]]) -> str 
         head=str(pr.get("headRefOid") or ""),
         reviews=reviews,
         policy=policy,
+        # Only the strict posture asks for a written judgement; the permissive postures
+        # are unchanged, so a project that wants speed does not inherit this.
+        require_judgement=policy.strict,
     )
 
 

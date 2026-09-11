@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased - An approval says something
+
+- Under the `human` posture an approval must carry a written body of at least twelve
+  characters, and the refusal names the missing judgement rather than reporting a generic
+  approval failure. The permissive postures are unchanged.
+- Twelve characters is stated and reasoned rather than tuned: it excludes the tokens typed
+  without looking and admits a short real sentence. It is a floor on effort. It does not
+  establish that the change was read, and the operating guide says so.
+- Corrects a claim left by the previous change: the enforcement register said the
+  base-branch workflow applied the posture refusal. It does not, because the trigger that
+  would let it re-evaluate after an approval runs the pull request's own copy of the
+  workflow. `merge_pr.py` is the only path that applies it.
+
+
 ## Unreleased - The scope contract is judged live
 
 - Promotion no longer stamps a `ready:<digest>` scope pin, and the merge gate no longer

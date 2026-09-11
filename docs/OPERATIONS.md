@@ -275,6 +275,16 @@ change: an agent holding a credential for a listed account is indistinguishable 
 owner at every API. Keep credentials for listed accounts away from agents; that is the
 control, not this gate.
 
+**An approval must say something.** Under `human`, an approval with no written body is
+refused, and the refusal says so rather than reporting a generic approval failure. The
+minimum is twelve characters: enough to exclude the tokens people type without looking,
+short enough to admit a real one-line judgement.
+
+Be clear about what that buys. It raises the floor on effort and leaves a record of what
+the approver believed they were approving. It does not establish that anyone read the
+change, and a reviewer determined to wave things through will write twelve characters. The
+permissive postures do not require it.
+
 **When no authorized reviewer is available.** Under `human` with nobody able to approve,
 nothing merges, including a revert. Do not resolve this by disabling branch protection:
 that is the practice this kernel exists to remove, and it leaves the repository unguarded
