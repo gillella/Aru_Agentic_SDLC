@@ -62,9 +62,9 @@ def test_installer_preserves_and_chains_a_user_owned_hook(push_repo, old_backup)
     custom.write_text(contents)
     custom.chmod(0o755)
     if old_backup:
-        (hooks / "pre-push.pre-aru").write_bytes(subprocess.check_output(
-            ["git", "show", "4393d3c:hooks/pre-push"], cwd=ROOT,
-        ))
+        (hooks / "pre-push.pre-aru").write_bytes(
+            (HISTORICAL_HOOKS / "4393d3c.pre-push").read_bytes()
+        )
     for _ in range(2):
         install(target)
         assert (hooks / "pre-push.pre-aru").read_text() == contents
@@ -79,7 +79,7 @@ def test_installer_refuses_ambiguous_custom_hooks_without_changes(push_repo, sta
     install(target)
     current = b"#!/usr/bin/env bash\necho custom\n"
     if state != "two-custom":
-        current = subprocess.check_output(["git", "show", "a1559da:hooks/pre-push"], cwd=ROOT)
+        current = (HISTORICAL_HOOKS / "a1559da.pre-push").read_bytes()
         guard = b'\nprintf "call\\n" >> hook-calls\n[[ $(wc -l < hook-calls) -lt 3 ]] || exit 73\n'
         current = current.replace(b"\n", guard, 1)
     (hooks / "pre-push").write_bytes(current)
