@@ -36,20 +36,25 @@ def test_operating_guidance_does_not_route_to_retired_surfaces():
         "multiple explicit agents",
         "batch mode",
         "Backlog recovery",
+        # The removed reviewer-policy machinery.
+        "--refresh-reviewer",
+        "--reviewer-status",
+        "--probe-reviewers",
+        "--recover-legacy",
+        "--coding-reviewer-unavailable",
+        "ARU_CODING_REVIEWERS",
+        "review-policy:timeout",
     )
     for path in OPERATING_GUIDANCE:
         content = text(path)
         assert all(name not in content for name in retired), path
 
 
-def test_reviewer_timer_is_configurable_not_hard_coded():
-    timing_sources = [
-        path
-        for path in OPERATING_GUIDANCE
-        if "15 minutes" in text(path) or "15-minute" in text(path)
-    ]
-    assert timing_sources == []
-    assert "configured timeout" in text(ROOT / "docs" / "KERNEL-CONTRACT.md")
+def test_review_is_one_approval_from_another_account():
+    for path in (ROOT / "AGENTS.md", ROOT / "docs" / "KERNEL-CONTRACT.md", ROOT / "templates" / "AGENTS.md"):
+        content = " ".join(text(path).split())
+        assert "account other than the" in content, path
+        assert "Tier 2-3" not in content, path
 
 
 def test_version_and_layer_truth_are_explicit():
@@ -65,7 +70,7 @@ def test_version_and_layer_truth_are_explicit():
     assert "aru-governed-pr" in enforcement
     assert "authenticated GitHub Actions App" in enforcement
     assert all(name in contract for name in ("Kernel", "External Driver", "Consumer policy"))
-    assert "Tier 0-1 changes do not wait for an authoritative review" in contract
+    assert "Every pull request, whatever it changes, needs one approval" in " ".join(contract.split())
 
 
 def test_active_release_and_freeze_guidance_agree():

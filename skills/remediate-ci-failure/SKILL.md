@@ -17,13 +17,8 @@ description: Repair a failing exact-head aru-governed-pr server check on an auth
    `.aru/verify.sh` retains framework checks. Change either only when its required
    check is itself wrong or incomplete; preserve working checks in older consumers.
 5. Commit and push. The workflow must run again on the new exact head.
-6. Wait for the fresh server check and, for a Tier 2-3 change, a fresh verdict
-   from the one assigned external or distinct coding-agent reviewer.
+6. Wait for the fresh server check and a fresh approval from another account;
+   the push dismissed the earlier one.
 
 Never dismiss a failing check, weaken `touches:`, or replace a risk-relevant
 consumer check merely to obtain green status.
-
-Retire Sourcery and CodeAnt. Prefer usable authenticated current-head CodeRabbit;
-otherwise immediately select an available independent coding reviewer through
-the governed refresh helper. A failed availability check does not wait for the
-completion timer. Preserve Tier 0–1 without authoritative-review waits.

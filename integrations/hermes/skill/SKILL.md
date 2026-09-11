@@ -99,83 +99,48 @@ The cheap `tick` precheck emits a bounded plan and a last-line JSON wake gate.
 `wakeAgent:false` means no Hermes reasoning or delivery is required. When you
 are awakened, run `driver.py --config CONFIG reconcile --project OWNER/REPO`;
 the precheck snapshot is advisory, so reconcile rereads current state.
-The precheck also registers or retires the canonical pending-review deadline
-timer before deciding whether to wake you, including while CI is pending or
-an external review is quietly waiting.
+A PR waiting for approval remains visible as a wait action and never wakes a
+review worker. The Driver does not launch reviewers or schedule review deadlines.
 
-Use returned actions to converge active PRs through the canonical CI,
-feedback, review, and merge helpers. Keep a waiting PR in its own author's
-lane. A worker's existence or a green check does not establish acceptance,
-authoritative approval, or deployment. Treat a live worker's intermediate
-push as unsettled until its owning process has finished.
-
-For `worker_retry_wait`, let the existing heartbeat retry after the returned
-deadline; do not launch an alternate worker or run remediation from this callback.
-Standard workers receive three unchanged attempts with 60/120-second backoff.
-For `worker_blocked` with `retry_exhausted:true`, report the operator-owned cause
-and retained work once. Only corrected underlying conditions plus an explicit
-operator `worker_retry_epoch` change, or fresh kernel action/PR/head progress,
-can renew that task. Never clear receipts, bump epochs automatically, or use
-Stop/Start to evade the bound. Permission and quota recovery retain their own
-stricter controls.
+Implementation, remediation and feedback workers keep their current owner,
+claim, write scope, retry limits and Stop fences. For `worker_retry_wait`, wait
+for the returned retry time. Standard workers get three unchanged attempts with
+60/120-second backoff. For an exhausted or blocked worker, report the
+retained work and operator-owned cause; never clear receipts or bump epochs
+automatically. Stop/Start does not renew an unchanged task's retry allowance.
 
 For a returned PR action, inspect the named PR and its current head, then use
 the matching canonical workflow: `check_ci.py` and `remediate-ci-failure` for
 failed CI; `fetch_pr_feedback.py` and `address-pr-feedback` for unresolved
-findings; `create_pr.py --reviewer-status --json` for current review authority;
+findings; inspect GitHub approvals on the latest commit;
 and `merge_pr.py --pr N --expected-head SHA` only when its gates are satisfied.
 Use the live helper's documented finalize path for already-merged PR close-out.
 The action is a request to inspect and converge, not evidence that a gate has
 passed. A PR closed without merging authorizes no merge finalization or
 capacity refill by itself. Do not invent helper switches from old examples.
 
-For `await-authoritative-review`, an external provider owns its review while
-its verified deadline continuation is pending. `reconcile` launches an assigned
-coding reviewer through the existing supervisor, in a detached exact-head
-review worktree. It returns `execution:queued` with a worker receipt, or an
-explicit `execution:blocked` owner, reason and next step. The supervisor records
-running and exited states; its existing completion event wakes this Driver.
-No separate generic reviewer or author worker may substitute for the assignment.
+For a picker `review` item or a wait with reason `awaiting approval by another
+GitHub account`, wait quietly. Every PR needs one approval on its latest commit
+from an account other than the PR author. Do not start a reviewer or submit an
+approval for the author. A simple launcher is planned separately.
 
-Reconcile performs due reviewer refresh under its existing coordination lock
-after rereading PR/head/sole authority, and calls only the canonical
-`create_pr.py` helper implementation. For a failed/lost coding worker it records
-one recovery attempt in that worker's receipt before passing the truthful
-unavailability reason to the helper. Only that helper selects authority:
-CodeRabbit first when usable, otherwise an available distinct coding reviewer;
-retired providers are never candidates. The same bounded activation dispatches
-the newly assigned coding reviewer. Do not run a second refresh from this
-callback. Unchanged failed recovery attempts require explicit operator
-reconciliation and retain their receipt; they are not blindly retried.
-Capacity/identity/permission blockers retain the heartbeat or explicit operator
-action as their next step. If this callback cannot execute an authorized
-action, explicitly name the required operator and action; a stopped Driver
-stays stopped. A denied launch never authorizes activation or another launcher.
-
-Worker exit is not approval. Reconcile reads the kernel's current-head verdict;
-valid approval returns to normal CI/merge/finalization, substantive defects to
-the implementation owner, and genuine execution exhaustion/unavailability to governed reviewer recovery.
-For opted-in quota work, unknown/insufficient admission waits on the same assigned
-reviewer. Bounded unknown checkpoints continue that assignment within the explicit
-time/attempt allowance; they never consume reviewer recovery or permission epochs.
-Report notes through normal output: the supervisor saves them outside source and
-injects prior context on continuation, without extra worker file grants. At the
-owned limit, report retained progress and required operator scope/budget inspection. A reviewer must never edit the code and approve it.
+Legacy review receipts are inert and cannot resume. Worker exit is not approval.
+For opted-in implementation quota checkpoints, report progress through normal
+output; the supervisor preserves notes outside source. At the configured limit,
+report retained progress and the required operator scope/budget inspection.
 
 The adapter may refill multiple verified free lanes in one activation,
 rechecking capacity and reservations between assignments. Promote only
 already-approved, eligible Backlog work through canonical helpers. Do not
 invent new scope to consume quota. Unknown capacity, unreadable authority,
 rate limiting, and unresolved dependencies are blockers, not free resources.
-Only an explicit author/reviewer unknown-mode allowance accepts quota uncertainty;
+Only an explicit author unknown-mode allowance accepts quota uncertainty;
 read `references/quota.md` for the limits. Never describe it as measured headroom.
 Avoid repeated full-board scans or unconditional model smoke tests. Use the
 available bounded snapshot and run substantive probes only when justified.
 
-Track coding and review workers through verified process/session completion.
-Send completion events through the same Driver event entrypoint. A review for
-a sensitive change follows the current kernel's provider and actor separation
-policy; this skill does not maintain a parallel review queue or authority.
+Track implementation and remediation workers through verified process/session
+completion. Send completion events through the same Driver event entrypoint.
 After completing returned convergence actions, one fresh bounded reconcile
 may refill newly freed capacity. If no action is available, return; the
 heartbeat and genuine events own future continuation.
@@ -208,13 +173,12 @@ source test suite as an activated fleet.
 `personas_required: true` explicitly opts a project into the in-progress
 integration and requires `personas_source_digest` and `personas_policy_digest`.
 Missing task classification, missing scope, broken evidence and conflicting
-review identity must refuse resolution. Projects without this explicit opt-in
+author identity must refuse resolution. Projects without this explicit opt-in
 continue their existing legacy lane behavior; that path is outside persona
 enforcement. Package importability alone never enables the integration.
 
 The current source still needs complete account selection and reservation,
-exact authenticated probes, child-spawn revalidation, trusted review metadata
-and operator task wiring. Do not enable this incomplete path in live projects
+exact authenticated probes, child-spawn revalidation, operator task wiring. Do not enable this incomplete path in live projects
 or install it as a completed #631 rollout. No `driver.py launch` operation has
 been delivered. Use the installed Driver's `--help` for supported operations.
 

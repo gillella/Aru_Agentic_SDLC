@@ -22,9 +22,9 @@ Author grants cover the App-bound issue read, optional current PR reads, Git
 identity/status/diff, the configured Python versions, exact pytest and Ruff
 commands, `git fetch origin`, staging only live touches, a fixed issue commit
 message, pushing only `HEAD:refs/heads/<claimed-branch>`, and one canonical
-`create_pr.py --issue ... --author-family claude-code` invocation. The PR body
+`create_pr.py --issue ...` invocation. The PR body
 scratch file `.aru-worker-body.md` stays untracked and contains no closing line;
-the helper appends it. No issue claiming, reviewer assignment, merge, release,
+the helper appends it. No issue claiming, merge, release,
 deployment or arbitrary helper execution is granted. Exact commands appear in
 the worker prompt; extra flags/alternate spellings may be denied deliberately.
 
@@ -45,18 +45,13 @@ installed 2.1.266 source supports creation through Edit; see the
 [bounded review evidence](REMEDIATION-638.md). Live harness behavior remains an
 operator gate.
 
-Reviewer grants substitute exact PR review submission for author edits,
-commit/push and PR creation. Reviewers may write the attestation scratch file,
-but have no source-edit grant. Their authenticated actor is checked using
-`gh api user --jq .login`: personal reviewer bindings drop the author App runner,
-while App reviewer bindings use the configured runner. A mismatched actor must
-stop. Assignment/head/author separation remains the existing kernel review
-binding and prompt contract; a CLI PR-review command is not an atomic head lock.
+The Driver grants no review submission permissions. Approval happens on GitHub
+from another account; the Driver waits for it.
 
 **CLI permissions are not OS isolation.** `--add-dir` enables canonical directory
 access; it does not mount it read-only. Built-in read-only commands and file
 access defaults still exist. Canonical-read-only, no credentials/other projects,
-reviewer non-authorship, and no production/merge/release are prompt/kernel policy,
+and no production/merge/release are prompt/kernel policy,
 not a complete filesystem or subprocess sandbox. Exact tests and the canonical
 helper execute trusted code and subprocesses; hooks still run on Git commit/push.
 These grants do not make hostile test code safe. Managed Claude settings still
@@ -89,7 +84,7 @@ A supervisor-proven quota time bound with empty Claude output or valid unfinishe
 Codex events is a bounded checkpoint, not a permission revision reason. The
 supervisor saves checkpoint notes from stdout outside source and injects prior
 notes into continuation prompts; no checkpoint Read/Edit or sandbox grants are
-added, including for independent reviewers.
+added.
 
 Receipts retain at most 8 KiB of serialized result observation details; larger
 observations retain only outcome/blocker flags and a pointer to `result_path`.
@@ -112,8 +107,6 @@ repeat. Changed PR/head or an explicitly approved lane/policy revision (includin
 `recovery_epoch`) allows reevaluation, followed by normal live claim/worktree
 validation. Events, elapsed time and Stop/Start do not erase the blocker. Keep
 all receipts. Do not repeatedly bump the epoch to conceal an unchanged failure.
-Existing review recovery retains its single bounded authority-refresh event;
-only a changed policy permits a new attempt at an unchanged reviewer assignment.
 Process success never supplies independent review or governed completion.
 
 A worker fenced by Stop before child creation has no result to classify. It

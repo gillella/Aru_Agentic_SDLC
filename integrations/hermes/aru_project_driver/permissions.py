@@ -56,10 +56,7 @@ def enabled(config, repo: str, identity: str) -> bool:
     return bool(policy and identity in policy["lanes"])
 
 def fingerprint(config, repo: str, identity: str) -> str:
-    from .reviewers import inventory
-    reviewers = inventory(config, repo)
     return digest({"compiler": COMPILER, "policy": config.project(repo).get("worker_permissions"),
-                   **({"coding_reviewers": reviewers} if reviewers is not None else {}),
                    "repo_dir": config.project(repo)["repo_dir"], "kernel": str(config.kernel_root),
                    "lane": config.lane(repo, identity)})
 
@@ -78,19 +75,10 @@ def _task(config, record: dict, adapter, run) -> dict:
     root = Path(safe_path(config.project(repo)["repo_dir"]))
     if not directory.is_dir() or not directory.is_relative_to(root / ".worktrees"):
         raise DriverError("worker permission scope requires the claimed isolated worktree; restore it before retry")
-    reviewing = record.get("kind") == "review"
-    if reviewing:
-        binding = adapter.review_binding(record["pr"], record["review"])
-        if (binding.get("reviewer") != identity or binding.get("author") == identity
-                or binding.get("author_actor") == binding.get("reviewer_actor")
-                or adapter.review_worktree(binding) != str(directory)):
-            raise DriverError("worker permission scope requires a distinct current-head reviewer")
-        scope = []
-    else:
-        live = adapter.revalidate(issue, agent=identity)
-        scope = live["touches"]
-        if not scope:
-            raise DriverError("worker permission scope requires live touches")
+    live = adapter.revalidate(issue, agent=identity)
+    scope = live["touches"]
+    if not scope:
+        raise DriverError("worker permission scope requires live touches")
     context = run(["git", "rev-parse", "--show-toplevel", "--git-common-dir"], directory)
     expected = [str(directory), str(root / ".git")]
     if context.returncode or context.stdout.splitlines() != expected:
@@ -99,7 +87,7 @@ def _task(config, record: dict, adapter, run) -> dict:
     if branch_result.returncode:
         raise DriverError("worker branch context is unreadable")
     branch = branch_result.stdout.strip()
-    if not reviewing and (not re.fullmatch(r"(?:fix|feat|chore|docs|refactor|test)/issue-" + str(issue) + r"-[a-z0-9-]+", branch)):
+    if (not re.fullmatch(r"(?:fix|feat|chore|docs|refactor|test)/issue-" + str(issue) + r"-[a-z0-9-]+", branch)):
         raise DriverError("worker permission scope requires the claimed issue feature branch; never main/master")
     for path in scope:
         if (not re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*(?:/\*\*)?", path)
@@ -115,40 +103,31 @@ def compile_policy(config, record: dict, adapter, run, *, preflight: bool = Fals
     policy = config.project(repo)["worker_permissions"]
     directory, kernel = task["worktree"], str(config.kernel_root)
     py, test_py = policy["python"], policy["test_python"]
-    reviewing = record.get("kind") == "review"
-    gh = ["gh"] if reviewing and not record["review"]["reviewer_actor"].endswith("[bot]") else [
-        policy["app_runner"], "--repo", repo, "--", "gh"]
+    gh = [policy["app_runner"], "--repo", repo, "--", "gh"]
     reads = [[py, "--version"], [test_py, "--version"], ["git", "config", "user.name"], ["git", "config", "user.email"],
              ["git", "branch", "--show-current"], ["git", "rev-parse", "HEAD"],
              ["git", "status", "--short"], ["git", "diff"], ["git", "diff", "--stat"],
              [*gh, "issue", "view", str(issue), "--repo", repo, "--json", "number,body,labels,state"]]
     if record.get("pr"):
         reads += [[*gh, "pr", op, str(record["pr"]), "--repo", repo] for op in ("view", "diff", "checks")]
-    if reviewing:
-        reads += [[*gh, "api", "user", "--jq", ".login"]]
     commands = list(reads)
     # Scratch body stays untracked in the worktree; stage only declared touches.
     body = directory + "/.aru-worker-body.md"
     if not preflight:
         commands += [[test_py, "-m", "pytest", "-q"], [test_py, "-m", "ruff", "check", "."]]
-        if reviewing:
-            commands += [[*gh, "pr", "review", str(record["pr"]), "--repo", repo,
-                          verdict, "--body-file", body] for verdict in ("--approve", "--request-changes")]
-        else:
-            commands += [["git", "fetch", "origin"],
-                         ["git", "add", "--", *[p.removesuffix("/**") for p in task["touches"]]],
-                         ["git", "commit", "-m", f"Fix #{issue}"],
-                         ["git", "push", "origin", f"HEAD:refs/heads/{task['branch']}"],
-                         [py, kernel + "/scripts/create_pr.py", "--issue", str(issue), "--agent", identity,
-                          "--author-family", "claude-code", "--title", f"Fix #{issue}", "--body-file", body]]
+        commands += [["git", "fetch", "origin"],
+                     ["git", "add", "--", *[p.removesuffix("/**") for p in task["touches"]]],
+                     ["git", "commit", "-m", f"Fix #{issue}"],
+                     ["git", "push", "origin", f"HEAD:refs/heads/{task['branch']}"],
+                     [py, kernel + "/scripts/create_pr.py", "--issue", str(issue), "--agent", identity,
+                      "--title", f"Fix #{issue}", "--body-file", body]]
     allow = [f"Bash({shlex.join(c)})" for c in commands]
     allow += [f"Read(/{directory}/**)", f"Read(/{kernel}/AGENTS.md)",
               f"Read(/{kernel}/docs/KERNEL-CONTRACT.md)", f"Read(/{kernel}/skills/**)",
               f"Read(/{kernel}/scripts/**)"]
     if not preflight:
         allow += [f"Edit(/{body})"]
-        if not reviewing:
-            allow += [f"Edit(/{directory}/{p})" for p in task["touches"]]
+        allow += [f"Edit(/{directory}/{p})" for p in task["touches"]]
     lane = config.lane(repo, identity)
     argv = lane["command"][:5] + ["--permission-mode", "dontAsk", "--permission-prompts", "none",
             "--setting-sources", "", "--strict-mcp-config", "--tools", "Bash,Read,Glob,Grep,Edit,Write",

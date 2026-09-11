@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 
 import merge_pr
+
+HEAD = "a" * 40
 
 
 def base_pr(**overrides):
@@ -14,29 +14,35 @@ def base_pr(**overrides):
         "createdAt": "2026-08-27T09:00:00Z",
         "state": "OPEN",
         "isDraft": False,
-        "headRefOid": "a" * 40,
+        "headRefOid": HEAD,
         "headRefName": "feat/issue-7-change",
         "baseRefName": "main",
         "baseRefOid": "b" * 40,
         "mergeable": "MERGEABLE",
         "mergeStateStatus": "CLEAN",
         "reviewDecision": None,
-        "labels": [{"name": "review:coderabbit"}],
-        "statusCheckRollup": [{"context": "CodeRabbit", "state": "SUCCESS"}],
+        "author": {"login": "writer"},
+        "labels": [],
+        "statusCheckRollup": [],
     }
     pr.update(overrides)
     return pr
+
+
+def approval(**overrides):
+    review = {"id": 1, "user": {"login": "reviewer"}, "commit_id": HEAD, "state": "APPROVED"}
+    review.update(overrides)
+    return review
 
 
 def install_happy_gate(monkeypatch, pr=None):
     pr = pr or base_pr()
     monkeypatch.setattr(merge_pr, "pull_request", lambda _number: pr)
     monkeypatch.setattr(merge_pr, "pull_changed_paths", lambda _number: ["scripts/merge_pr.py"])
-    monkeypatch.setattr(merge_pr, "review_risk_tier", lambda _paths: 2)
     monkeypatch.setattr(merge_pr, "issue_gate", lambda *_args: [{"issue": 7, "criteria": 1}])
-    monkeypatch.setattr(merge_pr, "ci_verdict", lambda _n: {"head": "a" * 40, "state": "success", "checks": ["Verify"]})
+    monkeypatch.setattr(merge_pr, "ci_verdict", lambda _n: {"head": HEAD, "state": "success", "checks": ["Verify"]})
     monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _number: [])
-    monkeypatch.setattr(merge_pr, "exact_head_review", lambda *_args: True)
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [approval()])
     monkeypatch.setattr(merge_pr, "base_snapshot", lambda _pr: "b" * 40)
     monkeypatch.setattr(merge_pr, "merge_queue_snapshot", lambda *_args: {"configured": False, "entry": None, "auto_merge": None})
     return pr
@@ -44,8 +50,8 @@ def install_happy_gate(monkeypatch, pr=None):
 
 def test_evaluate_accepts_exact_head_only(monkeypatch):
     install_happy_gate(monkeypatch)
-    gates = merge_pr.evaluate(10, "a" * 40)
-    assert gates["reviewer"] == "coderabbit"
+    gates = merge_pr.evaluate(10, HEAD)
+    assert gates["approved"] is True
     assert gates["base_sha"] == "b" * 40
     with pytest.raises(merge_pr.KernelError, match="expected head"):
         merge_pr.evaluate(10, "c" * 40)
@@ -55,14 +61,14 @@ def test_evaluate_blocks_unresolved_feedback(monkeypatch):
     install_happy_gate(monkeypatch)
     monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _number: [{"body": "fix"}])
     with pytest.raises(merge_pr.KernelError, match="unresolved"):
-        merge_pr.evaluate(10, "a" * 40)
+        merge_pr.evaluate(10, HEAD)
 
 
-def test_evaluate_blocks_missing_review(monkeypatch):
+def test_evaluate_blocks_missing_approval(monkeypatch):
     install_happy_gate(monkeypatch)
-    monkeypatch.setattr(merge_pr, "exact_head_review", lambda *_args: False)
-    with pytest.raises(merge_pr.KernelError, match="exact-head verdict"):
-        merge_pr.evaluate(10, "a" * 40)
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [])
+    with pytest.raises(merge_pr.KernelError, match="approval of the exact head"):
+        merge_pr.evaluate(10, HEAD)
 
 
 def test_evaluate_blocks_missing_required_github_check(monkeypatch):
@@ -70,20 +76,19 @@ def test_evaluate_blocks_missing_required_github_check(monkeypatch):
     monkeypatch.setattr(
         merge_pr,
         "ci_verdict",
-        lambda _number: {"head": "a" * 40, "state": "pending", "checks": []},
+        lambda _number: {"head": HEAD, "state": "pending", "checks": []},
     )
     with pytest.raises(merge_pr.KernelError, match="required GitHub checks"):
-        merge_pr.evaluate(10, "a" * 40)
+        merge_pr.evaluate(10, HEAD)
 
 
 def test_merge_rechecks_head_and_base(monkeypatch, tmp_path):
     pr = install_happy_gate(monkeypatch)
     gates = {
-        "head": "a" * 40,
+        "head": HEAD,
         "base_sha": "b" * 40,
         "base": "main",
         "changed_paths": ["scripts/merge_pr.py"],
-        "risk_tier": 2, "reviewer": "coderabbit",
         "issues": [{"issue": 7, "criteria": 1}],
         "merge_queue": False,
         "queue_entry": None,
@@ -125,12 +130,12 @@ def test_merge_rechecks_head_and_base(monkeypatch, tmp_path):
             "issues": [7],
         },
     )
-    result = merge_pr.merge(10, "a" * 40)
+    result = merge_pr.merge(10, HEAD)
     assert result["merged"] is True
     assert worktree.is_dir()
     assert len(evaluations) == 2
     assert "--match-head-commit" in calls[0]
-    assert calls[-1] == ["finalize", 10, "a" * 40]
+    assert calls[-1] == ["finalize", 10, HEAD]
 
 
 def test_immediate_merge_does_not_close_out_when_post_merge_evidence_drifts(
@@ -170,66 +175,51 @@ def test_immediate_merge_does_not_close_out_when_post_merge_evidence_drifts(
     )
 
     with pytest.raises(merge_pr.KernelError, match="post-merge authority changed"):
-        merge_pr.merge(10, "a" * 40)
+        merge_pr.merge(10, HEAD)
 
 
-def test_review_label_must_be_unique():
-    with pytest.raises(merge_pr.KernelError, match="exactly one"):
-        merge_pr.assigned_service(
-            base_pr(labels=[{"name": "review:coderabbit"}, {"name": "review:sourcery"}])
-        )
+@pytest.mark.parametrize("reviews,approved", [
+    ([approval()], True),
+    ([], False),
+    # Approving an earlier commit does not carry to a new head.
+    ([approval(commit_id="c" * 40)], False),
+    ([approval(user={"login": "writer"})], False),
+    # Each account's latest decisive review counts; comments change nothing.
+    ([approval(), approval(id=2, state="COMMENTED")], True),
+    ([approval(), approval(id=2, state="CHANGES_REQUESTED")], False),
+    ([approval(), approval(id=2, state="DISMISSED")], False),
+    ([approval(state="CHANGES_REQUESTED"), approval(id=2)], True),
+    # Logins group by account, so casing cannot keep a superseded approval alive.
+    ([approval(user={"login": "Reviewer"}), approval(id=2, state="DISMISSED")], False),
+    ([approval(user={"login": "Writer"})], False),
+])
+def test_only_a_non_author_approval_of_the_exact_head_counts(reviews, approved):
+    assert merge_pr.approved_at_head(base_pr(), reviews) is approved
 
 
-def test_canonical_github_app_author_cannot_satisfy_coding_review_submission():
-    pr = base_pr(
-        number=88,
-        body="Closes #508",
-        headRefOid="a" * 40,
-        labels=[
-            {"name": "review:claude-code"},
-            {"name": "reviewer:claude-code-sub-1"},
-            {"name": "reviewer-actor:aru-code-factory-gillella[bot]"},
-            {"name": "author:codex-author"},
-            {"name": "author-family:openai-codex"},
-        ],
-        author={"login": "app/aru-code-factory-gillella"},
-        statusCheckRollup=[],
-    )
-    payload = {
-        "head": "a" * 40,
-        "reviewer": "claude-code-sub-1",
-        "family": "claude-code",
-        "submitted_by": "aru-code-factory-gillella[bot]",
-        "verdict": "APPROVE",
-        "summary": "I reviewed the issue contract, exact diff, surrounding code, and failure paths independently.",
-        "verification": ["pytest tests/test_merge_gate.py -q completed successfully"],
-        "findings": [
-            {
-                "severity": "low",
-                "file": "scripts/merge_pr.py",
-                "line": 300,
-                "summary": "The resolved naming note does not block this exact head.",
-                "resolved": True,
-            }
-        ],
-        "issues": [508],
-        "acceptance_criteria_reviewed": True,
-        "diff_reviewed": True,
-        "surrounding_code_reviewed": True,
-    }
-    review = {
-        "id": 1,
-        "commit_id": "a" * 40,
-        "state": "APPROVED",
-        "body": (
-            "Substantive independent review.\n\n"
-            f"<!-- aru-coding-review:v1 {json.dumps(payload, sort_keys=True)} -->"
-        ),
-        "user": {"login": "aru-code-factory-gillella[bot]", "type": "Bot"},
-    }
-    assert (
-        merge_pr.successful_coding_agent_review(pr, [review], "claude-code", [508]) is False
-    )
+def test_github_app_author_cannot_approve_through_its_bot_login():
+    pr = base_pr(author={"login": "app/aru-code-factory-gillella"})
+    bot = approval(user={"login": "aru-code-factory-gillella[bot]"})
+    assert merge_pr.approved_at_head(pr, [bot]) is False
+    assert merge_pr.approved_at_head(pr, [bot, approval(id=2)]) is True
+
+
+@pytest.mark.parametrize("pr,reviews", [
+    (base_pr(author=None), [approval()]),
+    (base_pr(author="writer"), [approval()]),
+    (base_pr(author={"login": "   "}), [approval()]),
+    (base_pr(), [None]),
+    (base_pr(), [{"id": 1, "state": "APPROVED", "commit_id": HEAD}]),
+    # Blank or non-string reviewer identities are malformed, not "another account".
+    (base_pr(), [approval(user={"login": ""})]),
+    (base_pr(), [approval(user={"login": "   "})]),
+    (base_pr(), [approval(user={"login": 42})]),
+    (base_pr(), [approval(user={"login": {"name": "reviewer"}})]),
+    (base_pr(), [approval(state="COMMENTED", user={"login": None})]),
+])
+def test_unreadable_author_or_review_evidence_fails_closed(pr, reviews):
+    with pytest.raises(merge_pr.KernelError):
+        merge_pr.approved_at_head(pr, reviews)
 
 
 @pytest.mark.parametrize("ci_state", ["success", "pending", "failure", "untrusted"])
@@ -238,7 +228,7 @@ def test_provenance_aware_duplicate_ci_does_not_bypass_review_or_merge(monkeypat
     from test_ci_and_feedback import PR, check_run, workflow_run, install_checks
     install_happy_gate(monkeypatch, base_pr(**PR))
     monkeypatch.setattr(merge_pr, "ci_verdict", check_ci.ci_verdict)
-    monkeypatch.setattr(merge_pr, "exact_head_review", lambda *_a: False)
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _n: [])
     old = workflow_run(10, created="2026-09-09T11:01:14Z")
     current = workflow_run(state="success" if ci_state == "untrusted" else ci_state)
     checks = [check_run("aru-governed-pr", run_id=10), check_run("aru-governed-pr",
@@ -246,49 +236,6 @@ def test_provenance_aware_duplicate_ci_does_not_bypass_review_or_merge(monkeypat
     if ci_state == "untrusted":
         checks[0]["app"]["id"] = 999
     install_checks(monkeypatch, checks, workflows=[old, current])
-    reason = "exact-head verdict" if ci_state == "success" else "untrusted source" if ci_state == "untrusted" else "required GitHub checks"
+    reason = "approval of the exact head" if ci_state == "success" else "untrusted source" if ci_state == "untrusted" else "required GitHub checks"
     with pytest.raises(merge_pr.KernelError, match=reason):
-        merge_pr.evaluate(3, "a" * 40)
-
-
-PAUSED_SUMMARY = "## Walkthrough\n<!-- review paused by coderabbit.ai -->\n> ## Reviews paused\n"
-
-
-def install_coderabbit_evidence(monkeypatch, *, review_commit=None, approved=True, body=PAUSED_SUMMARY):
-    """PR #655: CodeRabbit approved the head, then edited "Reviews paused" into its summary."""
-    pr = base_pr(createdAt="2026-09-11T00:43:20Z")
-    reviews = [{"id": 1, "state": "APPROVED" if approved else "COMMENTED", "body": "",
-                "commit_id": review_commit or pr["headRefOid"], "submitted_at": "2026-09-11T00:44:54Z",
-                "user": {"login": "coderabbitai[bot]", "type": "Bot"}}]
-    comments = [{"id": 2, "created_at": "2026-09-11T00:43:40Z", "updated_at": "2026-09-11T00:48:05Z",
-                 "body": body, "user": {"login": "coderabbitai[bot]", "type": "Bot"}}]
-    events = [{"event": "labeled", "label": {"name": "review:coderabbit"}, "created_at": "2026-09-11T00:43:26Z"}]
-    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _n: reviews)
-    monkeypatch.setattr(merge_pr, "pull_comments", lambda _n: comments)
-    monkeypatch.setattr(merge_pr, "pull_events", lambda _n: events)
-    monkeypatch.setattr(merge_pr, "pull_review_checks", lambda _head: [])
-    return pr
-
-
-def test_later_pause_notice_does_not_retract_an_exact_head_approval(monkeypatch):
-    import review_evidence
-
-    pr = install_coderabbit_evidence(monkeypatch)
-    since = review_evidence.authority_assigned_at(pr, merge_pr.pull_events(655), "coderabbit")
-    # Reviewer refresh still reads the pause as unavailability; only the verdict stands.
-    assert review_evidence.external_state(
-        "coderabbit", reviews=merge_pr.pull_reviews(655), comments=merge_pr.pull_comments(655),
-        checks=[], head=pr["headRefOid"], since=since,
-    ) == review_evidence.UNAVAILABLE
-    assert merge_pr.exact_head_review(pr, 655, "coderabbit") is True
-
-
-@pytest.mark.parametrize("review_commit, approved", [("b" * 40, True), (None, False)])
-def test_pause_notice_still_blocks_without_a_current_head_approval(monkeypatch, review_commit, approved):
-    pr = install_coderabbit_evidence(monkeypatch, review_commit=review_commit, approved=approved)
-    assert merge_pr.exact_head_review(pr, 655, "coderabbit") is False
-
-
-def test_pause_notice_with_another_unavailability_signal_still_retracts(monkeypatch):
-    pr = install_coderabbit_evidence(monkeypatch, body=PAUSED_SUMMARY + "\nRate limit exceeded.\n")
-    assert merge_pr.exact_head_review(pr, 655, "coderabbit") is False
+        merge_pr.evaluate(3, HEAD)

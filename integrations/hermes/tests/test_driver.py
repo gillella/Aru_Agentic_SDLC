@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import json
-import fcntl
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from aru_project_driver import driver, execution, kernel, scheduler
+from aru_project_driver import driver, kernel, scheduler
 from aru_project_driver.config import Config, DriverError
-from aru_project_driver.state import State, write_json
+from aru_project_driver.state import State
 
 
 @pytest.fixture
@@ -322,53 +320,6 @@ def test_generated_environment_bakes_each_directory_once(fake_gh, tmp_path, monk
     monkeypatch.setattr(kernel, "GH_LOCATIONS", ("/usr/bin", "/usr/local/bin"))
     entries, gh = scheduler._executable_environment()
     assert gh is None and entries == ["/usr/bin", "/usr/local/bin", "/bin", "/usr/sbin", "/sbin"]
-
-
-@pytest.mark.parametrize("gate", ["valid", "stale", "denied", "completed", "stopped", "lane-family", "receipt-head"])
-def test_review_child_revalidates_before_actual_execution_and_uses_completion_wake(config, monkeypatch, gate):
-    state = State(config.state_dir)
-    data = state.project("owner/repo")
-    data["enabled"] = gate != "stopped"
-    state.save("owner/repo", data)
-    worktree = Path(config.project("owner/repo")["repo_dir"]) / ".worktrees" / "review-pr-9"
-    worktree.mkdir(parents=True)
-    binding = {"repo": "owner/repo", "pr": 9, "head": "a" * 40, "issue": 1,
-               "reviewer": "agent-one", "authority": "openai-codex", "reviewer_actor": "review-bot",
-               "author": "writer", "author_actor": "author-user", "verdict": None}
-    prompt = execution.prompt_for("owner/repo", 1, "agent-one", config.kernel_root,
-                                  str(worktree), "review", 9, binding["head"], binding)
-    assert "Review only: do not edit source" in prompt
-    assert "before submission" in prompt and "review-bot" in prompt and binding["head"] in prompt
-    capacity = state.capacity_path("account-one")
-    capacity.parent.mkdir(parents=True)
-    descriptor = os.open(capacity, os.O_CREAT | os.O_RDWR, 0o600)
-    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    record = {"id": "review-worker", "repo": "owner/repo", "agent": "agent-one", "issue": 1,
-              "capacity_key": "account-one", "state": "launching", "started_at": 1,
-              "worktree": str(worktree), "kind": "review", "pr": 9, "head": binding["head"],
-              "review": binding, "prompt": prompt}
-    if gate == "lane-family":
-        config.lanes["agent-one"]["family"] = "claude-code"
-    elif gate == "receipt-head":
-        record["head"] = "b" * 40
-    write_json(state.worker_path(record["id"]), record)
-    reads, wakes = [], []
-    def current(number, expected):
-        reads.append((number, expected))
-        if gate in {"stale", "denied"}:
-            raise kernel.KernelAdapterError("head changed" if gate == "stale" else "access denied")
-        return {**binding, "verdict": "APPROVE" if gate == "completed" else None}
-    monkeypatch.setattr(execution, "KernelAdapter", lambda *args: SimpleNamespace(
-        review_binding=current, review_worktree=lambda binding: str(worktree)))
-    monkeypatch.setattr(scheduler, "schedule_wake", lambda *args, **kwargs: wakes.append(kwargs))
-    result = execution.worker_main(config, record["id"], descriptor)
-    receipt = state.worker(record["id"])
-    assert result == (0 if gate == "valid" else 1)
-    assert ("child_pid" in receipt) is (gate == "valid")
-    assert receipt["state"] == "exited" and receipt["review"]["verdict"] is None
-    assert not state.capacity_busy("account-one")
-    assert len(wakes) == (0 if gate == "stopped" else 1)
-    assert len(reads) == (0 if gate in {"stopped", "lane-family", "receipt-head"} else 1)
 
 
 def _lock_holder(path):

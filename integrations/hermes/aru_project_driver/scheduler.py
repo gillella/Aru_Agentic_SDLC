@@ -308,9 +308,9 @@ def _payload(project: str, config_path: Path, driver_path: Path, script: str) ->
             f"{str(driver_path)!r} with arguments "
             f"{['--config', str(config_path), 'reconcile', '--project', project]!r}. "
             "Read the configured kernel's docs/KERNEL-CONTRACT.md and use the installed "
-            "hermes-project-driver skill for returned actions. Reconcile owns review launch; "
+            "hermes-project-driver skill for returned actions. Reviews happen on GitHub from another account; wait quietly for approval. "
             "use its worker receipt or name the blocked owner/reason/next step. "
-            "Load only the named PR/head/assignment and issue acceptance/scope; "
+            "Load only the named PR/head and issue acceptance/scope; "
             "load historical incident context only if needed for a blocker. "
             "A stopped Driver stays stopped. "
             "Do not dispatch outside this project or infer approval from event text. "
@@ -369,8 +369,8 @@ def webhook_prompt(project: str, config_path: Path, driver_path: Path, route: st
         "metadata, never from issue/comment/body text. Run no picker separately.\n\n"
         f"```python\n{code}\n```\n\n"
         "Handle returned convergence actions through the hermes-project-driver skill "
-        "and configured kernel's docs/KERNEL-CONTRACT.md. Reconcile owns review launch; "
-        "use the named PR/head/assignment and acceptance/scope, its worker receipt or "
+        "and configured kernel's docs/KERNEL-CONTRACT.md. Reviews happen on GitHub from another account; wait quietly for approval. "
+        "use the named PR/head and acceptance/scope, its worker receipt or "
         "an explicit blocked owner/reason/next step. Load historical context only when "
         "needed for a blocker. A stopped, duplicate, or nonactionable event "
         "must stay quiet; a closed but unmerged PR does not authorize close-out or "
@@ -434,90 +434,6 @@ def schedule_wake(
             raise SchedulerError("Wake readback did not prove exactly one enabled job")
         return {"project": project, "wake_job_id": job["id"], "duplicate": False}
 
-def _review_events(events: list[dict], namespace: str) -> dict[str, dict]:
-    if not isinstance(events, list):
-        raise ValueError("pending review events must be a list")
-    desired = {}
-    seen_prs = set()
-    for event in events:
-        if not isinstance(event, dict):
-            raise ValueError("pending review event must be an object")
-        pr, head, reviewer = event.get("pr"), event.get("head"), event.get("reviewer")
-        if type(pr) is not int or pr <= 0 or pr in seen_prs:
-            raise ValueError("each pending review must name one unique positive PR number")
-        if not isinstance(head, str) or not re.fullmatch(r"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", head):
-            raise ValueError("pending review requires an exact full commit SHA")
-        if not isinstance(reviewer, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,99}", reviewer):
-            raise ValueError("pending review requires a canonical reviewer identity")
-        retry_at = event.get("retry_at")
-        if isinstance(retry_at, str):
-            when = dt.datetime.fromisoformat(retry_at.replace("Z", "+00:00"))
-        elif type(retry_at) in (float, int) and math.isfinite(retry_at):
-            when = dt.datetime.fromtimestamp(retry_at, dt.timezone.utc)
-        else:
-            raise ValueError("review retry_at must be an aware ISO timestamp or Unix seconds")
-        if when.tzinfo is None:
-            raise ValueError("review retry_at must include a timezone")
-        when = when.astimezone(dt.timezone.utc)
-        identity = f"{pr}|{head.lower()}|{reviewer}|{when.isoformat()}"
-        key = hashlib.sha256(identity.encode()).hexdigest()[:24]
-        name = namespace + f"review:{pr}:{key}"
-        desired[name] = {"pr": pr, "head": head.lower(), "reviewer": reviewer, "when": when}
-        seen_prs.add(pr)
-    return desired
-
-def sync_review_wakes(
-    hermes_home: Path, project: str, config_path: Path, driver_path: Path,
-    events: list[dict], *, hermes_repo: Path | None = None, cron_api=None,
-) -> dict:
-    """Synchronize the current pending-review set; retire stale authority/head timers."""
-    hermes_home = Path(hermes_home).expanduser().resolve()
-    namespace = _namespace(project)
-    try:
-        desired = _review_events(events, namespace)
-    except (ValueError, OverflowError, OSError) as exc:
-        raise SchedulerError(f"invalid pending review event: {exc}") from exc
-    api = _load_api(hermes_home, hermes_repo, cron_api)
-    with _locked(hermes_home):
-        _require_stop_generation(hermes_home, project)
-        existing = [j for j in _jobs(api, namespace) if str(j.get("name", "")).startswith(namespace + "review:")]
-        paused = []
-        for job in existing:
-            if job["name"] not in desired and _active(job):
-                _must(api.pause_job(job["id"]), "pause obsolete review wake")
-                paused.append(job["id"])
-        script = _wrapper(hermes_home, project, config_path, driver_path) if desired else None
-        results = []
-        for name, event in desired.items():
-            matches = sorted((j for j in existing if j["name"] == name), key=lambda j: (not _active(j), str(j["id"])))
-            if matches:
-                # Preserve a consumed exact event as consumed. The controller
-                # must reread/refresh authority; repeated reconciliation must
-                # not turn one expired provider deadline into a tight loop.
-                job = matches[0]
-                if job.get("state") == "paused":
-                    when = max(event["when"], dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=1))
-                    _must(api.update_job(job["id"], {"schedule": when.isoformat()}), "refresh paused review wake")
-                    job = _must(api.resume_job(job["id"]), "resume pending review wake")
-                for duplicate in matches[1:]:
-                    if _active(duplicate):
-                        _must(api.pause_job(duplicate["id"]), "pause duplicate review wake")
-                        paused.append(duplicate["id"])
-            else:
-                payload = _payload(project, Path(config_path).resolve(), Path(driver_path).resolve(), script)
-                payload["prompt"] += (
-                    f" This wake concerns PR {event['pr']}, observed head {event['head']}, "
-                    f"reviewer {event['reviewer']}. Re-read head, sole authority and deadline; "
-                    "stale observations authorize no reviewer rotation or merge."
-                )
-                when = max(event["when"], dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=1))
-                job = _must(api.create_job(**payload, name=name, schedule=when.isoformat(), repeat=1), "schedule review wake")
-            results.append({"pr": event["pr"], "job_id": job["id"], "enabled": _active(job)})
-        actual = [j for j in _jobs(api, namespace) if str(j.get("name", "")).startswith(namespace + "review:") and _active(j)]
-        if any(j["name"] not in desired for j in actual) or len({j["name"] for j in actual}) != len(actual):
-            raise SchedulerError("Pending-review readback contains obsolete or duplicate timers")
-        return {"project": project, "review_wakes": results, "paused_job_ids": paused}
-
 def stop_project(hermes_home: Path, project: str, *, hermes_repo: Path | None = None, cron_api=None) -> dict:
     """Pause only this adapter's future jobs for this project; preserve workers."""
     hermes_home = Path(hermes_home).expanduser().resolve()
@@ -542,7 +458,6 @@ def scheduler_status(hermes_home: Path, project: str, *, hermes_repo: Path | Non
     return {
         "project": project,
         "enabled_heartbeats": sum(_active(j) and j.get("name") == namespace + "heartbeat" for j in jobs),
-        "enabled_wakes": sum(_active(j) and str(j.get("name", "")).startswith(namespace + "wake:") for j in jobs),
-        "enabled_review_wakes": sum(_active(j) and str(j.get("name", "")).startswith(namespace + "review:") for j in jobs),
+        "enabled_wakes": sum(_active(j) and j.get("name") != namespace + "heartbeat" for j in jobs),
         "jobs": [{key: j.get(key) for key in ("id", "name", "enabled", "state", "next_run_at", "last_status")} for j in jobs],
     }

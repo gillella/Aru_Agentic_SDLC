@@ -9,7 +9,7 @@ import common
 import merge_pr
 import merge_state
 from review_risk import review_risk_tier
-from test_governed_merge import BASE, HEAD, board_evidence, issue_record, ready_pr
+from test_governed_merge import BASE, HEAD, approval, board_evidence, issue_record, ready_pr
 
 
 def install_authority_world(monkeypatch):
@@ -34,6 +34,7 @@ def install_authority_world(monkeypatch):
 
     monkeypatch.setattr(merge_state, "project_item_evidence", board)
     monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _n: [])
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _n: [approval()])
     monkeypatch.setattr(merge_pr, "merge_queue_snapshot", lambda *_a: {
         "configured": False, "entry": None, "auto_merge": None,
     })

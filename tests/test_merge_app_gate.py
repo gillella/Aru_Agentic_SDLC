@@ -104,10 +104,13 @@ def test_installed_reflects_whether_the_app_can_act_on_the_repository(runner, mo
 def test_blocked_is_mergeable_only_while_the_gate_is_on(monkeypatch):
     queue = {"configured": False, "entry": None, "auto_merge": None}
     blocked = base_pr(mergeStateStatus="BLOCKED")
-    with pytest.raises(merge_pr.KernelError, match="merge state is BLOCKED"):
-        merge_pr.require_mergeable(blocked, queue)
-    monkeypatch.setattr(merge_authority, "configured", lambda: ("/runner", 4242))
+    # BLOCKED passes the early state check so review reasons surface first; the
+    # later stage still refuses it unless the merge-authority gate is on.
     merge_pr.require_mergeable(blocked, queue)
+    with pytest.raises(merge_pr.KernelError, match="merge state is BLOCKED"):
+        merge_pr.require_unblocked(blocked)
+    monkeypatch.setattr(merge_authority, "configured", lambda: ("/runner", 4242))
+    merge_pr.require_unblocked(blocked)
     with pytest.raises(merge_pr.KernelError, match="merge state is DIRTY"):
         merge_pr.require_mergeable(base_pr(mergeStateStatus="DIRTY"), queue)
 

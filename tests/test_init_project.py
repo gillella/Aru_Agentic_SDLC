@@ -38,26 +38,24 @@ def test_bootstrap_provisions_priority_labels():
     }
 
 
-def test_bootstrap_provisions_external_and_coding_review_authorities():
-    assert {
-        "review:coderabbit",
-        "review:claude-code",
-        "review:openai-codex",
-        "review:xai-cursor",
-        "review:google-antigravity",
-    }.issubset(init_project.LABELS)
-    # Retired providers are refused at merge; new repositories never get their labels.
-    assert not {"review:sourcery", "review:codeant"} & set(init_project.LABELS)
-    assert not any(label.startswith("reviewer-registered:") for label in init_project.LABELS)
-    assert not any(label.startswith("reviewer-binding:") for label in init_project.LABELS)
+def test_bootstrap_provisions_no_review_routing_labels():
+    # Review is one GitHub-native approval; no label routes, records or pauses it.
+    assert not any(
+        label.startswith(("review:", "reviewer", "author:", "author-family:", "needs-reviewer"))
+        for label in init_project.LABELS
+    )
 
 
 def test_ruleset_requires_the_server_exact_head_check_and_no_bypass():
     payload = init_project.ruleset_payload()
     assert payload["bypass_actors"] == []
     rules = {rule["type"]: rule for rule in payload["rules"]}
-    assert rules["pull_request"]["parameters"]["required_review_thread_resolution"] is True
-    assert rules["pull_request"]["parameters"]["require_code_owner_review"] is False
+    review = rules["pull_request"]["parameters"]
+    assert review["required_review_thread_resolution"] is True
+    assert review["require_code_owner_review"] is False
+    # The one review rule: an account other than the author and last pusher approves the latest commit.
+    assert (review["required_approving_review_count"], review["dismiss_stale_reviews_on_push"],
+            review["require_last_push_approval"]) == (1, True, True)
     checks = rules["required_status_checks"]["parameters"]
     assert checks["strict_required_status_checks_policy"] is True
     assert checks["required_status_checks"] == [

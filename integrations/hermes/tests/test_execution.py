@@ -86,23 +86,14 @@ def test_bounded_preflight_timeout_and_missing_executable_fail_closed(tmp_path):
         execution.run_bounded([str(tmp_path / "missing-command")], tmp_path)
 
 
-@pytest.mark.parametrize("actor,runner_kept", [
-    ("gillella", False),  # personal login: the worker's own gh credentials submit the review
-    ("aru-code-factory-gillella[bot]", True),  # App login: keep routing gh through the App runner
-])
-def test_review_worker_runs_as_its_bound_actor(setup, monkeypatch, actor, runner_kept):
+def test_implementation_worker_preserves_app_runner(setup, monkeypatch):
     config, state, worktree = setup
     monkeypatch.setenv(execution.APP_RUNNER_ENV, "/usr/local/bin/app-runner")
     seen = {}
     monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: seen.update(k) or SimpleNamespace(pid=4242))
-    review = {"repo": "owner/repo", "reviewer": "model-one", "reviewer_actor": actor, "issue": 1, "pr": 9,
-              "head": "a" * 40, "authority": "openai-codex", "author": "writer", "author_actor": "gillella"}
-    execution.launch(config, "owner/repo", "model-one", 1, str(worktree), kind="review", pr=9, head="a" * 40, review=review)
-    assert (execution.APP_RUNNER_ENV in seen["env"]) is runner_kept
-    assert seen["env"]["PATH"] == os.environ["PATH"]  # everything else inherited
-    # Implementation workers always inherit the Driver environment unchanged.
-    execution.launch(config, "owner/repo", "model-two", 2, str(worktree))
+    execution.launch(config, "owner/repo", "model-one", 1, str(worktree))
     assert seen["env"][execution.APP_RUNNER_ENV] == "/usr/local/bin/app-runner"
+    assert seen["env"]["PATH"] == os.environ["PATH"]
 
 
 def test_process_presence_is_diagnostic_not_exhaustion(monkeypatch):
@@ -353,7 +344,7 @@ def test_other_project_holder_does_not_count_or_revive_a_stale_local_receipt(set
     capacity = state.capacity_path("same-subscription")
     capacity.parent.mkdir(parents=True)
     capacity.write_text("current-worker\n")
-    controller = Controller(config, sync_reviews=lambda *args: {})
+    controller = Controller(config)
     snapshot = {
         "issues": [{"number": 1, "status": "In Review", "agents": ["model-one"]}],
         "prs": [{"number": 7, "issues": [1], "author_agent": "model-one"}],
@@ -499,7 +490,7 @@ def test_pre_stop_supervisor_cannot_start_child_after_explicit_restart(setup, mo
     assert worktree.is_dir()
 
 
-def test_stop_during_review_revalidation_prevents_child_without_holding_spawn_barrier(setup, monkeypatch):
+def test_stop_during_revalidation_prevents_child_without_holding_spawn_barrier(setup, monkeypatch):
     config, state, worktree = setup
     descriptor, record = reserve_worker(config, state, worktree)
     def revalidate(*a):
@@ -507,7 +498,29 @@ def test_stop_during_review_revalidation_prevents_child_without_holding_spawn_ba
         state.request_stop("owner/repo")
         with state.project_lock("owner/repo", spawn=True):
             pass  # Stop can cross its spawn barrier while this read is in flight.
-    monkeypatch.setattr(execution, "_revalidate_review_worker", revalidate)
+    monkeypatch.setattr(execution, "revalidate_worker", revalidate)
     monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("child crossed Stop"))
     assert execution.worker_main(config, record["id"], descriptor) == 1
     assert "stopped" in state.worker(record["id"])["reason"]
+
+
+def test_review_launch_is_refused_before_capacity_or_process_creation(setup, monkeypatch):
+    config, state, tree = setup
+    monkeypatch.setattr(execution, "_acquire_capacity_lock", lambda *a: pytest.fail("retired worker reserved capacity"))
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("retired worker launched"))
+    with pytest.raises(DriverError, match="unsupported worker kind"):
+        execution.launch(config, "owner/repo", "model-one", 1, str(tree), kind="review")
+    assert state.workers() == []
+
+
+def test_legacy_review_cannot_start_through_supervisor(setup, monkeypatch):
+    config, state, tree = setup
+    descriptor, record = reserve_worker(config, state, tree)
+    record["kind"] = "review"
+    write_json(state.worker_path(record["id"]), record)
+    monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("legacy child resumed"))
+    try:
+        with pytest.raises(DriverError, match="cannot be resumed"):
+            execution.worker_main(config, record["id"], descriptor)
+    finally:
+        os.close(descriptor)

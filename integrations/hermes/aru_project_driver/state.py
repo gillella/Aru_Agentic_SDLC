@@ -80,6 +80,8 @@ def _validate_project(data: dict) -> None:
 def _validate_worker(data: dict) -> None:
     from .quota_worker import validate_record
     from . import retries
+    if data.get("kind") not in (None, "implementation", "remediation"):
+        raise DriverError("operational worker kind is unsupported")
     validate_record(data)
     retries.validate(data)
     if "retry_blocked" in data and (type(data["retry_blocked"]) is not bool
@@ -226,6 +228,8 @@ class State:
 
     def worker(self, worker_id: str) -> dict:
         record = read_json(self.worker_path(worker_id))
+        if record.get("kind") == "review":
+            raise DriverError("legacy review workers cannot be resumed")
         _validate_worker(record)
         if record["id"] != worker_id:
             raise DriverError("operational worker receipt identity mismatch")
@@ -235,6 +239,10 @@ class State:
         result = []
         for path in sorted((self.root / "workers").glob("*.json")):
             record = read_json(path)
+            # Retired review receipts carry no current worker authority. Leave
+            # their historical payload untouched and out of every planning path.
+            if record.get("kind") == "review":
+                continue
             _validate_worker(record)
             if self.worker_path(record["id"]) != path:
                 raise DriverError("operational worker receipt identity mismatch")

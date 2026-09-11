@@ -133,7 +133,7 @@ def parser() -> argparse.ArgumentParser:
                                  help="remaining wall-time budget for this operation (default 20s)")
         if operation == "event":
             command.add_argument("--event-id", required=True)
-            command.add_argument("--reason", choices=("event", "worker", "review", "operator"), default="event")
+            command.add_argument("--reason", choices=("event", "worker", "operator"), default="event")
             command.add_argument("--inline", action="store_true",
                                  help="caller already has a Hermes activation; do not queue another")
     handoff = sub.add_parser("handoff", help="validate and deliver a typed dependency handoff")

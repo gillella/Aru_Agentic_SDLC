@@ -24,10 +24,16 @@ def ready_pr(**overrides):
         number=10, body="Closes #7", state="OPEN", isDraft=False,
         headRefOid=HEAD, headRefName="feat/issue-7-change", baseRefName="main", baseRefOid=BASE,
         mergeable="MERGEABLE", mergeStateStatus="CLEAN", reviewDecision=None,
-        labels=[], statusCheckRollup=[],
+        author={"login": "writer"}, labels=[], statusCheckRollup=[],
     )
     record.update(overrides)
     return record
+
+
+def approval(**overrides):
+    review = dict(id=1, user={"login": "reviewer"}, commit_id=HEAD, state="APPROVED")
+    review.update(overrides)
+    return review
 
 
 def patch_gate(monkeypatch, **functions):
@@ -35,35 +41,40 @@ def patch_gate(monkeypatch, **functions):
         monkeypatch.setattr(merge_pr, name, function)
 
 
-def install_low_risk_gate(monkeypatch, *, paths=None):
+def install_gate(monkeypatch, *, paths=None):
     patch_gate(
         monkeypatch, pull_request=lambda _n: ready_pr(),
-        pull_changed_paths=lambda _n: paths or ["src/example.py"], review_risk_tier=lambda _p: 1,
+        pull_changed_paths=lambda _n: paths or ["src/example.py"],
         issue_gate=lambda _issues, _paths, **_kw: [{"issue": 7, "criteria": 1}],
         ci_verdict=lambda _n: {"head": HEAD, "state": "success", "checks": ["aru-governed-pr"]},
-        fetch_feedback=lambda _n: [],
+        fetch_feedback=lambda _n: [], pull_reviews=lambda _n: [approval()],
         merge_queue_snapshot=lambda *_a: {"configured": False, "entry": None, "auto_merge": None},
     )
 
 
-def test_tier_one_skips_authoritative_ai_review_but_keeps_server_gate(monkeypatch):
-    install_low_risk_gate(monkeypatch)
-    patch_gate(monkeypatch, assigned_service=lambda _pr: pytest.fail("low-risk reviewer"))
+def test_gate_passes_on_green_ci_and_a_non_author_exact_head_approval(monkeypatch):
+    install_gate(monkeypatch)
     gates = merge_pr.evaluate(10, HEAD)
-    assert gates["reviewer"] == "not-required"
-    assert gates["risk_tier"] == 1
+    assert gates["approved"] is True
     assert gates["ci"] == ["aru-governed-pr"]
 
 
-def test_tier_one_still_blocks_unresolved_threads(monkeypatch):
-    install_low_risk_gate(monkeypatch)
+def test_documentation_only_changes_still_need_an_approval(monkeypatch):
+    install_gate(monkeypatch, paths=["README.md"])
+    patch_gate(monkeypatch, pull_reviews=lambda _n: [])
+    with pytest.raises(merge_pr.KernelError, match="approval of the exact head"):
+        merge_pr.evaluate(10, HEAD)
+
+
+def test_unresolved_threads_block_even_with_an_approval(monkeypatch):
+    install_gate(monkeypatch)
     monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _number: [{"id": 1}])
     with pytest.raises(merge_pr.KernelError, match="unresolved review thread"):
         merge_pr.evaluate(10, HEAD)
 
 
 def test_non_clean_merge_state_is_not_used_to_avoid_base_refresh(monkeypatch):
-    install_low_risk_gate(monkeypatch)
+    install_gate(monkeypatch)
     patch_gate(monkeypatch, pull_request=lambda _n: ready_pr(mergeStateStatus="BEHIND"))
     with pytest.raises(merge_pr.KernelError, match="BEHIND"):
         merge_pr.evaluate(10, HEAD)
@@ -72,7 +83,7 @@ def test_non_clean_merge_state_is_not_used_to_avoid_base_refresh(monkeypatch):
 @pytest.mark.parametrize("state", ["CLEAN", "BEHIND"])
 @pytest.mark.parametrize("mode", ["configured", "entry", "auto_merge"])
 def test_unsupported_merge_mode_is_refused_before_ci(monkeypatch, state, mode):
-    install_low_risk_gate(monkeypatch)
+    install_gate(monkeypatch)
     queue = {"configured": False, "entry": None, "auto_merge": None}
     queue[mode] = True if mode == "configured" else {"id": "pending"}
     monkeypatch.setattr(merge_pr, "pull_request", lambda _n: ready_pr(mergeStateStatus=state))
@@ -164,19 +175,18 @@ def test_merge_stops_when_base_changes_after_evaluation(monkeypatch):
         merge_pr.merge(10, HEAD)
 
 
-@pytest.mark.parametrize("mutation", ["stable", "deleted-branch", "base-moved", "queue", "feedback", "review"])
-@pytest.mark.parametrize("tier", [1, 2])
-def test_finalize_association_disappears_after_direct_merge(monkeypatch, mutation, tier):
+@pytest.mark.parametrize("mutation", [
+    "stable", "deleted-branch", "base-moved", "queue", "feedback", "changes-requested", "stale-approval",
+])
+def test_finalize_association_disappears_after_direct_merge(monkeypatch, mutation):
     import check_ci
     from test_ci_and_feedback import historical_world
     world, calls = historical_world(monkeypatch)
     pr = world['pr']
-    pr.update(body="Closes #7", reviewDecision=None)
-    closed = []
-    install_low_risk_gate(monkeypatch)
-    review = review_world('claude-code/attestation')
-    pr.update(author=review['pr']['author'], labels=review['pr']['labels'])
-    patch_gate(monkeypatch, review_risk_tier=lambda _p: tier, pull_reviews=lambda _n: review['reviews'])
+    pr.update(body="Closes #7", reviewDecision=None, author={'login': 'writer'})
+    closed, reviews = [], [approval()]
+    install_gate(monkeypatch)
+    patch_gate(monkeypatch, pull_reviews=lambda _n: reviews)
     monkeypatch.setattr(merge_pr, "pull_request", lambda _n: pr)
     monkeypatch.setattr(merge_pr, "ci_verdict", check_ci.ci_verdict)
     monkeypatch.setattr(merge_pr, "close_out", lambda numbers, _paths: closed.extend(numbers) or [{'issue': 7}])
@@ -192,17 +202,17 @@ def test_finalize_association_disappears_after_direct_merge(monkeypatch, mutatio
         world['history']['nodes'] = [{'__typename': 'AddedToMergeQueueEvent'}]
     if mutation == 'feedback':
         monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _n: [{'id': 1}])
-    if mutation == 'review':
-        pr['reviewDecision'] = 'CHANGES_REQUESTED' if tier == 1 else None
-        review['reviews'][0]['commit_id'] = 'd' * 40
-    if mutation in {'queue', 'feedback', 'review'}:
+    if mutation == 'changes-requested':
+        pr['reviewDecision'] = 'CHANGES_REQUESTED'
+    if mutation == 'stale-approval':
+        reviews[0]['commit_id'] = 'd' * 40
+    if mutation in {'queue', 'feedback', 'changes-requested', 'stale-approval'}:
         with pytest.raises(merge_pr.KernelError):
             merge_pr.finalize_queued(3, HEAD)
         assert closed == []
     else:
         result = merge_pr.finalize_queued(3, HEAD)
-        assert result['finalized'] and result['reviewer'] == ('claude-code' if tier == 2 else 'not-required')
-        assert result['issues'] == closed == [7]
+        assert result['finalized'] and result['issues'] == closed == [7]
     assert not any('/git/ref' in str(call) for call in calls)
 
 
@@ -238,7 +248,7 @@ def test_close_out_rechecks_contract_after_other_post_merge_network_calls(monkey
         ("acceptance-unchecked", True), ("acceptance-text", True),
         ("claimant", True), ("closed-issue", True), ("lifecycle", True),
         ("head", True), ("base", True), ("draft", True),
-        ("review-changes", True), ("review-approved", False),
+        ("review-changes", True), ("review-approved", False), ("approval-stale", True),
         ("unreadable-pr", True), ("unreadable-issue", True),
         ("pr-description", False), ("issue-description", False), ("closing-verb", False),
     ],
@@ -255,6 +265,7 @@ def test_semantic_drift_never_reaches_merge_command(
     monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("external call"))
     pr = ready_pr()
     record = issue_record("src/example.py")
+    reviews = [approval()]
     events, commands = [], []
 
     def read_pr(_number):
@@ -298,6 +309,8 @@ def test_semantic_drift_never_reaches_merge_command(
                 pr["reviewDecision"] = (
                     "CHANGES_REQUESTED" if mutation == "review-changes" else "APPROVED"
                 )
+            elif mutation == "approval-stale":
+                reviews[0]["commit_id"] = "c" * 40
             elif mutation == "pr-description":
                 pr["body"] += "\n\n## Evidence\nMore test details."
             elif mutation == "issue-description":
@@ -316,6 +329,7 @@ def test_semantic_drift_never_reaches_merge_command(
     monkeypatch.setattr(merge_pr, "pull_changed_paths", lambda _n: ["src/example.py"])
     monkeypatch.setattr(merge_pr, "ci_verdict", read_ci)
     monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _n: [])
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _n: deepcopy(reviews))
     monkeypatch.setattr(
         merge_pr, "merge_queue_snapshot",
         lambda *_a: events.append("queue")
@@ -354,7 +368,7 @@ def test_final_pending_request_reread(monkeypatch, mutation):
     from copy import deepcopy
 
     monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("external call"))
-    install_low_risk_gate(monkeypatch)
+    install_gate(monkeypatch)
     monkeypatch.setattr(merge_pr, "pull_request", merge_state.pull_request)
     monkeypatch.setattr(merge_pr, "issue_gate", merge_state.issue_gate)
     monkeypatch.setattr(merge_pr, "merge_queue_snapshot", merge_state.merge_queue_snapshot)
@@ -428,205 +442,56 @@ def test_final_pending_request_reread(monkeypatch, mutation):
     assert events.count("queue") == 3
 
 
-def review_world(form):
-    """Mutable fake GitHub records; validators consume copies through real helpers."""
-    import json
-    from copy import deepcopy
+@pytest.mark.parametrize("mutation", ["stable", "dismissed", "stale-head", "changes-requested", "new-thread"])
+def test_final_approval_and_threads_are_reread_before_submission(monkeypatch, mutation):
+    install_gate(monkeypatch)
+    reviews, threads, queue_reads, commands = [approval()], [], [], []
 
-    service = form.split('/')[0]
-    actor = {'sourcery': 'sourcery-ai', 'codeant': 'codeant-ai',
-             'coderabbit': 'coderabbitai', 'claude-code': 'independent-reviewer'}[service]
-    t0, t1 = '2026-09-05T08:00:00Z', '2026-09-05T08:30:00Z'
-    pr = ready_pr(createdAt=t0, author={'login': 'writer'},
-                  labels=[{'name': 'review:' + service}])
-    review = dict(id=1, user={'login': actor, 'type': 'Bot'}, commit_id=HEAD,
-                  state='APPROVED', submitted_at=t1, body='Review completed.')
-    world = dict(pr=pr, reviews=[review], comments=[], checks=[], threads=[],
-                 assignments=[dict(event='labeled', label={'name': 'review:' + service},
-                                   created_at=t0)])
-    if form.endswith('/check'):
-        review['state'] = 'APPROVED' if service == 'coderabbit' else 'COMMENTED'
-        check = dict(id=2, name={'sourcery': 'Sourcery review', 'codeant': 'CodeAnt',
-                               'coderabbit': 'CodeRabbit'}[service], head_sha=HEAD,
-                     status='completed', conclusion='success', completed_at=t1,
-                     app={'slug': actor})
-        world['checks'] = [check]
-        pr['statusCheckRollup'] = [deepcopy(check)]
-    elif form.endswith('/status'):
-        review['state'] = 'COMMENTED'
-        payload = [dict(label='Reviewed your PR', commit=HEAD, started=t0,
-                        finished=t1, done=True)]
-        world['comments'] = [dict(id=3, user=review['user'], updated_at=t1,
-                                 body='<!-- codeant-review-status:' + json.dumps(payload) + ' -->')]
-    elif service == 'claude-code':
-        pr['labels'] += [{'name': name} for name in (
-            'reviewer:independent-agent', 'reviewer-actor:' + actor,
-            'author:writer-agent', 'author-family:openai-codex')]
-        payload = dict(head=HEAD, reviewer='independent-agent', family=service,
-                       submitted_by=actor, verdict='APPROVE', issues=[7],
-                       summary='Reviewed the exact diff, issue criteria and surrounding failure paths.',
-                       verification=['Isolated merge regression tests passed.'],
-                       findings=[dict(severity='low', file='scripts/merge_pr.py', line=1,
-                                      summary='The earlier review finding has been resolved.',
-                                      resolved=True)], acceptance_criteria_reviewed=True,
-                       diff_reviewed=True, surrounding_code_reviewed=True)
-        review['body'] = '<!-- aru-coding-review:v1 ' + json.dumps(payload) + ' -->'
-    return world
+    def read_queue(*_a):
+        queue_reads.append(True)
+        if len(queue_reads) == 3:  # the final reread, after both gate evaluations
+            if mutation == "dismissed":
+                reviews.append(approval(id=2, state="DISMISSED"))
+            elif mutation == "stale-head":
+                reviews[0] = approval(commit_id="c" * 40)
+            elif mutation == "changes-requested":
+                reviews.append(approval(id=2, state="CHANGES_REQUESTED"))
+            elif mutation == "new-thread":
+                threads.append({"id": 1})
+        return {"configured": False, "entry": None, "auto_merge": None}
 
-
-def install_review_boundary(monkeypatch, world, mutate, *, boundary='pr', tier=2):
-    import socket
-    import subprocess
-    from copy import deepcopy
-    import fetch_pr_feedback
-
-    def blocked(*_a, **_kw):
-        pytest.fail('unexpected subprocess/network call')
-
-    monkeypatch.setattr(subprocess, 'run', blocked)
-    monkeypatch.setattr(subprocess, 'Popen', blocked)
-    monkeypatch.setattr(socket, 'create_connection', blocked)
-    monkeypatch.setattr(socket.socket, 'connect', blocked)
-    events, commands = [], []
-
-    def read(kind, value):
-        events.append(kind)
-        if kind == boundary and events.count(kind) == (2 if boundary == 'ci' else 3):
-            mutate(world)
-        if world.get('unreadable') == kind:
-            raise merge_pr.KernelError(kind + ' evidence is unreadable')
-        return deepcopy(value() if callable(value) else value)
-
-    monkeypatch.setattr(merge_pr, 'pull_request', lambda _n: read('pr', world['pr']))
-    monkeypatch.setattr(merge_state, 'issue', lambda _n: read('issue', issue_record('scripts/merge_pr.py')))
-    monkeypatch.setattr(merge_state, 'project_item_evidence', lambda _n: board_evidence())
-    monkeypatch.setattr(merge_pr, 'pull_changed_paths', lambda _n: ['scripts/merge_pr.py'])
-    monkeypatch.setattr(merge_pr, 'review_risk_tier', lambda _p: tier)
-    monkeypatch.setattr(merge_pr, 'ci_verdict', lambda _n: read(
-        'ci', dict(head=HEAD, state='success', checks=['aru-governed-pr'])))
-    monkeypatch.setattr(merge_pr, 'merge_queue_snapshot', lambda *_a: read(
-        'queue', dict(configured=False, entry=None, auto_merge=None)))
-    for function, kind in [('pull_reviews', 'reviews'), ('pull_comments', 'comments'),
-                           ('pull_events', 'assignments'), ('pull_review_checks', 'checks')]:
-        monkeypatch.setattr(merge_pr, function, lambda _n, k=kind: read(k, world[k]))
-    monkeypatch.setattr(fetch_pr_feedback, 'repo_slug', lambda: 'owner/repo')
-    monkeypatch.setattr(fetch_pr_feedback, 'gh_json', lambda *_a, **_kw: read('threads', {
-        'data': {'repository': {'pullRequest': {'reviewThreads': {
-            'nodes': world['threads'], 'pageInfo': {'hasNextPage': False}}}}}}))
-    monkeypatch.setattr(merge_pr, 'fetch_feedback', fetch_pr_feedback.fetch_feedback)
-
-    def submit(argv):
-        commands.append(argv)
-        # Deliberately stop at the fake command boundary; never simulate a server merge.
-        raise RuntimeError('command spy reached')
-
-    monkeypatch.setattr(merge_pr, 'run', submit)
-    return events, commands
-
-
-def change_review(world, mutation):
-    if mutation == 'stable':
-        return
-    if mutation.startswith('unreadable-'):
-        world['unreadable'] = mutation.removeprefix('unreadable-')
-    elif mutation == 'dismissed':
-        world['reviews'][0]['state'] = 'DISMISSED'
-        world['pr']['reviewDecision'] = None
-    elif mutation == 'missing':
-        world['reviews'].clear()
-    elif mutation in {'revoked', 'pending', 'ambiguous', 'check-body', 'stale-head'}:
-        check = world['checks'][0]
-        if mutation in {'revoked', 'pending', 'stale-head'}:
-            world['reviews'].clear()
-        if mutation == 'ambiguous':
-            world['checks'].append(dict(check, id=99))
-        else:
-            check.update({'revoked': {'conclusion': 'failure'},
-                          'pending': {'status': 'in_progress', 'conclusion': None},
-                          'check-body': {'output': {'summary': 'rate limit exceeded'}},
-                          'stale-head': {'head_sha': 'c' * 40}}[mutation])
-    elif mutation in {'status-body', 'coding-body', 'malformed-body', 'review-body'}:
-        record = world['comments'][0] if mutation == 'status-body' else world['reviews'][0]
-        record['body'] = (record['body'].replace('true', 'false') if mutation.endswith('-body')
-                          and mutation in {'status-body', 'coding-body'} else
-                          '<!-- aru-coding-review:v1 broken -->' if mutation == 'malformed-body'
-                          else 'rate limit exceeded')
-    elif mutation in {'assignment-reset', 'assignment-malformed'}:
-        world['assignments'][0]['created_at'] = (
-            '2026-09-05T09:00:00Z' if mutation == 'assignment-reset' else 'invalid')
-    elif mutation in {'authority', 'multiple-authorities', 'actor', 'author', 'author-identity'}:
-        labels = world['pr']['labels']
-        if mutation == 'authority':
-            labels[0]['name'] = 'review:sourcery'
-        elif mutation == 'multiple-authorities':
-            labels.append({'name': 'review:coderabbit'})
-        elif mutation == 'actor':
-            labels[2]['name'] = 'reviewer-actor:different-actor'
-        elif mutation == 'author':
-            world['pr']['author']['login'] = 'independent-reviewer'
-        else:
-            labels[3]['name'] = 'author:independent-agent'
-    elif mutation == 'changes-requested':
-        world['reviews'][0]['state'] = 'CHANGES_REQUESTED'
-    elif mutation in {'new-thread', 'reopened-thread'}:
-        thread = dict(isResolved=False, isOutdated=False, path='scripts/merge_pr.py', line=1,
-                      comments={'nodes': [{'body': 'Blocking finding', 'author': {'login': 'sourcery-ai'}}],
-                                'pageInfo': {'hasNextPage': False}})
-        if mutation == 'reopened-thread':
-            world['threads'][0]['isResolved'] = False
-        else:
-            world['threads'].append(thread)
-
-
-REVIEW_FORMS = ['coderabbit/approval', 'coderabbit/check', 'claude-code/attestation']
-
-
-@pytest.mark.parametrize('form,mutation', [
-    *((form, 'stable') for form in REVIEW_FORMS),
-    *(('coderabbit/approval', m) for m in ['dismissed', 'missing', 'review-body',
-       'assignment-reset', 'assignment-malformed', 'authority', 'multiple-authorities',
-       'changes-requested', 'unreadable-reviews', 'unreadable-comments', 'unreadable-assignments']),
-    *(('coderabbit/check', m) for m in ['revoked', 'pending', 'ambiguous', 'check-body',
-       'stale-head', 'unreadable-checks', 'new-thread', 'reopened-thread', 'unreadable-threads']),
-    *(('claude-code/attestation', m) for m in ['coding-body', 'malformed-body', 'actor',
-       'author', 'author-identity', 'dismissed', 'missing']),
-])
-@pytest.mark.parametrize('boundary', ['pr', 'queue'])
-def test_final_review_authorization(monkeypatch, form, mutation, boundary):
-    world = review_world(form)
-    if mutation == 'dismissed':
-        world['pr']['reviewDecision'] = 'APPROVED'
-    if mutation == 'reopened-thread':
-        change_review(world, 'new-thread')
-        world['threads'][0]['isResolved'] = True
-    # PR-label drift must be visible in final_pr, while evidence/thread drift
-    # also gets injected during the later queue read to prove final ordering.
-    if boundary == 'queue' and mutation in {'authority', 'multiple-authorities', 'actor',
-                                          'author', 'author-identity'}:
-        boundary = 'pr'
-    events, commands = install_review_boundary(
-        monkeypatch, world, lambda w: change_review(w, mutation), boundary=boundary)
-    if mutation == 'stable':
-        with pytest.raises(RuntimeError, match='command spy reached'):
-            merge_pr.merge(10, HEAD)
-        assert len(commands) == 1 and commands[0][-2:] == ['--match-head-commit', HEAD]
+    patch_gate(
+        monkeypatch, merge_queue_snapshot=read_queue, run=commands.append,
+        pull_reviews=lambda _n: list(reviews), fetch_feedback=lambda _n: list(threads),
+        pull_request=lambda _n: ready_pr(**({"mergedAt": "2026-09-11T00:00:00Z"} if commands else {})),
+        finalize_queued=lambda *_a: {"merged": True},
+    )
+    if mutation == "stable":
+        assert merge_pr.merge(10, HEAD)["merged"] is True
+        assert commands == [["gh", "pr", "merge", "10", "--merge", "--match-head-commit", HEAD]]
     else:
-        with pytest.raises(merge_pr.KernelError) as exc:
+        with pytest.raises(merge_pr.KernelError, match="before merge submission"):
             merge_pr.merge(10, HEAD)
         assert commands == []
-        if mutation == 'ambiguous':
-            assert str(exc.value) == 'external reviewer returned ambiguous checks'
-        if mutation.startswith('unreadable-'):
-            assert str(exc.value) == mutation.removeprefix('unreadable-') + ' evidence is unreadable'
-    assert events.count('ci') == 2
-    assert events.count('pr') == 3
-    assert events.count('issue') == events.count('queue') == 3
+    assert len(queue_reads) == 3
 
 
-@pytest.mark.parametrize('form', ['sourcery/approval', 'codeant/approval', 'codeant/status'])
-def test_retired_provider_evidence_cannot_authorize_new_merge(monkeypatch, form):
-    world = review_world(form)
-    _, commands = install_review_boundary(monkeypatch, world, lambda _w: None)
-    with pytest.raises(merge_pr.KernelError, match='retired review authority'):
-        merge_pr.merge(10, HEAD)
-    assert commands == []
+@pytest.mark.parametrize("decision,reviews,reason", [
+    (None, [], "no approval of the exact head"),
+    ("CHANGES_REQUESTED", [approval(state="CHANGES_REQUESTED")], "still requests changes"),
+    ("APPROVED", [approval()], "PR merge state is BLOCKED"),
+])
+def test_blocked_merge_state_is_judged_after_the_review_gates(monkeypatch, decision, reviews, reason):
+    # GitHub reports BLOCKED while a required approval is missing, so the review reason must surface first.
+    install_gate(monkeypatch)
+    patch_gate(monkeypatch, pull_reviews=lambda _n: reviews,
+               pull_request=lambda _n: ready_pr(mergeStateStatus="BLOCKED", reviewDecision=decision))
+    with pytest.raises(merge_pr.KernelError, match=reason):
+        merge_pr.evaluate(10, HEAD)
+
+
+def test_blocked_merge_state_is_admissible_with_the_merge_authority_gate(monkeypatch):
+    install_gate(monkeypatch)
+    patch_gate(monkeypatch, pull_request=lambda _n: ready_pr(mergeStateStatus="BLOCKED"))
+    monkeypatch.setattr(merge_pr.merge_authority, "configured", lambda: True)
+    assert merge_pr.evaluate(10, HEAD)["approved"] is True

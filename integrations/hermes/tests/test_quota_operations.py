@@ -73,11 +73,11 @@ def test_installer_copies_quota_runbook_and_complete_modules_without_activation(
     source = Path(__file__).resolve().parents[1]
     result = installer.install(source, qh.config.path)
     names = {Path(item["source"]).name for item in result["files"]}
-    assert {"quota.py", "quota_collect.py", "quota_admission.py", "quota_boundary.py", "quota_worker.py", "quota_checkpoint.py", "reviewers.py", "QUOTA.md"} <= names
+    assert {"quota.py", "quota_collect.py", "quota_admission.py", "quota_boundary.py", "quota_worker.py", "quota_checkpoint.py", "QUOTA.md"} <= names
     assert result["activated"] is False and result["applied"] is False
     assert not (qh.config.hermes_home / "scripts").exists()
     example = Config(source / "config.example.json", bind=False)
-    assert example.project("example/project")["quota_admission"]["unknown_review_seconds"] == 1800
+    assert example.project("example/project")["quota_admission"]["unknown_checkpoint_seconds"] == 1800
 
 
 def test_status_exposes_bounded_decisions_cooldown_and_owner(qh, monkeypatch):

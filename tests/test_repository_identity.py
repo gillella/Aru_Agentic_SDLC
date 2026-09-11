@@ -252,16 +252,17 @@ def test_pr_helpers_use_the_installation_of_the_checkout_repository(
     checkout = _checkout(tmp_path, {"origin": remote}, name="consumer")
     record = tmp_path / "argv"
     config = tmp_path / "observed-gh-config"
-    payload = json.dumps([{"name": "reviewer-registered:coderabbit"}])
+    payload = json.dumps({"number": 12, "state": "OPEN"})
     monkeypatch.setenv(
         "ARU_GITHUB_APP_RUNNER", str(_stub_runner(tmp_path, record, payload, config))
     )
     monkeypatch.setenv("GH_CONFIG_DIR", str(tmp_path / "operator-gh"))
     monkeypatch.chdir(checkout)
 
-    states = create_pr.registered_external_states()
+    # The same created-PR reread create_pr.create() performs after `gh pr create`.
+    snapshot = create_pr.gh_json(["pr", "view", "12", "--json", "number,state"])
 
-    assert states["coderabbit"] == create_pr.UNAVAILABLE  # registration is not a capability probe
+    assert snapshot == {"number": 12, "state": "OPEN"}
     assert _recorded(record)[:4] == ["--repo", slug, "--", "gh"]
     assert config.read_text(encoding="utf-8") == str(tmp_path / "operator-gh")
 
@@ -269,10 +270,10 @@ def test_pr_helpers_use_the_installation_of_the_checkout_repository(
 def test_pr_helpers_fail_closed_when_the_checkout_has_no_repository_identity(monkeypatch, tmp_path):
     checkout = _checkout(tmp_path, {}, name="consumer")
     record = tmp_path / "argv"
-    monkeypatch.setenv("ARU_GITHUB_APP_RUNNER", str(_stub_runner(tmp_path, record, "[]")))
+    monkeypatch.setenv("ARU_GITHUB_APP_RUNNER", str(_stub_runner(tmp_path, record, "{}")))
     monkeypatch.chdir(checkout)
 
     with pytest.raises(create_pr.KernelError, match="governed repository identity"):
-        create_pr.registered_external_states()
+        create_pr.gh_json(["pr", "view", "12", "--json", "number,state"])
 
     assert not record.exists()

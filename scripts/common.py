@@ -22,38 +22,6 @@ from touches import (
 STATUSES = ("Backlog", "Ready", "In Progress", "In Review", "Done")
 STATUS_PREFIX = "status:"
 AGENT_PREFIX = "agent:"
-REVIEW_PREFIX = "review:"
-REVIEWER_PREFIX = "reviewer:"
-REVIEWER_ACTOR_PREFIX = "reviewer-actor:"
-REVIEW_REGISTRATION_PREFIX = "reviewer-registered:"
-REVIEW_BINDING_PREFIX = "reviewer-binding:"
-AUTHOR_PREFIX = "author:"
-AUTHOR_FAMILY_PREFIX = "author-family:"
-EXTERNAL_REVIEWERS = ("coderabbit", "sourcery", "codeant")  # historical evidence remains readable
-ACTIVE_EXTERNAL_REVIEWERS = ("coderabbit",)
-RETIRED_EXTERNAL_REVIEWERS = ("sourcery", "codeant")
-CODING_REVIEWERS = ("claude-code", "openai-codex", "xai-cursor", "google-antigravity")
-REVIEWER_CONFIG_ENV = "ARU_CODING_REVIEWERS"
-REVIEW_AUTHORITIES = EXTERNAL_REVIEWERS + CODING_REVIEWERS
-PROBE_PROMPT = "Reply exactly OK"
-REVIEW_UNAVAILABLE_RE = re.compile(
-    r"(?:\b(?:provider|service|review(?:er)?) (?:is |was |encountered (?:an )?)?"
-    r"(?:unavailable|error(?:ed)?|failed)\b|\breview failed\b|"
-    r"\b(?:quota exhausted|quota exceeded|"
-    r"rate[ -]?limit(?:ed|ing)?|reviews? paused|provider outage|service outage|"
-    r"unsupported bot(?:-authored)? pr|cannot review|unable to review|"
-    r"payment required|insufficient credits?|capacity exhausted|"
-    r"access (?:denied|expired)|"
-    r"private repo(?:sitor(?:y|ies))?(?: does not have| has no) access|"
-    r"private repo(?:sitor(?:y|ies))?.{0,80}(?:expired|upgrade)|"
-    r"subscription (?:expired|ended)|trial (?:has )?expired|"
-    r"cost (?:limit|quota|cap) (?:reached|exceeded)|"
-    r"reviews? (?:was )?(?:skipped|not performed)|skipping (?:the )?(?:pr )?review|"
-    r"no[- ]?op(?: review)?|bot author (?:is |was )?detected|not eligible for review)\b)",
-    re.IGNORECASE,
-)
-# Compatibility name for the external-service evidence paths.
-REVIEW_SERVICES = EXTERNAL_REVIEWERS
 ZERO_SHA = "0" * 40
 REPOSITORY_AUTH = "repository"
 PROJECT_AUTH = "project"
@@ -84,66 +52,6 @@ class StatusPreconditionError(KernelError):
     """A fail-closed precondition error before issue or card mutation has begun."""
 
 
-def review_evidence_unavailable(record: dict[str, Any]) -> bool:
-    output = record.get("output")
-    nested = output if isinstance(output, dict) else {}
-    text = "\n".join(
-        str(value or "")
-        for value in (
-            *(record.get(key) for key in ("body", "description", "name", "context")),
-            *(nested.get(key) for key in ("title", "summary", "text")),
-        )
-    )
-    return bool(REVIEW_UNAVAILABLE_RE.search(text))
-
-
-def configured_coding_reviewers(
-    value: str | None = None,
-) -> dict[str, tuple[tuple[str, str | None], ...]]:
-    raw = os.environ.get(REVIEWER_CONFIG_ENV, "") if value is None else value
-    if not raw.strip():
-        raise KernelError(f"{REVIEWER_CONFIG_ENV} is missing")
-    configured: dict[str, list[tuple[str, str | None]]] = {}
-    identities: set[str] = set()
-    subscriptions: set[str] = set()
-    for entry in raw.split(","):
-        family, separator, candidate = entry.strip().partition(":")
-        identity, marker, subscription = candidate.partition("@")
-        if (
-            not separator or family not in CODING_REVIEWERS
-            or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", identity)
-            or identity in identities
-        ):
-            raise KernelError(f"{REVIEWER_CONFIG_ENV} is malformed or ambiguous")
-        if family == "claude-code":
-            if not marker or not re.fullmatch(r"[1-9][0-9]*", subscription):
-                raise KernelError(f"{REVIEWER_CONFIG_ENV} Claude subscription is malformed")
-            if subscription in subscriptions:
-                raise KernelError(f"{REVIEWER_CONFIG_ENV} repeats a Claude subscription")
-            subscriptions.add(subscription)
-        elif marker or configured.get(family):
-            raise KernelError(f"{REVIEWER_CONFIG_ENV} non-Claude reviewer is ambiguous")
-        identities.add(identity)
-        configured.setdefault(family, []).append((identity, subscription or None))
-    return {family: tuple(candidates) for family, candidates in configured.items()}
-
-
-def configured_reviewer_family(identity: str) -> str | None:
-    if not os.environ.get(REVIEWER_CONFIG_ENV, "").strip():
-        return None
-    for family, candidates in configured_coding_reviewers().items():
-        if any(candidate == identity for candidate, _subscription in candidates):
-            return family
-    return None
-
-
-def normalized_identity(value: str) -> str:
-    identity = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
-    if not identity:
-        raise KernelError("review identity is empty")
-    return identity[:80]
-
-
 def canonical_github_actor(value: str) -> str:
     actor = value.strip().lower()
     match = re.fullmatch(r"app/([a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?)", actor)
@@ -156,46 +64,6 @@ def same_github_actor(left: str, right: str) -> bool:
     if not left.strip() or not right.strip():
         return False
     return canonical_github_actor(left) == canonical_github_actor(right)
-
-
-def registered_coding_actors() -> dict[str, str]:
-    records = gh_json(["label", "list", "--limit", "1000", "--json", "name"])
-    if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
-        raise KernelError("coding reviewer identity bindings are unavailable")
-    bindings: dict[str, str] = {}
-    for item in records:
-        name = str(item.get("name") or "")
-        if not name.startswith(REVIEW_BINDING_PREFIX):
-            continue
-        values = name[len(REVIEW_BINDING_PREFIX) :].split("=", 1)
-        if len(values) != 2:
-            raise KernelError("coding reviewer identity binding is malformed")
-        identity, actor = values[0].lower(), values[1].lower()
-        if (
-            not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", identity)
-            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?(?:\[bot\])?", actor)
-            or identity in bindings
-        ):
-            raise KernelError("coding reviewer identity binding is malformed or ambiguous")
-        bindings[identity] = actor
-    return bindings
-
-
-def agent_family(identity: str) -> str:
-    value = normalized_identity(identity)
-    configured = configured_reviewer_family(value)
-    if configured:
-        return configured
-    aliases = {
-        "claude-code": ("claude",),
-        "openai-codex": ("codex", "openai"),
-        "xai-cursor": ("cursor", "xai"),
-        "google-antigravity": ("antigravity", "google", "agy"),
-    }
-    for family, needles in aliases.items():
-        if any(needle in value for needle in needles):
-            return family
-    return "human-or-other"
 
 
 def _graphql_query(args: list[str]) -> str:

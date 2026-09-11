@@ -9,10 +9,12 @@ python3 "$ARU_SDLC_HOME/integrations/adoption/check.py" \
   --repo /absolute/path/to/consumer --owner Unum-Inc
 ```
 
-Add `--github` to read the actual repository identity and current reviewer
-configuration. This does not prove live reviewer capacity, runner health,
-Project correctness, application correctness, or completed adoption. Run the
-normal project-scoped setup checks and a governed pilot for that evidence.
+Add `--github` to read the actual repository identity and whether the default
+branch's rules require one fresh approval of the last push (`approval_rule`:
+`enforced`, `not-enforced` or `unknown`). This does not prove that a reviewer
+account exists, runner health, Project correctness, application correctness, or
+completed adoption. Run the normal project-scoped setup checks and a governed
+pilot for that evidence.
 
 The JSON report includes canonical and consumer revisions, whether canonical
 source is dirty, hashes and comparison status for managed files, the assigned

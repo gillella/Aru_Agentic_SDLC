@@ -7,9 +7,8 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
 
 1. Run `fetch_pr_feedback.py --pr <n>`. Read the original finding and its thread,
    not only the latest bot reply. Handle every still-applicable finding,
-   including late results from replaced or retired reviewers. An outdated
-   marker does not prove that a defect is fixed; a late result does not replace
-   the assigned approval authority.
+   including late results from any reviewer. An outdated marker does not prove
+   that a defect is fixed.
 2. Identify the concrete consequence and evidence. Use one truthful disposition:
 
    | Disposition | Example and evidence |
@@ -23,11 +22,9 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
    Do not suppress findings, fabricate agreement, or resolve a thread without
    handling its substance. Evidence-backed disposition is not a blanket waiver.
 3. The writer owns remediation in the existing claimed worktree. The reviewer
-   stays independent and does not commit the fix. If the reviewer becomes an
-   author, record that contribution and replace their now-invalid authority
-   through `create_pr.py --refresh-reviewer <PR>
-   --coding-reviewer-unavailable <truthful reason>`. The replacement must be a
-   distinct non-author, not the same person under another identity.
+   stays independent and does not commit the fix; a reviewer who pushes to the
+   PR becomes its last pusher, and GitHub then needs an approval from someone
+   else.
 4. For a DIRTY merge state, resolve the repository's default branch and merge
    `origin/<default-branch>` into the feature branch (never rebase or force
    push), resolving conflicts within declared `touches:` boundaries.
@@ -37,19 +34,11 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
    repeat broad suites or add unrelated merge-system cases for advisory prose.
 6. After a code change, commit and push; reply with the fixing commit and
    evidence, then resolve the handled thread. Require the new exact-head
-   `aru-governed-pr` check and, for Tier 2-3, one fresh independent verdict.
-   A disposition-only reply does not create a new head or require gratuitous
-   commits, repeated verification, extra reviewer brands or extra approval
-   rounds. Existing exact-head authority must still be valid when merging.
+   `aru-governed-pr` check and a fresh approval from another account, because
+   the push dismissed the earlier one. A disposition-only reply creates no new
+   head and needs no extra commits, verification, reviewer brands or approval
+   rounds; the existing exact-head approval must still stand when merging.
 
-Do not review your own work or poll reviewer state. For Tier 2-3, after the
-push, the external Driver owns the one review-continuation event defined in
-`docs/KERNEL-CONTRACT.md`, including immediate explicit-unavailability handling
-or the configured policy timeout. If substantive coding review aborts or loses
-capacity, report the truthful reason through
-`create_pr.py --refresh-reviewer <PR> --coding-reviewer-unavailable <reason>`.
-
-Retire Sourcery and CodeAnt. Prefer usable authenticated current-head CodeRabbit;
-otherwise immediately select an available independent coding reviewer through
-the governed refresh helper. A failed availability check does not wait for the
-completion timer. Preserve Tier 0-1 without authoritative-review waits.
+Do not approve your own work or poll for reviews. Waiting for an approval is not
+author work; an operator or the external Driver arranges a reviewer on another
+account.

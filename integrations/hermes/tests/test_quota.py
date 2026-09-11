@@ -33,16 +33,13 @@ def qh(tmp_path, monkeypatch):
     policy = {"version": 1, "max_age_seconds": 120, "headroom_percent": 10, "unknown_checkpoint_seconds": 0,
               "max_recoveries": 2, "cooldown_seconds": 600, "author_actor": "test-author", "cold_start": []}
     for lane in h.config.lanes.values():
-        for kind in ("implementation", "remediation", "review", "checkpoint"):
+        for kind in ("implementation", "remediation", "checkpoint"):
             for risk in (0, 3):
                 policy["cold_start"].append({"task_class": kind, "risk": risk, "model": lane["quota"]["model"],
-                    "effort": "default", "percent": {"primary": 10 if kind == "review" else 30,
-                                                       "secondary": 10 if kind == "review" else 30}})
+                    "effort": "default", "percent": {"primary": 30,
+                                                       "secondary": 30}})
     h.config.project(REPO)["quota_admission"] = policy
     quota.validate_config(h.config)
-    h.kernel.reviewer_status = lambda: {"schema": "aru.reviewer-status/v3", "valid": True, "coding_reviewers": [
-        {"identity": i, "family": lane["family"], "reviewer_actor": i + "-actor", "eligible": True}
-        for i, lane in h.config.lanes.items()]}
     h.kernel.issue_summary = lambda n: h.kernel.record(n)
     monkeypatch.setattr(quota_collect, "collect", lambda c, r, i: observation(c.lane(r, i)))
     yield h
@@ -97,41 +94,21 @@ def test_codex_duration_mapping_and_missing_short_window(qh):
         quota_collect.normalize(lane, {"account": {"type": "chatgpt"}}, limits, time.time())
 
 
-def test_known_demand_reserves_independent_review_and_reports_uncertainty(qh):
+def test_known_demand_reserves_only_worker_and_reports_uncertainty(qh):
     decision = admission.evaluate(qh.config, qh.state, REPO, "codex-one", issue(1), "implementation", qh.kernel)
     assert decision["demand"]["confidence"] == "cold-start" and decision["demand"]["risk"] == 3
-    assert decision["demand"]["samples"] == 0 and len(decision["reservations"]) == 2
-    assert decision["review_budget"]["identity"] == "claude-one"
+    assert decision["demand"]["samples"] == 0 and len(decision["reservations"]) == 1
     assert decision["margin"] == 50
 
 
-@pytest.mark.parametrize("risk", [0, 1])
-def test_low_risk_author_does_not_need_or_reserve_a_reviewer(qh, risk):
-    qh.kernel.reviewer_status = lambda: pytest.fail("low-risk work must not require reviewer inventory")
+@pytest.mark.parametrize("risk", [0, 1, 2, 3, None, "0", True, -1, 4])
+def test_every_scope_reserves_only_its_worker(qh, risk):
     task = {**issue(1), "quota_risk": risk}
     decision = admission.evaluate(qh.config, qh.state, REPO, "codex-one", task, "implementation", qh.kernel)
     assert [r["role"] for r in decision["reservations"]] == ["worker"]
-    assert "review_budget" not in decision
 
 
-@pytest.mark.parametrize("risk", [2, 3, None, "0", True, -1, 4])
-def test_sensitive_or_unknown_risk_still_requires_independent_review(qh, risk):
-    qh.kernel.reviewer_status = lambda: {"schema": "aru.reviewer-status/v3", "valid": True, "coding_reviewers": []}
-    with pytest.raises(DriverError, match="no eligible independent reviewer"):
-        admission.evaluate(qh.config, qh.state, REPO, "codex-one", {**issue(1), "quota_risk": risk}, "implementation", qh.kernel)
-
-
-def test_consumer_can_explicitly_reserve_review_for_low_risk_tasks(qh):
-    qh.config.project(REPO)["quota_admission"]["reserve_review_for_all_tasks"] = True
-    quota.validate_config(qh.config)
-    result = admission.evaluate(qh.config, qh.state, REPO, "codex-one", {**issue(1), "quota_risk": 0}, "implementation", qh.kernel)
-    assert result["review_budget"]["identity"] == "claude-one"
-    qh.config.project(REPO)["quota_admission"]["reserve_review_for_all_tasks"] = "false"
-    with pytest.raises(DriverError, match="reserve_review_for_all_tasks"):
-        quota.validate_config(qh.config)
-
-
-@pytest.mark.parametrize("case", ["short", "long", "stale", "no-reviewer", "same-family", "same-actor", "invalid", "unknown", "missing-demand"])
+@pytest.mark.parametrize("case", ["short", "long", "stale", "invalid", "unknown", "missing-demand"])
 def test_admission_refusals(qh, monkeypatch, case):
     def collect(c, r, i):
         data = observation(c.lane(r, i))
@@ -145,12 +122,6 @@ def test_admission_refusals(qh, monkeypatch, case):
             return observation(c.lane(r, i), state="unknown")
         return data
     monkeypatch.setattr(quota_collect, "collect", collect)
-    if case == "no-reviewer":
-        qh.kernel.reviewer_status = lambda: {"valid": False}
-    if case == "same-family":
-        qh.config.lanes["claude-one"]["family"] = "openai-codex"
-    if case == "same-actor":
-        qh.config.project(REPO)["quota_admission"]["author_actor"] = "claude-one-actor"
     if case == "missing-demand":
         qh.config.project(REPO)["quota_admission"]["cold_start"] = []
     with pytest.raises(DriverError):
@@ -159,7 +130,6 @@ def test_admission_refusals(qh, monkeypatch, case):
 
 def test_unknown_is_only_bounded_checkpoint_and_invalid_never_is(qh, monkeypatch):
     qh.config.project(REPO)["quota_admission"]["unknown_checkpoint_seconds"] = 60
-    qh.config.project(REPO)["quota_admission"]["unknown_review_seconds"] = 60
     monkeypatch.setattr(quota_collect, "collect", lambda c, r, i: observation(c.lane(r, i), state="unknown"))
     decision = admission.evaluate(qh.config, qh.state, REPO, "codex-one", issue(1), "implementation", qh.kernel)
     assert decision["checkpoint_seconds"] == 60 and decision["demand"]["confidence"] == "unknown"

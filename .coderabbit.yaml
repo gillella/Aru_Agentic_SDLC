@@ -1,11 +1,9 @@
-# CodeRabbit is active only on PRs assigned review:coderabbit.
+# CodeRabbit reviews every non-draft PR; its approval counts as one approval from another account.
 inheritance: true
 reviews:
   auto_review:
     enabled: true
     drafts: false
-    labels:
-      - review:coderabbit
   path_instructions:
     - path: "scripts/merge_pr.py"
       instructions: |

@@ -125,7 +125,7 @@ class Canary:
         if (status.get("project") != self.project or type(status.get("enabled")) is not bool
                 or not isinstance(scheduler, dict)
                 or any(type(scheduler.get(k)) is not int or scheduler[k] < 0
-                       for k in ("enabled_heartbeats", "enabled_wakes", "enabled_review_wakes"))):
+                       for k in ("enabled_heartbeats", "enabled_wakes"))):
             raise CanaryError("malformed Driver status/scheduler observation")
         self._workers(status)  # Validate even an empty or unrelated inventory.
         return status
@@ -275,7 +275,7 @@ class Canary:
         status = self._status()
         preserved = live is not None and any(w.get("id") == live["id"] for w in self._workers(status, issue))
         gate_closed = status["enabled"] is False and all(
-            status["scheduler"][k] == 0 for k in ("enabled_heartbeats", "enabled_wakes", "enabled_review_wakes"))
+            status["scheduler"][k] == 0 for k in ("enabled_heartbeats", "enabled_wakes"))
         if live is None:
             step.close("unproven", "no active worker was running when Stop was issued",
                        paused=stopped.get("scheduler", {}).get("paused_job_ids"))
@@ -336,8 +336,7 @@ class Canary:
                 status = self._status(cleanup=True)
                 if (stopped.get("status") != "stopped" or status["enabled"] is not False
                         or status["scheduler"]["enabled_heartbeats"] != 0
-                        or status["scheduler"]["enabled_wakes"] != 0
-                        or status["scheduler"]["enabled_review_wakes"] != 0):
+                        or status["scheduler"]["enabled_wakes"] != 0):
                     raise CanaryError("final Stop did not confirm disabled dispatch/jobs")
                 cleanup.close("pass", "final Stop confirmed disabled dispatch/jobs; no worker termination requested")
             except (CanaryError, OSError, ValueError, KeyError, TypeError) as exc:
@@ -434,8 +433,7 @@ class FakeDriver:
             self._advance()
             out = {"project": project, "enabled": self.enabled, "last_error": None,
                    "workers": [dict(w) for w in self.workers],
-                   "scheduler": {"enabled_heartbeats": self.heartbeats, "enabled_wakes": self.wakes,
-                                 "enabled_review_wakes": 0}}
+                   "scheduler": {"enabled_heartbeats": self.heartbeats, "enabled_wakes": self.wakes}}
         else:
             return subprocess.CompletedProcess(argv, 1, json.dumps({"status": "error", "reason": "unknown op"}), "")
         return subprocess.CompletedProcess(argv, 0, json.dumps(out) + "\n", "")

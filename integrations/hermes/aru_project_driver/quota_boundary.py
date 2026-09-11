@@ -44,14 +44,14 @@ def recover_results(controller, repo):
                               "pool": lane["quota"]["pool"], "continuation_owner": record["id"]})
         write_json(controller.state.worker_path(record["id"]), record)
 
-def decide(controller, repo, adapter, identity, task, kind="implementation", review=None):
+def decide(controller, repo, adapter, identity, task, kind="implementation"):
     if not quota.enabled(controller.config, repo):
         return None
     try:
         if any(r["issue"] == task["number"] and r.get("quota_transfer_attempted") and not r.get("quota_transfer_completed")
                for r in controller.state.workers(repo)):
             raise DriverError("quota claim transition interrupted; canonical owner reconciliation required")
-        decision = admission.evaluate(controller.config, controller.state, repo, identity, task, kind, adapter, review=review)
+        decision = admission.evaluate(controller.config, controller.state, repo, identity, task, kind, adapter)
         reason = "bounded-checkpoint" if decision["checkpoint_seconds"] else "sufficient-observed-budget"
         accepted = True
     except DriverError as exc:
@@ -84,7 +84,7 @@ def resume(controller, repo, work, receipt, available):
         return None
     policy, config = controller.config.project(repo)["quota_admission"], controller.config
     attempts = sum(r.get("outcome") == "quota_exhausted" for r in controller.state.workers(repo)
-                   if r["issue"] == work["issue"] and r.get("kind") != "review")
+                   if r["issue"] == work["issue"])
     if attempts > policy["max_recoveries"]:
         raise DriverError("quota recovery bound reached; owner must inspect retained checkpoint")
     if receipt.get("quota_transfer_attempted") and not receipt.get("quota_transfer_completed"):
@@ -137,32 +137,6 @@ def transfer(controller, repo, adapter, work):
     write_json(controller.state.worker_path(receipt["id"]), receipt)
     return {**work, "agent": identity}
 
-def settle(controller, repo, adapter):
-    if not quota.enabled(controller.config, repo):
-        return
-    issues = {r["issue"] for r in controller.state.workers(repo)
-              if r.get("quota_decision") and not r.get("quota_review_released")}
-    for number in issues:
-        summary = adapter.issue_summary(number)
-        authors = [r for r in controller.state.workers(repo) if r["issue"] == number and r.get("kind") != "review"]
-        latest = max(authors, key=lambda r: r["started_at"], default={})
-        blocked = latest.get("retry_blocked") and not any(controller._holds_reservation(r) for r in authors)
-        has_pr = any(number in p.get("issues", []) for p in adapter.snapshot()["prs"])
-        if summary.get("state") == "CLOSED" or (blocked and not has_pr):
-            admission.release_review(controller.state, repo, number)
-
 def refusal(controller, repo):
     decisions = read_json(controller.state.root / "quota-decisions" / (key(repo) + ".json"))["decisions"]
     return decisions[-1]["reason"]
-
-def review_failure(controller, repo, binding):
-    reason = refusal(controller, repo)
-    if not reason.startswith("quota exhausted;"):
-        raise DriverError(reason + "; assigned authority retained; completion/heartbeat owns revalidation")
-    lane = controller.config.lane(repo, binding["reviewer"])
-    receipt = {"id": uuid.uuid4().hex, "repo": repo, "agent": binding["reviewer"], "issue": binding["issue"],
-               "kind": "review", "pr": binding["pr"], "head": binding["head"], "review": binding,
-               "capacity_key": lane["capacity_key"], "state": "launch_failed", "started_at": time.time(),
-               "reason": "assigned reviewer quota/independence admission unavailable", "worktree": None}
-    write_json(controller.state.worker_path(receipt["id"]), receipt)
-    return receipt

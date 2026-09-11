@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased - One approval from another account (v3)
+
+- Review is one rule for every PR: an approval of the exact head from a GitHub
+  account other than the author. The bootstrap ruleset requires one approval,
+  dismisses stale approvals and requires last-push approval; `merge_pr.py`
+  rereads the reviews before submission.
+- Removed the reviewer-policy machinery: path-tiered review, CodeRabbit
+  capability probes and deadlines, coding-agent attestations and bindings,
+  `review_policy.py`, `review_evidence.py`, `reviewer_probe.py`,
+  `legacy_recovery.py`, and every reviewer option of `create_pr.py`. The Kernel
+  no longer reads or writes `review:*`, `reviewer*`, `review-policy:*`,
+  `author:*`, `author-family:*` or `needs-reviewer` labels.
+- `fetch_next_work.py` finds an agent's PR from its claimed issue's branch and
+  reports an unapproved PR as `review` work for another account.
+- The Hermes Driver no longer launches review workers; PRs wait for an approval.
+- Breaking: existing consumers add the approval rule to their ruleset, and
+  agents authoring under one GitHub account need a reviewer under another.
+
 ## Unreleased - Scope pinning and reviewer gaps
 
 - Drop the 6,500-line Kernel production ceiling; it was full and blocked every fix.
