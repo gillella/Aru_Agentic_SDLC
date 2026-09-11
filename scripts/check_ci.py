@@ -8,8 +8,17 @@ import re
 from datetime import datetime, timezone
 
 from common import KernelError, gh_json, json_print, repo_slug
-from review_evidence import parse_time
 from merge_state import require_direct_merge_history
+
+
+def parse_time(value: str, *, subject: str = "review assignment") -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise KernelError(f"{subject} timestamp is malformed") from exc
+    if parsed.tzinfo is None:
+        raise KernelError(f"{subject} timestamp has no timezone")
+    return parsed
 
 DEFAULT_REQUIRED_CHECK = "aru-governed-pr"
 GITHUB_ACTIONS_APP_ID = 15368

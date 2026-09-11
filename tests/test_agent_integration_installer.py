@@ -21,7 +21,7 @@ def install(home: Path, *, check=True) -> subprocess.CompletedProcess[str]:
 
 def assert_current(guidance):
     assert "fetch_next_work.py" in guidance
-    assert "CodeRabbit is the sole preferred external provider" in guidance
+    assert "GitHub account other than the author: a person, CodeRabbit" in guidance
     assert "Each repository must use its declared runner profile" in guidance
     assert "`.aru/verify-project.sh`" in guidance
     assert "preserve existing consumer verification on updates" in guidance

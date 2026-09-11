@@ -126,7 +126,6 @@ class Fixture:
             self.config,
             adapter_factory=lambda *args: self.adapters[args[-1]],
             availability=lambda *_: {"available": True},
-            sync_reviews=lambda *_: {},
         )
 
 

@@ -96,18 +96,14 @@ def traverse(monkeypatch, number: int) -> dict:
     monkeypatch.setattr(create_pr, "current_branch", lambda: f"feat/issue-{number}-tiny")
     monkeypatch.setattr(create_pr, "require_published_head", lambda _branch: "a" * 40)
     monkeypatch.setattr(create_pr, "local_changed_paths", lambda: ["src/auth/session.py"])
-    monkeypatch.setattr(create_pr, "ensure_label", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(create_pr, "run", lambda _argv: None)
-    reviewer = "coderabbit"
 
     def pr_snapshot(_argv):
         return {
             "number": number + 100,
             "url": f"https://example/pr/{number + 100}",
             "state": "OPEN",
-            "createdAt": "2026-09-01T12:00:00+00:00",
             "headRefOid": "a" * 40,
-            "labels": [{"name": "review:" + reviewer}],
         }
 
     monkeypatch.setattr(create_pr, "gh_json", pr_snapshot)
@@ -117,15 +113,8 @@ def traverse(monkeypatch, number: int) -> dict:
         "feat: tiny",
         verification_body("pytest tests/test_kernel_traversal.py -q"),
         "codex-1",
-        external_states={
-            "coderabbit": create_pr.AVAILABLE,
-            "sourcery": create_pr.UNAVAILABLE,
-            "codeant": create_pr.UNAVAILABLE,
-        },
-        reviewer_actors={},
-        author_actor="author-login",
     )
-    assert created["reviewer"] == reviewer
+    assert created["next_action"] == "await-approval-by-another-account"
 
     state["issue"]["body"] = state["issue"]["body"].replace("- [ ]", "- [x]")
     state["pr"] = {
@@ -139,8 +128,9 @@ def traverse(monkeypatch, number: int) -> dict:
         "baseRefOid": "b" * 40,
         "mergeable": "MERGEABLE",
         "mergeStateStatus": "CLEAN",
-        "labels": [{"name": "review:" + reviewer}],
-        "statusCheckRollup": [{"name": reviewer, "status": "COMPLETED", "conclusion": "SUCCESS"}],
+        "author": {"login": "writer"},
+        "labels": [],
+        "statusCheckRollup": [],
     }
     monkeypatch.setattr(merge_pr, "pull_request", lambda _number: copy.deepcopy(state["pr"]))
     monkeypatch.setattr(merge_pr, "pull_changed_paths", lambda _n: ["app.py", "tests/test_app.py"])
@@ -160,7 +150,9 @@ def traverse(monkeypatch, number: int) -> dict:
 
     monkeypatch.setattr(merge_pr, "finalization_verdict", finalization_ci)
     monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _number: [])
-    monkeypatch.setattr(merge_pr, "exact_head_review", lambda *_args: True)
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _number: [
+        {"id": 1, "user": {"login": "reviewer"}, "commit_id": "a" * 40, "state": "APPROVED"},
+    ])
     monkeypatch.setattr(merge_pr, "base_snapshot", lambda _pr: "b" * 40)
     monkeypatch.setattr(
         merge_pr,

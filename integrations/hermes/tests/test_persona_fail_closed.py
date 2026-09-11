@@ -36,24 +36,6 @@ def test_corrupt_evidence_is_refused(driver_env):
         persona_routing.load_evidence_store(config, state)
 
 
-def test_self_review_is_not_repaired_by_renaming_actor(driver_env):
-    config, state, worktree = driver_env
-    binding = {
-        "pr": 201, "issue": 101, "author": "claude-opus", "author_actor": "same-actor",
-        "reviewer_actor": "same-actor", "risk_tier": 2,
-        "author_history": [{"persona": "opus-implementer",
-                            "account_id": "claude-subscription-1", "actor": "same-actor"}],
-    }
-    binding.update(repo="owner/repo", head="a" * 40, touches=["src/app.py"],
-                   reviewer_persona="astra-implementer", reviewer_account="openai-codex",
-                   authority=persona_routing._personas.default_snapshot().persona("astra-implementer").lineage,
-                   authority_source="synthetic kernel binding", external_first_released=True,
-                   external_first_reason="synthetic refusal")
-    with pytest.raises(persona_routing._personas.errors.ReviewIndependenceError):
-        persona_routing.resolve_review_plan(config, state, "owner/repo", binding,
-                                            str(worktree), "a" * 40, current_binding=dict(binding))
-
-
 def test_resolution_failure_never_starts_generic_supervisor(driver_env, monkeypatch):
     config, state, worktree = driver_env
     prepare_managed_dispatch(config, monkeypatch)
@@ -119,14 +101,6 @@ def test_conflicting_task_labels_are_refused(driver_env):
             "number": 101, "touches": ["src/app.py"],
             "labels": ["aru-task:bounded_implementation", "aru-task:architecture_decision"],
         }, "codex-astra", str(worktree), "feat/issue-101", "a" * 40)
-
-
-def test_changed_review_authority_is_refused(driver_env):
-    config, state, worktree = driver_env
-    with pytest.raises(DriverError, match="matching kernel authority"):
-        persona_routing.resolve_review_plan(config, state, "owner/repo", {"head": "a" * 40},
-                                            str(worktree), "a" * 40,
-                                            current_binding={"head": "b" * 40})
 
 
 def test_explicit_empty_policy_does_not_select_defaults(driver_env):

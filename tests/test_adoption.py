@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 
 from integrations.adoption import check
@@ -67,3 +68,29 @@ def test_inspection_refuses_fifo_and_oversized_verifier(tmp_path):
     target.unlink()
     target.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
     assert check.verification(repo)["status"] == "missing-or-unreadable"
+
+
+def test_github_readiness_reports_whether_rules_enforce_the_approval_rule(tmp_path, monkeypatch):
+    identity = json.dumps({"nameWithOwner": "Unum-Inc/consumer", "defaultBranchRef": {"name": "main"}})
+    fresh = {"required_approving_review_count": 1, "dismiss_stale_reviews_on_push": True,
+             "require_last_push_approval": True}
+    rules = {}
+
+    def read(argv, cwd):
+        if argv[:3] == ["gh", "repo", "view"]:
+            return identity
+        assert argv == ["gh", "api", "repos/Unum-Inc/consumer/rules/branches/main"]
+        return rules["raw"]
+
+    monkeypatch.setattr(check, "command", read)
+    for inventory, expected in [
+        ([{"type": "pull_request", "parameters": fresh}], "enforced"),
+        ([{"type": "pull_request", "parameters": {**fresh, "require_last_push_approval": False}}], "not-enforced"),
+        ([{"type": "pull_request", "parameters": {**fresh, "required_approving_review_count": True}}], "not-enforced"),
+        ([{"type": "required_status_checks", "parameters": {}}], "not-enforced"),
+        (None, "unknown"),
+    ]:
+        rules["raw"] = None if inventory is None else json.dumps(inventory)
+        report = check.github_readiness(tmp_path, "Unum-Inc")
+        assert report["approval_rule"] == expected
+        assert "reviewer_configuration" not in report

@@ -43,10 +43,10 @@ def issue(number, status="Ready", touches="src/a.py", *, agents=(), dependency=N
     }
 
 
-def pr(number, linked=1, path="src/a.py", author="codex-a"):
+def pr(number, linked=1, path="src/a.py"):
     return {
         "number": number, "state": "open", "head": {"sha": "a" * 40},
-        "body": f"Closes #{linked}", "labels": ["author:" + author],
+        "body": f"Closes #{linked}", "labels": [],
         "user": {"login": "author-user"}, "files": [{"filename": path}],
     }
 
@@ -174,121 +174,10 @@ def test_complete_snapshot_includes_closed_active_and_review_reservations(tmp_pa
     assert snapshot["schema"] == SCHEMA
     assert [record["number"] for record in snapshot["issues"]] == [1, 2, 3]
     assert snapshot["prs"][0]["author_actor"] == "author-user"
-    assert snapshot["prs"][0]["labels"] == ["author:codex-a"]
+    assert snapshot["prs"][0]["labels"] == []
+    assert snapshot["prs"][0]["author_agent"] == "codex-a"
     assert snapshot["ci_available"] is True
     assert snapshot["ci"]["free_runners"] == 1
-
-
-@pytest.fixture
-def review_bridge(tmp_path, monkeypatch):
-    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
-    common = importlib.import_module("common")
-    merge = importlib.import_module("merge_pr")
-    bridge = make_bridge(Backend(), tmp_path)
-    opened = {"number": 9, "headRefOid": "a" * 40, "state": "OPEN", "isDraft": False,
-              "body": "Closes #1", "author": {"login": "author-user"},
-              "labels": ["author:writer", "author-family:openai-codex", "review:claude-code",
-                         "reviewer:reviewer-one", "reviewer-actor:review-bot"]}
-    bridge.merge_state.pull_request = lambda number: deepcopy(opened)
-    bridge.revalidate = lambda number, agent: {"agents": [agent]} if number == 1 else pytest.fail("wrong issue")
-    for name in ("AUTHOR_PREFIX", "CODING_REVIEWERS", "normalized_identity", "same_github_actor", "configured_reviewer_family"):
-        setattr(bridge.common, name, getattr(common, name))
-    bridge.common.registered_coding_actors = lambda: {"reviewer-one": "review-bot"}
-    monkeypatch.setenv("ARU_CODING_REVIEWERS", "claude-code:reviewer-one@1")
-    monkeypatch.setattr(merge, "pull_reviews", lambda number: [])
-    return bridge, opened
-
-
-def test_review_binding_uses_kernel_verdict_and_rejects_stale_expected_head(review_bridge, monkeypatch):
-    bridge, opened = review_bridge
-    binding = bridge.review_binding(9)
-    assert binding["repo"] == REPO and binding["reviewer"] == "reviewer-one"
-    assert binding["author"] == "writer" and binding["verdict"] is None
-    opened["headRefOid"] = "b" * 40
-    with pytest.raises(KernelAdapterError, match="changed"):
-        bridge.review_binding(9, binding)
-    merge = importlib.import_module("merge_pr")
-    monkeypatch.setattr(merge, "coding_review_verdict", lambda *args: "REQUEST_CHANGES")
-    assert bridge.review_binding(9)["verdict"] == "REQUEST_CHANGES"
-
-
-@pytest.mark.parametrize("change", ["actor", "identity", "registration", "family", "multiple", "draft", "needs-human", "late-head"])
-def test_review_binding_fails_closed_on_independence_or_authority_changes(review_bridge, monkeypatch, change):
-    bridge, opened = review_bridge
-    if change == "actor":
-        opened["author"]["login"] = "review-bot"
-    elif change == "identity":
-        opened["labels"][0] = "author:reviewer-one"
-    elif change == "registration":
-        bridge.common.registered_coding_actors = lambda: {}
-    elif change == "family":
-        monkeypatch.setenv("ARU_CODING_REVIEWERS", "openai-codex:reviewer-one")
-    elif change == "multiple":
-        opened["labels"].append("review:coderabbit")
-    elif change == "draft":
-        opened["isDraft"] = True
-    elif change == "needs-human":
-        opened["labels"].append("needs-human")
-    else:
-        merge = importlib.import_module("merge_pr")
-        def move_head(number):
-            opened["headRefOid"] = "b" * 40
-            return []
-        monkeypatch.setattr(merge, "pull_reviews", move_head)
-    with pytest.raises(RuntimeError):
-        bridge.review_binding(9)
-
-
-def test_review_worktree_is_detached_and_revalidates_after_fetch(review_bridge, tmp_path):
-    bridge, _ = review_bridge
-    binding = bridge.review_binding(9)
-    calls = []
-    directory = tmp_path / ".worktrees" / f"review-pr-9-{binding['head']}-reviewer-one"
-    bridge.common.primary_worktree = lambda: tmp_path
-    bridge.common.repo_root = lambda **kwargs: directory
-    bridge.review_binding = lambda *args: binding
-    def git(args, **kwargs):
-        calls.append(args)
-        if args[0] == "rev-parse":
-            return binding["head"]
-        return ""
-    bridge.common.git = git
-    assert bridge.review_worktree(binding) == str(directory)
-    assert ["worktree", "add", "--detach", str(directory), binding["head"]] in calls
-    bridge.common.git = lambda args, **kwargs: "b" * 40 if args[0] == "rev-parse" else ""
-    with pytest.raises(KernelAdapterError, match="advanced"):
-        bridge.review_worktree(binding)
-
-
-def test_reviewer_recovery_calls_only_canonical_helper_after_binding_check(review_bridge, monkeypatch):
-    bridge, opened = review_bridge
-    binding = bridge.review_binding(9)
-    create = importlib.import_module("create_pr")
-    calls = []
-    fallback = {"pr": 9, "authority": "openai-codex", "action": "fallback", "reason": "worker lost", "reviewer": "second"}
-    monkeypatch.setattr(create, "recover_coding_authority", lambda *args: calls.append(args) or fallback)
-    bridge.review = SimpleNamespace(reviewer_continuation=lambda number, **_kw: {
-        "authority": "openai-codex", "next_action": "await-authoritative-review", "retry_at": None})
-    refreshed = bridge.refresh_reviewer(9, binding, "worker lost")
-    assert refreshed["next_action"] == "await-authoritative-review" and refreshed["reviewer"] == "second"
-    assert calls[0][:4] == (9, opened, "claude-code", "worker lost")
-    opened["headRefOid"] = "b" * 40
-    with pytest.raises(KernelAdapterError, match="changed"):
-        bridge.refresh_reviewer(9, binding, "worker lost")
-    assert len(calls) == 1
-
-
-def test_recovery_rejects_observed_same_family_reassignment(review_bridge, monkeypatch):
-    bridge, opened = review_bridge
-    binding = bridge.review_binding(9)
-    create = importlib.import_module("create_pr")
-    monkeypatch.setattr(create, "recover_coding_authority", lambda *a: pytest.fail("stale recovery must not mutate"))
-    def drift(number, expected):
-        opened["labels"][-2:] = ["reviewer:second", "reviewer-actor:other-bot"]
-        return binding
-    bridge.review_binding = drift
-    with pytest.raises(KernelAdapterError, match="assignment changed"):
-        bridge.refresh_reviewer(9, binding, "worker lost")
 
 
 def test_conflicting_first_candidate_does_not_starve_independent_issue(tmp_path):
@@ -581,7 +470,7 @@ def test_subprocess_bridge_imports_only_in_child_and_preserves_cwd(tmp_path):
     (scripts / "fetch_next_work.py").write_text(
         "import os\ndef select(agent): return {'type':'idle','agent':agent,'cwd':os.getcwd()}\n"
     )
-    for name in ("triage_backlog", "create_branch", "review_policy", "merge_state"):
+    for name in ("triage_backlog", "create_branch", "merge_state"):
         (scripts / f"{name}.py").write_text("")
     previous = Path.cwd()
     result = KernelAdapter(scripts.parent, repo_dir, REPO).next_work("codex-a")
@@ -625,3 +514,34 @@ def test_resume_checks_actual_own_pr_paths_against_other_writers(tmp_path):
     bridge = make_bridge(Backend(records, [opened]), tmp_path)
     with pytest.raises(KernelAdapterError, match="overlaps active issue #2"):
         bridge.revalidate(1, "codex-a")
+
+
+def test_claimant_attributes_pr_without_author_labels_and_preserves_boundary(tmp_path):
+    backend = Backend([issue(1, "In Review", agents=["codex-a"]), issue(2, touches="src/b.py")], [pr(9)])
+    bridge = make_bridge(backend, tmp_path)
+    snapshot = bridge.snapshot()
+    opened = snapshot["prs"][0]
+    assert opened["labels"] == [] and opened["author_agent"] == "codex-a"
+    assert opened["author_actor"] == "author-user"
+    assert bridge.revalidate(1, "codex-a")["agents"] == ["codex-a"]
+    backend.records[2]["labels"] += ["agent:other"]
+    backend.records[2]["labels"][0] = "status:in-progress"
+    backend.prs[9]["files"].append({"filename": "src/b.py"})
+    with pytest.raises(KernelAdapterError, match="overlaps active issue"):
+        bridge.revalidate(1, "codex-a")
+
+
+def test_ambiguous_claimant_refuses_pr_attribution(tmp_path):
+    backend = Backend([issue(1, "In Review", agents=["codex-a", "other"])], [pr(9)])
+    with pytest.raises(KernelAdapterError, match="contradictory claimant"):
+        make_bridge(backend, tmp_path).snapshot()
+
+
+def test_multiple_linked_issues_never_select_an_arbitrary_claimant(tmp_path):
+    opened = pr(9)
+    opened["body"] += "\nCloses #2"
+    backend = Backend([issue(1, "In Review", agents=["codex-a"]), issue(2)], [opened])
+    snapshot = make_bridge(backend, tmp_path).snapshot()
+    assert snapshot["prs"][0]["author_agent"] is None
+    with pytest.raises(KernelAdapterError, match="already has open PR"):
+        make_bridge(backend, tmp_path).revalidate(1, "codex-a")

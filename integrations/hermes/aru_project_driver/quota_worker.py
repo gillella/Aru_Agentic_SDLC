@@ -25,10 +25,9 @@ def prepare(config, state, record, adapter, *, exclude=None):
         if (other["issue"] == record["issue"] and other["id"] != exclude
                 and other["id"] in state.capacity_holders(other["capacity_key"], lane.get("max_sessions", 1))):
             raise DriverError("quota launch excluded by a live task owner")
-    author = record["review"]["author"] if record["kind"] == "review" else record["agent"]
-    task = adapter.revalidate(record["issue"], agent=author)
+    task = adapter.revalidate(record["issue"], agent=record["agent"])
     record["quota_decision"] = admission.evaluate(config, state, record["repo"], record["agent"],
-        task, record["kind"], adapter, exclude=exclude, review=record.get("review"))
+        task, record["kind"], adapter, exclude=exclude)
     record["policy_fingerprint"] = permissions.fingerprint(config, record["repo"], record["agent"])
     quota_checkpoint.prepare(state, record)
 
@@ -83,12 +82,8 @@ def finish(config, state, record):
     record["quota_continuation"] = {"owner": "Hermes Driver completion/heartbeat", "issue": record["issue"],
                                     "worktree": record["worktree"], "checkpoint": record.get("quota_checkpoint")}
     record["quota_measurement"] = {"state": "unknown", "reason": "no-comparable-full-completion-observations"}
-    # Release a speculative review budget for a failed/checkpoint author; a
-    # reported full task retains its budget only for the bounded review lease.
-    if record.get("outcome") != "reported_success":
-        record["quota_review_released"] = True
     if record.get("outcome") == "reported_success" and decision["checkpoint_seconds"]:
-        record.update(outcome="quota_checkpoint", retry_blocked=False, quota_review_released=True,
+        record.update(outcome="quota_checkpoint", retry_blocked=False,
                       reason="bounded quota checkpoint ended; completion/heartbeat owns limited continuation")
     quota_checkpoint.save(state, record)
     if record.get("outcome") == "quota_exhausted":
@@ -135,6 +130,7 @@ def validate_record(record):
             or not decision["author_families"] or any(not isinstance(f, str) or f not in quota.FAMILIES for f in decision["author_families"])
             or not isinstance(decision.get("reservations"), list) or not 1 <= len(decision["reservations"]) <= 2):
         raise DriverError("invalid quota worker receipt")
+    # Validate old author receipts with one unused review allocation as well.
     for allocation in decision["reservations"]:
         if (not isinstance(allocation, dict) or allocation.get("role") not in {"worker", "review"}
                 or not isinstance(allocation.get("account"), str) or len(allocation["account"]) != 64
@@ -142,3 +138,5 @@ def validate_record(record):
                 or set(allocation["percent"]) != {"primary", "secondary"}
                 or any(not quota.number(v, 0, 10000) for v in allocation["percent"].values())):
             raise DriverError("invalid quota reservation")
+    if sum(a["role"] == "worker" for a in decision["reservations"]) != 1:
+        raise DriverError("quota receipt requires one worker reservation")

@@ -19,38 +19,26 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
    assigned runner profile: `self-hosted-mac` for `gillella` personal
    repositories, `github-hosted` for `Unum-Inc`. Never switch profiles or edit
    `runs-on:` to get a check to run — an offline `aru-ci` pool leaves the check
-   queued, and a hosted repository is never sent to a personal Mac. Tier 0
-   documentation and Tier 1 ordinary code do not wait for authoritative review;
-   Tier 2 sensitive/contract and Tier 3 production/destructive changes also wait
-   for one assigned reviewer distinct from the author. Unrecognized or invalid
-   paths fail upward.
+   queued, and a hosted repository is never sent to a personal Mac.
    GitHub Actions supplies the check identity while `.aru/verify.sh` runs on
    that profile's runners and validates the linked issue's `touches:` boundary
    against the actual diff. Ad hoc local runs remain preflight evidence.
-   For Tier 2-3, do not hand-pick or hand-edit authority. The external Driver
-   owns the one continuation event in `docs/KERNEL-CONTRACT.md`;
-   `create_pr.py --refresh-reviewer <PR>` immediately retires Sourcery/CodeAnt
-   and selects available independent coding fallback when CodeRabbit capability
-   is unavailable or unproven. Only an accepted review uses the configured
-   timeout (900 seconds by default); exact-head attempt history prevents retries. If substantive
-   coding review aborts or
-   loses capacity, pass the
-   truthful reason through
-   `--coding-reviewer-unavailable <reason>`.
+   Every PR also waits for one approval of its exact head from a GitHub account
+   other than yours; `fetch_next_work.py` reports that as `review` work, which
+   the author cannot do. Do not poll for reviews.
 10. If feedback exists, use the feedback skill. If the server check fails, use
     the CI remediation skill.
 
-A coding agent may review another agent's code. Never authoritatively review
-your own PR. A coding-agent review must read the issue and acceptance criteria,
-inspect the exact diff and surrounding code, run focused verification, and
-submit a substantive full-current-head `APPROVE` or `REQUEST_CHANGES`
-attestation with severity, concrete consequence, evidence and `file:line`
-findings. The writer owns remediation; a reviewer who authors a fix must be
-replaced through the governed helper and cannot supply independent approval.
-Use the feedback skill's fix, evidence-backed disagreement, advisory-only and
-accepted-follow-up dispositions. Inspect existing relevant regression coverage
-before requesting new tests. One valid independent current-head verdict is
-sufficient; no extra brands or ceremonial approval rounds are required.
+A coding agent may review another agent's code when it works under a different
+GitHub account. Never approve your own PR. A review must read the issue and
+acceptance criteria, inspect the exact diff and surrounding code, run focused
+verification, and submit a GitHub `APPROVE` or `REQUEST_CHANGES` review of the
+current head with severity, concrete consequence, evidence and `file:line`
+findings. The writer owns remediation; a reviewer who pushes a fix cannot also
+approve it. Use the feedback skill's fix, evidence-backed disagreement,
+advisory-only and accepted-follow-up dispositions. Inspect existing relevant
+regression coverage before requesting new tests. One approval of the current
+head is sufficient; no extra brands or ceremonial approval rounds are required.
 
 Stop after one claimed issue in this worktree. Another operator may invoke the
 same single-agent picker independently, but do not start a scheduler, fleet,

@@ -8,10 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_controller import REPO, assigned_review, issue
+from test_controller import REPO, issue
 from test_quota import qh as qh, observation
 from aru_project_driver import execution, permissions, quota, quota_admission as admission, quota_collect, quota_worker
-from aru_project_driver.config import DriverError
 from aru_project_driver.state import key, read_json, write_json
 
 
@@ -63,15 +62,15 @@ def test_resume_rechecks_quota_after_probe(qh, monkeypatch):
     assert qh.kernel.record(1)["agents"] == ["codex-one"]
 
 
-def test_child_recheck_reinstates_review_budget_after_scope_risk_increases(qh):
+def test_child_recheck_updates_risk_without_reserving_another_worker(qh):
     record = terminal(qh)
     qh.kernel.record(1)["quota_risk"] = 0
     quota_worker.prepare(qh.config, qh.state, record, qh.kernel)
     assert len(record["quota_decision"]["reservations"]) == 1
     qh.kernel.record(1)["quota_risk"] = 2
-    qh.kernel.reviewer_status = lambda: {"schema": "aru.reviewer-status/v3", "valid": True, "coding_reviewers": []}
-    with pytest.raises(DriverError, match="no eligible independent reviewer"):
-        quota_worker.recheck(qh.config, qh.state, record, qh.kernel)
+    quota_worker.recheck(qh.config, qh.state, record, qh.kernel)
+    assert record["quota_decision"]["demand"]["risk"] == 3
+    assert [r["role"] for r in record["quota_decision"]["reservations"]] == ["worker"]
 
 
 def test_quota_fallback_uses_canonical_transition_and_preserves_checkpoint(qh):
@@ -128,28 +127,7 @@ def test_account_aliases_share_reservations_across_projects(qh):
     write_json(qh.state.worker_path(receipt["id"]), receipt)
     held = admission.reservations(qh.config, qh.state, qh.config.lanes["codex-two"]["quota"]["account_sha256"], "codex")
     assert held == {"primary": 30, "secondary": 30}
-    assert admission.reservations(qh.config, qh.state, qh.config.lanes["claude-one"]["quota"]["account_sha256"], "codex") == {"primary": 10, "secondary": 10}
-
-
-def test_insufficient_review_retains_authority_without_recovery(qh, monkeypatch):
-    assigned_review(qh)
-    qh.kernel.issues = [qh.kernel.record(1)]
-    monkeypatch.setattr(quota_collect, "collect", lambda c, r, i: observation(c.lane(r, i), 1))
-    result = qh.controller.reconcile(REPO)
-    assert not result["launched"]
-    assert sum(c[0] == "refresh_reviewer" for c in qh.kernel.calls) == 0
-    qh.controller.reconcile(REPO)
-    assert sum(c[0] == "refresh_reviewer" for c in qh.kernel.calls) == 0
-
-
-def test_cumulative_family_independence_at_review_boundary(qh):
-    assigned_review(qh)
-    old = terminal(qh)
-    old["agent"] = "claude-one"
-    old["capacity_key"] = qh.config.lanes["claude-one"]["capacity_key"]
-    write_json(qh.state.worker_path(old["id"]), old)
-    with pytest.raises(DriverError, match="cumulative"):
-        admission.evaluate(qh.config, qh.state, REPO, "claude-one", issue(1), "review", qh.kernel, review=qh.kernel.binding)
+    assert admission.reservations(qh.config, qh.state, qh.config.lanes["claude-one"]["quota"]["account_sha256"], "codex") == {"primary": 0, "secondary": 0}
 
 
 @pytest.mark.parametrize("after", ["healthy", "exhausted", "stop"])
@@ -196,7 +174,6 @@ def test_claude_637_quota_envelope_is_not_permission_policy_failure(qh, tmp_path
     assert observed["quota_reset_at"] is None and "11:30am" not in json.dumps(observed)
     record = terminal(qh, "claude-one")
     qh.config.project(REPO)["quota_admission"]["unknown_checkpoint_seconds"] = 60
-    qh.config.project(REPO)["quota_admission"]["unknown_review_seconds"] = 60
     monkeypatch.setattr(quota_collect, "collect", lambda c, r, i: observation(c.lane(r, i), state="unknown"))
     record["quota_decision"] = admission.evaluate(qh.config, qh.state, REPO, "claude-one", issue(1), "implementation", qh.kernel)
     record.update(observed, child_pid=123)
@@ -210,3 +187,13 @@ def test_claude_637_quota_envelope_is_not_permission_policy_failure(qh, tmp_path
     payload["permission_denials"] = ["malformed"]
     result.write_text(json.dumps(payload))
     assert permissions.observe_result(result, 1, quota_errors=True)["outcome"] == "result_unavailable"
+
+
+def test_legacy_author_review_allocation_never_reserves_quota(qh):
+    record = terminal(qh)
+    decision = admission.evaluate(qh.config, qh.state, REPO, "codex-one", issue(1), "implementation", qh.kernel)
+    other = qh.config.lanes["claude-one"]["quota"]
+    decision["reservations"].append({"role": "review", "account": other["account_sha256"],
+                                      "pool": other["pool"], "percent": {"primary": 90, "secondary": 90}})
+    qh.launch(qh.config, REPO, "codex-one", 1, record["worktree"], quota_decision=decision)
+    assert admission.reservations(qh.config, qh.state, other["account_sha256"], other["pool"]) == {"primary": 0, "secondary": 0}

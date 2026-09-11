@@ -13,59 +13,32 @@ requirements to consume a subscription.
 | `scheduler.py` | External script | Register jobs in the existing Hermes scheduler; no separate scheduler daemon |
 | `kernel.py` | External script | Read GitHub authority and invoke existing kernel helpers in isolated subprocesses |
 | `execution.py`, `capacity.py`, `state.py` | External scripts | Observe resources, reserve shared accounts, launch workers and retain operational receipts |
-| Aru `scripts/` | Kernel scripts | Validate, promote, claim, create worktrees, assign review authority and merge |
+| Aru `scripts/` | Kernel scripts | Validate, promote, claim, create worktrees, check GitHub approval and merge |
 | GitHub issues, linked Project and PRs | Lifecycle authority | Approved scope, ownership, acceptance, verification and completion |
 
 The adapter inherits the configured Hermes model. Installing it does not choose
 or change that model. Operational receipts are not another issue board.
 
-## Independent review execution
+## GitHub approval
 
-An assigned coding reviewer must be a configured lane with the same identity
-and family as the kernel's current assignment and a registered GitHub actor
-distinct from the author. Reconcile uses the existing supervised worker and
-capacity lock with a detached exact-head review worktree. The read-only review
-prompt requires issue acceptance, scope, substantive diff/surrounding-code
-inspection, focused verification and the kernel's formal attestation. It
-forbids source edits, claims, assignment changes and merging. Assignment alone
-is not progress: the result names a queued/running receipt or an owned blocker.
+Every PR needs one GitHub approval on its latest commit from an account other
+than its author. Reviews happen on GitHub. The Driver waits quietly: a picker
+`review` item appears in its plan and reconciliation output as `type: wait`,
+with the PR, head, owner and reason `awaiting approval by another GitHub account`.
+It launches no review workers, schedules no review deadlines, and reserves no
+reviewer quota. The existing In Review owner still holds its normal capacity.
+A simple launcher is planned for a separate PR.
 
-The existing completion wake returns to the Driver. Fresh kernel verdict
-evidence routes approval to existing CI/merge/finalization and defects to the
-author. Exit or a lost reservation without a verdict requests governed reviewer
-recovery; the same assignment is never blindly relaunched. Reconcile serializes
-the canonical refresh helper under its existing lock and records one recovery
-attempt in the failed worker receipt before dispatching a new assignment.
-Failed/interrupted recovery requires explicit operator reconciliation. Missing
-permissions retain an explicit operator next action; Stop
-and unavailable capacity do not activate another launcher.
+Old review worker receipts remain on disk but are inert: they cannot resume,
+count as live writers, or block their author's planning. Existing physical
+account locks still protect any process that has not exited. New PR ownership
+comes from the sole linked issue's exclusive `agent:` claimant; GitHub's author
+login remains the PR actor. Ambiguous claimant evidence fails closed.
 
-Callback examples before this repair:
-
-```text
-Handle returned actions using the installed hermes-project-driver skill.
-[Skill] Otherwise use the verified existing Hermes provider dispatch path ...
-[Skill] The shared installed aru-code-factory skill may supply native provider execution details ...
-```
-
-Those instructions left worker creation to another expanded instruction set.
-The #583 incident records callbacks containing 113k–141k expanded characters;
-that observation does not prove prompt size caused the elapsed delay.
-The revised callback names the operation and its current evidence:
-
-```text
-Reconcile owns review launch; use its worker receipt or name the blocked owner/reason/next step.
-Load only the named PR/head/assignment and issue acceptance/scope;
-load historical incident context only if needed for a blocker.
-A stopped Driver stays stopped.
-```
-
-The worker receives one review-only prompt with repo, PR, full head, assignment,
-actor, author, detached worktree and current contract location. It loads the
-live issue rather than copying incident history or obsolete factory rules.
-These are source examples, not measured post-installation callback sizes.
-Isolated tests establish source behavior; #557 separately owns authorized
-installed-runtime, restart/Stop and completion-to-next-dispatch acceptance.
+Before an installed upgrade, stop the existing Driver to pause its old scheduled
+jobs. Remove the retired reviewer-inventory project option and obsolete review
+quota settings from the operator config; validation refuses them. No live
+configuration or installation is changed by this source work.
 
 ## Configuration and explicit authorization
 
@@ -102,7 +75,7 @@ delivery identities, never issue lifecycle state.
 `capacity_key` must declare the same value, each session holds its own
 reservation slot, a provider cooldown on the account pauses every slot, and a
 lane is admitted only while the account still has a free slot. Additional
-sessions never create an independent account or reviewer family.
+sessions never create an independent account.
 `max_review_backlog` bounds open PRs
 and, separately, the repository's queued GitHub Actions workflow runs before new
 admission; every queued run counts, not only governed verification. Unknown CI evidence,
@@ -189,15 +162,8 @@ subscription. The example's flags were checked against installed
 operator selection.
 Worker command permissions remain the installed CLI's normal sandbox policy.
 
-A review worker acts as the GitHub actor its reviewer identity is bound to
-(`reviewer-binding:<identity>=<login>`). When the binding names a GitHub App
-login (`…[bot]`) the worker keeps `ARU_GITHUB_APP_RUNNER` and its `gh` calls
-carry the App identity; when it names a personal login the runner is dropped
-for that worker's process group, so its own `gh` credentials submit the
-attestation. Bind at least one seat to each kind of actor: PRs authored through
-the App need a personally bound reviewer, and PRs pushed by a person need an
-App-bound one, because the kernel refuses a reviewer whose actor equals the
-author's.
+Implementation workers preserve `ARU_GITHUB_APP_RUNNER`; opted-in worker
+permissions select the configured App runner for those workers.
 
 ## Capacity observations and probes
 
@@ -435,32 +401,24 @@ issue/comment text is never executable instruction or project authorization.
 The ten-minute heartbeat discovers missed events and newly recovered capacity.
 Both paths use the same coordination and account locks. A healthy tick with no
 action available stays silent. Unfinished actionable work is retried even when
-its observation repeats after a failed attempt. Review silence has its
-own deadline from live kernel policy; it need not wait ten minutes.
+its observation repeats after a failed attempt.
+Waiting for review has no Driver deadline and does not launch a reviewer.
 
 ## Returned PR actions
 
 Hermes interprets returned actions after rereading the named PR, current head,
-ownership and review authority. Run these existing helpers from the verified
+ownership and GitHub approval. Run these existing helpers from the verified
 consumer checkout, using its local `scripts/` when present:
 
 | Action | Canonical invocation |
 | --- | --- |
 | Merge | `merge_pr.py --pr N --expected-head SHA --json` |
-| Finalize a confirmed queued merge | `merge_pr.py --pr N --expected-head SHA --finalize --json` |
+| Finalize a confirmed direct merge | `merge_pr.py --pr N --expected-head SHA --finalize --json` |
 | Inspect merge readiness | `merge_pr.py --pr N --expected-head SHA --dry-run --json` |
-| Refresh pending/unavailable review authority | `create_pr.py --refresh-reviewer N --json` |
-| Assigned coding reviewer aborts or loses capacity | Add `--coding-reviewer-unavailable "truthful reason"` to reviewer refresh |
-| Inspect review configuration | `create_pr.py --reviewer-status --json` |
-
-Reviewer refresh has no `--expected-head` flag. Cancel a stale callback after
-the head or authority changes; the canonical helper alone decides whether to
-retain or replace the authority. Never hand-edit reviewer labels. Coding
-review follows the existing independent-actor formal attestation contract;
-this adapter does not fabricate a review or submit one as the author.
+| Await approval | Wait for an approval of the latest commit from another GitHub account |
 
 Use the canonical feedback and CI remediation workflows for those actions.
-`merged:false` with a queue or auto-merge submission remains in flight. A
+Configured merge queues and pending queue/auto-merge requests are refused. A
 closed-but-unmerged PR is not completion. After actual convergence, Hermes may
 run one fresh bounded reconciliation to refill the newly available capacity.
 Neither merge nor process exit proves deployment.
@@ -470,7 +428,7 @@ Neither merge nor process exit proves deployment.
 Run offline adapter tests from the Aru checkout:
 
 ```sh
-/absolute/path/Aru_Agentic_SDLC/.venv/bin/pytest -q integrations/hermes/tests
+/absolute/path/Aru_Agentic_SDLC/.venv/bin/python -m pytest integrations/hermes/tests
 ```
 
 These tests use isolated state, fake scheduler/GitHub boundaries and local test

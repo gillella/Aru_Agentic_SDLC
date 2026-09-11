@@ -275,8 +275,8 @@ calls kernel commands. The kernel still has no scheduler.
 **In scope.**
 
 - An external loop that invokes `fetch_next_work.py`, `claim_issue.py`,
-  `create_pr.py --refresh-reviewer`, `check_ci.py`, `merge_pr.py`, and the
-  other supported commands.
+  `create_pr.py`, `check_ci.py`, `merge_pr.py`, and the other supported
+  commands.
 - Documentation here that names the boundary: orchestration may retry, wait,
   and wake; it may not invent lifecycle state when GitHub is unavailable.
 

@@ -13,7 +13,6 @@ import argparse
 
 from check_ci import ci_verdict
 from claim_issue import safe_agent
-from create_pr import reviewer_continuation
 from common import (
     REPOSITORY_AUTH,
     KernelError,
@@ -54,23 +53,17 @@ _MERGE_STATE_STATUSES = {
 
 
 def authored_prs(agent: str) -> list[dict]:
-    data = gh_json(
-        [
-            "pr",
-            "list",
-            "--state",
-            "open",
-            "--search",
-            f"label:author:{agent}",
-            "--limit",
-            "100",
-            "--json",
-            "number,title,headRefOid,labels,isDraft,mergeStateStatus",
-        ]
-    )
-    if not isinstance(data, list):
-        raise KernelError("GitHub returned malformed pull-request inventory")
-    return sorted(data, key=lambda item: int(item["number"]))
+    """Open PRs for the agent's one claimed issue; governed branches are <type>/issue-<N>-<slug>."""
+    claimed = claimed_issue(agent)
+    if claimed is None:
+        return []
+    fields = "number,title,headRefOid,headRefName,labels,isDraft,mergeStateStatus"
+    data = gh_json(["pr", "list", "--state", "open", "--limit", "500", "--json", fields])
+    if not isinstance(data, list) or len(data) >= 500 or any(not isinstance(pr, dict) for pr in data):
+        raise KernelError("GitHub returned malformed or truncated pull-request inventory")
+    marker = f"/issue-{int(claimed['number'])}-"
+    return sorted((pr for pr in data if marker in str(pr.get("headRefName") or "")),
+                  key=lambda item: int(item["number"]))
 
 
 def ready_issues() -> list[dict]:
@@ -273,12 +266,9 @@ def _verified_pr_work(pr: dict, verification: dict) -> dict[str, object]:
             result = {**context, "type": "wait", "reason": reason}
             if "requests changes" in reason or "requested changes" in reason:
                 result["next_action"] = "address-review-feedback"
-            elif (
-                "exact-head verdict" in reason
-                or "review authority" in reason
-                or "review:<authority>" in reason
-            ):
-                result.update(reviewer_continuation(number))
+            elif "approval of the exact head" in reason:
+                # Any account other than the author may review; the author cannot.
+                result.update(type="review", next_action="review-by-another-account")
             return result
         return {**context, "type": "merge"}
     return {**context, "type": "wait", "verification": verification["state"]}

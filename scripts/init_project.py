@@ -27,14 +27,6 @@ LABELS = {
     "priority:p1": ("d93f0b", "Current phase critical path"),
     "priority:p2": ("fbca04", "Current phase, not critical path"),
     "priority:p3": ("c5def5", "Opportunistic"),
-    "review:coderabbit": ("0e8a16", "External review: CodeRabbit"),
-    "review:claude-code": ("5319e7", "Coding-agent review: Claude Code"),
-    "review:openai-codex": ("5319e7", "Coding-agent review: OpenAI Codex"),
-    "review:xai-cursor": ("5319e7", "Coding-agent review: xAI Cursor"),
-    "review:google-antigravity": (
-        "5319e7",
-        "Coding-agent review: Google Antigravity",
-    ),
 }
 
 # Consumer runner profiles. The check name, exact-head binding, read-only
@@ -302,8 +294,10 @@ def ruleset_payload(merge_app_id: int | None = None) -> dict[str, object]:
                     "allowed_merge_methods": ["merge"],
                     "dismiss_stale_reviews_on_push": True,
                     "require_code_owner_review": False,
-                    "require_last_push_approval": False,
-                    "required_approving_review_count": 0,
+                    # The one review rule, enforced by GitHub: an account other than the
+                    # author and the last pusher approves the latest commit.
+                    "require_last_push_approval": True,
+                    "required_approving_review_count": 1,
                     "required_review_thread_resolution": True,
                 },
             },

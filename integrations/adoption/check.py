@@ -10,6 +10,7 @@ from pathlib import Path
 import stat
 import subprocess
 import sys
+from urllib.parse import quote
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -100,17 +101,35 @@ def github_readiness(repo: Path, owner: str) -> dict:
         return {"status": "unavailable", "next_action": "Check repository-scoped GitHub read access."}
     if identity["nameWithOwner"].split("/")[0].casefold() != owner.casefold():
         return {"status": "owner-mismatch", "repository": identity["nameWithOwner"]}
-    reviewer_raw = command([sys.executable, str(ROOT / "scripts/create_pr.py"),
-                            "--reviewer-status", "--json"], repo)
-    try:
-        reviewer = json.loads(reviewer_raw or "null")
-    except ValueError:
-        reviewer = None
-    valid = isinstance(reviewer, dict) and reviewer.get("valid") is True
+    branch = identity.get("defaultBranchRef")
+    branch = branch.get("name") if isinstance(branch, dict) else None
     return {"status": "read", "repository": identity["nameWithOwner"],
-            "reviewer_configuration": "valid-not-probed" if valid else "unavailable-or-invalid",
-            "next_action": "Verify linked Project, assigned runner capacity and a real governed pilot.",
+            "approval_rule": approval_rule(repo, identity["nameWithOwner"], branch),
+            "next_action": "Verify linked Project, assigned runner capacity, a reviewer account "
+                           "other than the authors, and a real governed pilot.",
             "runtime_readiness_proven": False}
+
+
+def approval_rule(repo: Path, name: str, branch: object) -> str:
+    """Whether the default branch's rules require one fresh approval of the last push."""
+    if not isinstance(branch, str) or not branch:
+        return "unknown"
+    raw = command(["gh", "api", f"repos/{name}/rules/branches/{quote(branch, safe='')}"], repo)
+    try:
+        rules = json.loads(raw or "null")
+    except ValueError:
+        rules = None
+    if not isinstance(rules, list):
+        return "unknown"
+    for rule in rules:
+        parameters = rule.get("parameters") if isinstance(rule, dict) and rule.get("type") == "pull_request" else None
+        if (isinstance(parameters, dict)
+                and type(parameters.get("required_approving_review_count")) is int
+                and parameters["required_approving_review_count"] >= 1
+                and parameters.get("dismiss_stale_reviews_on_push") is True
+                and parameters.get("require_last_push_approval") is True):
+            return "enforced"
+    return "not-enforced"
 
 
 def inspect(repo: Path, owner: str, online: bool = False) -> dict:

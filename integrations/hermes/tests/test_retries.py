@@ -113,7 +113,7 @@ def test_stopped_project_does_not_inspect_or_refill(harness):
     harness.stop()
     assert harness.controller.reconcile(REPO) == {"status": "stopped", "launched": []}
     assert harness.controller.tick(REPO)["wakeAgent"] is False
-    assert harness.kernel.calls == [] and harness.probes == [] and harness.synced == []
+    assert harness.kernel.calls == [] and harness.probes == []
 
 
 @pytest.mark.parametrize("field,value", [("attempt", 0), ("attempt", True), ("retry_at", float("inf")),

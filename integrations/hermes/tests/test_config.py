@@ -148,3 +148,10 @@ def test_lanes_sharing_a_subscription_must_agree_on_max_sessions(tmp_path):
     config_path.write_text(json.dumps(raw))
     with pytest.raises(DriverError, match="declare different max_sessions"):
         Config(config_path)
+
+
+@pytest.mark.parametrize("value", [None, [], ["agent-one"], "old-inventory"])
+def test_retired_reviewer_config_requires_operator_removal(tmp_path, value):
+    path = write_config(tmp_path, coding_reviewers=value)
+    with pytest.raises(DriverError, match="delete coding_reviewers from the Driver config"):
+        Config(path)

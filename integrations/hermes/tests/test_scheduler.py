@@ -228,59 +228,6 @@ def test_webhook_template_rejects_payload_placeholder_paths(setup):
         scheduler.webhook_prompt(project, Path("/tmp/{__raw__}"), driver, "route")
 
 
-def test_review_timer_sync_replaces_head_and_authority_and_removes_done_prs(setup):
-    home, project, config, driver, api = setup
-    event = {"pr": 17, "head": "a" * 40, "reviewer": "coderabbit", "retry_at": "2026-10-01T12:00:00Z"}
-    first = scheduler.sync_review_wakes(home, project, config, driver, [event], cron_api=api)
-    again = scheduler.sync_review_wakes(home, project, config, driver, [event], cron_api=api)
-    assert first["review_wakes"] == again["review_wakes"]
-    newer = {**event, "head": "b" * 40}
-    next_head = scheduler.sync_review_wakes(home, project, config, driver, [newer], cron_api=api)
-    assert next_head["paused_job_ids"] == [first["review_wakes"][0]["job_id"]]
-    changed_authority = {**newer, "reviewer": "codeant"}
-    next_reviewer = scheduler.sync_review_wakes(home, project, config, driver, [changed_authority], cron_api=api)
-    assert next_reviewer["paused_job_ids"] == [next_head["review_wakes"][0]["job_id"]]
-    assert sum(job["enabled"] for job in api.jobs) == 1
-    scheduler.sync_review_wakes(home, project, config, driver, [], cron_api=api)
-    assert not any(job["enabled"] for job in api.jobs)
-
-
-def test_review_timer_consumption_does_not_spin_and_stop_can_resume_pending(setup):
-    home, project, config, driver, api = setup
-    event = {"pr": 18, "head": "a" * 40, "reviewer": "coderabbit", "retry_at": 1790865600}
-    first = scheduler.sync_review_wakes(home, project, config, driver, [event], cron_api=api)
-    identifier = first["review_wakes"][0]["job_id"]
-    scheduler.stop_project(home, project, cron_api=api)
-    resumed = scheduler.sync_review_wakes(home, project, config, driver, [event], cron_api=api)
-    assert resumed["review_wakes"] == [{"pr": 18, "job_id": identifier, "enabled": True}]
-    api.update_job(identifier, {"enabled": False, "state": "completed"})
-    consumed = scheduler.sync_review_wakes(home, project, config, driver, [event], cron_api=api)
-    assert consumed["review_wakes"] == [{"pr": 18, "job_id": identifier, "enabled": False}]
-    assert len(api.jobs) == 1
-
-
-def test_review_sync_rejects_ambiguous_authority_before_mutating(setup):
-    home, project, config, driver, api = setup
-    event = {"pr": 18, "head": "a" * 40, "reviewer": "coderabbit", "retry_at": 1790865600}
-    with pytest.raises(scheduler.SchedulerError, match="unique positive PR"):
-        scheduler.sync_review_wakes(home, project, config, driver, [event, {**event, "reviewer": "other"}], cron_api=api)
-    assert not home.exists()
-    with pytest.raises(scheduler.SchedulerError, match="exact full commit"):
-        scheduler.sync_review_wakes(home, project, config, driver, [{**event, "head": "abcd"}], cron_api=api)
-
-
-@pytest.mark.parametrize("updates", [
-    {"pr": False}, {"reviewer": None}, {"retry_at": "not-a-date"},
-    {"retry_at": "2026-09-05T12:00:00"}, {"retry_at": 1e100},
-])
-def test_malformed_review_events_raise_catchable_error_before_native_access(setup, updates):
-    home, project, config, driver, api = setup
-    event = {"pr": 18, "head": "a" * 40, "reviewer": "coderabbit", "retry_at": 1790865600}
-    with pytest.raises(scheduler.SchedulerError):
-        scheduler.sync_review_wakes(home, project, config, driver, [{**event, **updates}], cron_api=api)
-    assert not home.exists() and not api.jobs
-
-
 @pytest.mark.parametrize(
     ("files", "ok"),
     [
@@ -313,7 +260,6 @@ def test_wake_gate_probe_accepts_the_definition_in_any_cron_module(tmp_path, fil
     else:
         with pytest.raises(scheduler.SchedulerError, match="lacks script wake gates"):
             scheduler._require_wake_gate(tmp_path)
-
 
 
 def test_deadline_interrupts_real_scheduler_lock_and_restores_signal_state(setup):
@@ -557,8 +503,6 @@ def test_stop_waits_out_existing_producer_then_prevents_late_job_recreation(setu
         scheduler.schedule_wake(home, project, config_path, driver_path, event_key="late")
     with pytest.raises(scheduler.SchedulerError, match="stopped"):
         scheduler.ensure_heartbeat(home, project, config_path, driver_path)
-    with pytest.raises(scheduler.SchedulerError, match="stopped"):
-        scheduler.sync_review_wakes(home, project, config_path, driver_path, [])
     restarted = entry.start(config, project)
     assert restarted["heartbeat"]["heartbeat_job_id"] == initial["heartbeat_job_id"]
     assert state.project(project)["enabled"]

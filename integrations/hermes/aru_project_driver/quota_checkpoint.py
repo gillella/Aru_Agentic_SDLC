@@ -7,13 +7,13 @@ from . import quota, quota_collect
 from .config import DriverError
 from .state import key, read_json, write_json
 
-def allowance(config, state, repo, identity, issue, reviewing, exclude=None):
+def allowance(config, state, repo, identity, issue, exclude=None):
     policy = config.project(repo)["quota_admission"]
-    seconds = policy.get("unknown_review_seconds", 0) if reviewing else policy["unknown_checkpoint_seconds"]
+    seconds = policy["unknown_checkpoint_seconds"]
     if not seconds:
         return 0
     previous = [r for r in state.workers(repo) if r["issue"] == issue and r["id"] != exclude
-                and (r.get("kind") == "review") == reviewing and r.get("child_pid")
+                and r.get("child_pid")
                 and r.get("quota_decision", {}).get("checkpoint_seconds")]
     count = policy.get("unknown_max_attempts", policy["max_recoveries"] + 1)
     total = policy.get("unknown_total_seconds", seconds * count)
@@ -25,7 +25,8 @@ def allowance(config, state, repo, identity, issue, reviewing, exclude=None):
     return min(seconds, total - used, config.lane(repo, identity).get("execution_timeout_seconds", 3600))
 
 def note_path(state, record):
-    identity = [record["repo"], record["issue"], record.get("kind") == "review", record["id"]]
+    # Keep the historical author-note identity so retained checkpoints survive upgrades.
+    identity = [record["repo"], record["issue"], False, record["id"]]
     return state.root / "checkpoints" / (key(json.dumps(identity)) + ".json")
 
 def prepare(state, record):
@@ -34,7 +35,7 @@ def prepare(state, record):
         return
     record["quota_checkpoint"] = str(note_path(state, record))
     previous = sorted((r for r in state.workers(record["repo"]) if r["issue"] == record["issue"]
-                       and r["id"] != record["id"] and r.get("review") == record.get("review")
+                       and r["id"] != record["id"]
                        and r.get("quota_checkpoint")), key=lambda r: r["started_at"])
     context = ""
     if previous:
@@ -59,7 +60,7 @@ def save(state, record):
             stream.seek(max(0, path.stat().st_size - 8192))
             output = stream.read(8192).decode(errors="replace")
     write_json(note_path(state, record), {"repo": record["repo"], "issue": record["issue"],
-        "attempt": record["id"], "review": record.get("review"), "worktree": record["worktree"],
+        "attempt": record["id"], "worktree": record["worktree"],
         "outcome": record.get("outcome"), "output_tail": output,
         "progress": "Inspect retained worktree and native output; timeout alone proves no completed step"})
 

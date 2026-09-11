@@ -179,52 +179,6 @@ def test_architecture_fallback_chain(driver_env):
         assert len(plan.skipped) > 0
 
 
-def test_reviewer_lineage_independence(driver_env):
-    config, state, worktree = driver_env
-    
-    # Claude-authored review request -> reviewer cannot be Claude lineage
-    review_claude = {
-        "pr": 201,
-        "author": "claude-opus",
-        "author_history": [{"persona": "opus-implementer", "account_id": "claude-subscription-1", "actor": "claude-opus"}],
-        "reviewer_actor": "reviewer",
-        "risk_tier": 2,
-    }
-    review_claude.update(repo="owner/repo", issue=101, head="a" * 40,
-                         reviewer_persona="astra-implementer", reviewer_account="openai-codex",
-                         authority=personas.default_snapshot().persona("astra-implementer").lineage,
-                         authority_source="synthetic kernel authority", external_first_released=True,
-                         external_first_reason="synthetic external refusal", touches=["src/app.py"])
-    plan_claude = persona_routing.resolve_review_plan(
-        config, state, "owner/repo", review_claude, str(worktree), "a" * 40, current_binding=dict(review_claude)
-    )
-    assert plan_claude is not None
-    # Must NOT be Claude lineage (no Sonnet, Opus, Haiku)
-    assert plan_claude.persona not in ("sonnet-reviewer", "sonnet-security-reviewer", "opus-implementer", "haiku-triage")
-    assert plan_claude.persona in ("astra-implementer", "sol-implementer", "terra-implementer", "grok-reviewer", "gemini-reviewer")
-
-    # Codex-authored review request -> reviewer cannot be Codex lineage
-    review_codex = {
-        "pr": 202,
-        "author": "codex-astra",
-        "author_history": [{"persona": "astra-implementer", "account_id": "openai-codex", "actor": "codex-astra"}],
-        "reviewer_actor": "reviewer",
-        "risk_tier": 2,
-    }
-    review_codex.update(repo="owner/repo", issue=102, head="b" * 40,
-                        reviewer_persona="opus-implementer", reviewer_account="claude-subscription-1",
-                        authority=personas.default_snapshot().persona("opus-implementer").lineage,
-                        authority_source="synthetic kernel authority", external_first_released=True,
-                        external_first_reason="synthetic external refusal", touches=["src/app.py"])
-    plan_codex = persona_routing.resolve_review_plan(
-        config, state, "owner/repo", review_codex, str(worktree), "b" * 40, current_binding=dict(review_codex)
-    )
-    assert plan_codex is not None
-    # Must NOT be Codex lineage (no Astra, Sol, Terra, Luna, Spark)
-    assert plan_codex.persona not in ("astra-implementer", "sol-implementer", "terra-implementer", "luna-implementer", "spark-implementer")
-    assert plan_codex.persona in ("sonnet-reviewer", "sonnet-security-reviewer", "opus-implementer", "grok-reviewer", "gemini-reviewer")
-
-
 def prepare_managed_dispatch(config, monkeypatch):
     config.raw["projects"]["owner/repo"].update(
         personas_required=True, personas_source_digest=persona_routing.policy_source_digest(),

@@ -291,12 +291,12 @@ def test_malformed_nested_stop_restart_responses_preserve_evidence(config, op, f
     assert all(step["finished_at"] is not None for step in evidence["steps"])
 
 
-def test_cleanup_refuses_remaining_review_continuation(config):
+def test_cleanup_refuses_remaining_wake(config):
     def intercept(argv, timeout, fake, timer):
         result = fake(argv, timeout=timeout)
         if operation(argv) == "status" and not fake.enabled:
             data = json.loads(result.stdout)
-            data["scheduler"]["enabled_review_wakes"] = 1
+            data["scheduler"]["enabled_wakes"] = 1
             return response(result, data)
         return result
     evidence = run(config, FakeDriver(dispatch_after=1000), bound=1, intercept=intercept)

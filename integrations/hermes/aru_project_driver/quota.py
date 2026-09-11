@@ -83,19 +83,15 @@ def validate_lane(lane, q):
 def validate_project(config, repo, project, policy):
     required = {"version", "max_age_seconds", "headroom_percent", "unknown_checkpoint_seconds",
                 "max_recoveries", "cooldown_seconds", "author_actor", "cold_start"}
-    optional = {"unknown_review_seconds", "unknown_max_attempts", "unknown_total_seconds", "review_escrow_seconds",
-                "reserve_review_for_all_tasks"}
+    optional = {"unknown_max_attempts", "unknown_total_seconds"}
     if (not isinstance(policy, dict) or not required <= set(policy) or set(policy) - required - optional or type(policy["version"]) is not int
             or policy["version"] != 1 or not isinstance(policy["author_actor"], str)
             or not re.fullmatch(r"[A-Za-z0-9_-]+(?:\[bot\])?", policy["author_actor"])):
         raise DriverError("quota_admission requires explicit v1 policy and author actor")
-    if type(policy.get("reserve_review_for_all_tasks", False)) is not bool:
-        raise DriverError("reserve_review_for_all_tasks must explicitly be true or false")
     for field, low, high in (("max_age_seconds", 1, 300), ("headroom_percent", 1, 99),
                              ("unknown_checkpoint_seconds", 0, 86400), ("max_recoveries", 0, 3),
-                             ("cooldown_seconds", 60, 3600), ("unknown_review_seconds", 0, 86400),
-                             ("unknown_max_attempts", 1, 32), ("unknown_total_seconds", 1, 86400),
-                             ("review_escrow_seconds", 60, 3600)):
+                             ("cooldown_seconds", 60, 3600),
+                             ("unknown_max_attempts", 1, 32), ("unknown_total_seconds", 1, 86400)):
         if field not in policy:
             continue
         if not number(policy[field], low, high):
@@ -110,7 +106,7 @@ def validate_project(config, repo, project, policy):
     seen = set()
     for row in rows:
         if (not isinstance(row, dict) or set(row) != {"task_class", "risk", "model", "effort", "percent"}
-                or row["task_class"] not in {"implementation", "remediation", "review", "checkpoint"}
+                or row["task_class"] not in {"implementation", "remediation", "checkpoint"}
                 or type(row["risk"]) is not int or row["risk"] not in range(4)
                 or not isinstance(row["model"], str) or not isinstance(row["effort"], str)
                 or not isinstance(row["percent"], dict) or set(row["percent"]) != {"primary", "secondary"}

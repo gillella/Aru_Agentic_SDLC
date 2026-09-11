@@ -1,4 +1,4 @@
-"""Enforce approved persona routing, exact probes, and author/review launch boundaries."""
+"""Enforce approved persona routing, exact probes, and author launch boundaries."""
 from __future__ import annotations
 from datetime import datetime
 import json
@@ -194,8 +194,6 @@ def extract_author_identities(receipts: list[dict], snapshot: Any) -> tuple[Any,
     require_package()
     history = []
     for receipt in receipts:
-        if receipt.get("kind") == "review":
-            continue
         entries = receipt.get("author_history") or [receipt]
         for entry in entries:
             persona = entry.get("persona_id", entry.get("persona"))
@@ -239,34 +237,3 @@ def resolve_task_plan(config: Config, state: State, repo: str, task: dict, agent
     )
     fleet_b = build_fleet_binding(config, state, repo, worktree=worktree, snapshot=policy, now=now, evidence=evidence)
     return _personas.resolve(request, fleet_b, context, now=now)
-
-def resolve_review_plan(config: Config, state: State, repo: str, binding: dict,
-                        worktree: str, head: str, *, current_binding: dict | None = None,
-                        now: datetime | None = None, evidence: Any = None) -> Any:
-    """Compile only an explicit assignment matching separately reread authority."""
-    require_package()
-    if not isinstance(binding, dict) or current_binding is None or binding != current_binding:
-        raise DriverError("persona review requires separately reread matching kernel authority")
-    required = ("pr", "issue", "reviewer_actor", "reviewer_persona", "reviewer_account",
-                "authority", "authority_source", "external_first_reason", "touches", "author_history")
-    if any(not binding.get(name) for name in required) or binding.get("external_first_released") is not True:
-        raise DriverError("persona review assignment is incomplete")
-    if binding.get("repo") != repo or binding.get("head") != head:
-        raise DriverError("persona review project or current head mismatch")
-    policy = get_policy_snapshot(config, repo)
-    authors = extract_author_identities(binding["author_history"], policy)
-    assignment = _personas.ReviewAssignment(
-        repo=repo, pr=binding["pr"], head=head, issue=binding["issue"],
-        risk_tier=binding["risk_tier"], authority=binding["authority"],
-        reviewer_persona=binding["reviewer_persona"], reviewer_actor=binding["reviewer_actor"],
-        reviewer_account=binding["reviewer_account"], authors=authors, touches=tuple(binding["touches"]),
-        authority_source=binding["authority_source"], external_first_released=True,
-        external_first_reason=binding["external_first_reason"],
-    )
-    context = _personas.PromptContext(worktree=str(Path(worktree).resolve()),
-                                    branch=f"pull/{binding['pr']}/head", head=head, pr=binding["pr"])
-    fleet = build_fleet_binding(config, state, repo, worktree=worktree, snapshot=policy,
-                               now=now, evidence=evidence)
-    # The equality above compares separate bridge observations before conversion.
-    return _personas.plan_review(assignment, head, fleet, context, now=now,
-                                current_assignment=assignment)

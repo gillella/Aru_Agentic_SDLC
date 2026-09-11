@@ -133,30 +133,6 @@ def test_canonical_and_non_git_worktrees_fail_closed(scoped):
         compiled(scoped)
 
 
-@pytest.mark.parametrize("actor", ["independent-human", "review-app[bot]"])
-def test_reviewer_permissions_and_submission_actor_are_distinct(scoped, actor, monkeypatch):
-    config, record, adapter, _ = scoped
-    record.update(kind="review", pr=700, head="a" * 40,
-                  review={"reviewer": "model-one", "author": "another-agent",
-                          "author_actor": "author-app[bot]", "reviewer_actor": actor})
-    adapter.review_binding = lambda *a: record["review"]
-    adapter.review_worktree = lambda *a: record["worktree"]
-    result = compiled(scoped)
-    commands = result["commands"]
-    assert any("--approve" in c for c in commands)
-    assert not any(c[:2] in (["git", "push"], ["git", "commit"]) for c in commands)
-    assert not any("create_pr.py" in str(c) or "merge_pr.py" in str(c) for c in commands)
-    assert not any(a.startswith("Edit(") and "integrations/hermes" in a for a in result["argv"])
-    assert f"Edit(/{record['worktree']}/.aru-worker-body.md)" in result["argv"]
-    assert 'old_string=""' in result["argv"][-1]
-    monkeypatch.setenv(execution.APP_RUNNER_ENV, "author-runner")
-    env = execution.scoped_environment(config, record["repo"], "review", record["review"], result)
-    assert env.get(execution.APP_RUNNER_ENV) == ("/opt/bin/aru-app" if actor.endswith("[bot]") else None)
-    record["review"]["author_actor"] = actor
-    with pytest.raises(DriverError, match="distinct"):
-        compiled(scoped)
-
-
 def test_no_write_preflight_has_real_capability_commands_without_launch_or_binding(scoped, monkeypatch, capsys):
     config, record, adapter, run = scoped
     (config.state_dir / "binding.json").unlink()
@@ -371,7 +347,7 @@ def test_policy_stop_without_child_resumes_once_after_restart(tmp_path, monkeypa
     monkeypatch.setattr(scheduler, "schedule_wake", lambda *a, **k: wakes.append(k) or {})
     monkeypatch.setattr(execution.subprocess, "Popen", lambda *a, **k: pytest.fail("child crossed Stop"))
     if stop_at == "during-revalidation":
-        monkeypatch.setattr(execution, "_revalidate_review_worker", lambda *a: h.state.request_stop(REPO))
+        monkeypatch.setattr(execution, "revalidate_worker", lambda *a: h.state.request_stop(REPO))
     else:
         h.state.request_stop(REPO)
         if stop_at == "before-restart":

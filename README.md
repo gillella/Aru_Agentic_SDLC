@@ -14,7 +14,7 @@ software project:
 2. **What may this worker change?** — the exclusive claim and `touches:` paths.
 3. **Is this exact revision safe enough to merge?** — the exact-head
    `aru-governed-pr` check, executed on the repository's one assigned runner
-   profile, plus for Tier 2-3 changes one authoritative reviewer distinct from
+   profile, plus one approval of that head from a GitHub account other than
    the author.
 4. **What is the governed merge path?** — `scripts/merge_pr.py` with the
    expected head; stronger GitHub-side exclusivity is a consumer deployment
@@ -51,11 +51,9 @@ flowchart LR
     PR --> VERIFY{Exact-head governed verification green?}
     VERIFY -->|No or failed| FIX[Fix current head, runner, or consumer verify script]
     FIX --> VERIFY
-    VERIFY -->|Yes| RISK{Risk tier 2 or 3?}
-    RISK -->|No| MERGE[merge_pr.py --expected-head]
-    RISK -->|Yes| REV{Independent authoritative review complete?}
+    VERIFY -->|Yes| REV{Approved by another account?}
     REV -->|Findings| FIX
-    REV -->|Clean| MERGE
+    REV -->|Approved| MERGE[merge_pr.py --expected-head]
     MERGE --> DONE[Done + safe cleanup]
 ```
 
@@ -68,7 +66,7 @@ The source of truth stays deliberately small:
 | Writer ownership | One `agent:<id>` claim |
 | Isolation | One Git worktree per issue |
 | Verification | `aru-governed-pr` on the exact PR head, using only the repository's one assigned runner profile |
-| Review | None for Tier 0-1; one distinct current-head authority for Tier 2-3 |
+| Review | One approval of the exact head from a GitHub account other than the author |
 | Governed direct merge and confirmed-merge recovery | `scripts/merge_pr.py` |
 | Deployment and production | The consumer repository and its operators |
 
@@ -86,15 +84,15 @@ be migrated into an existing project when all of these are true:
   On `self-hosted-mac` that also means at least one online repository-level
   self-hosted macOS arm64 runner carrying the `aru-ci` label; on
   `github-hosted` it means Actions is enabled and the governed workflow is
-  active. Before admitting Tier 2-3 work, it also has
-  at least one registered external reviewer or one smoke-testable, distinct
-  coding-agent reviewer.
+  active.
+- At least one GitHub account other than the authoring accounts can approve
+  pull requests: a person, CodeRabbit, or a coding agent on its own account.
 - Developers and agents can read the canonical Aru directory through
   `ARU_SDLC_HOME`.
 
 The bootstrap helper creates a minimal repository scaffold. It does **not**
-install CodeRabbit, Sourcery, CodeAnt, or coding-agent providers, publish an
-initial default branch, or merge conflicting files into an existing repository.
+install reviewers or review services, publish an initial default branch, or
+merge conflicting files into an existing repository.
 Those are deliberate operator-owned setup steps.
 
 > **Important:** v2.0.0 installs only the six skills listed below. It has no
@@ -256,55 +254,26 @@ tick.
 Work only in the worktree reported by `create_branch.py`. Local checks are
 optional preflight or audit evidence. Publish the branch and open the PR through
 `create_pr.py`; merge only after the exact-head `aru-governed-pr` check has run
-on the repository's assigned runner profile and any risk-required authoritative
-review is complete. On `self-hosted-mac`, if all registered Macs are offline the
+on the repository's assigned runner profile and another account has approved
+that head. On `self-hosted-mac`, if all registered Macs are offline the
 check stays queued and merge remains blocked; it is never rerouted to
 `github-hosted` runners.
 
-## Review continuity
+## Review
 
-Tier 0 documentation and Tier 1 ordinary code do not wait for authoritative
-review. Tier 2 sensitive/contract and Tier 3 production/destructive changes
-require one current-head authority distinct from the author. Unknown or
-unrecognized safe paths fail upward to Tier 2; malformed or unsafe paths fail
-to Tier 3. Installed external providers require
-`reviewer-registered:coderabbit`. Coding identities require a binding to a
-GitHub actor distinct from the author.
+Every pull request, documentation included, needs one approval of its exact
+current head from a GitHub account other than the author: a person, CodeRabbit,
+or a coding agent working under its own account. The bootstrap ruleset has
+GitHub enforce it (one approval, stale approvals dismissed, approval of the
+last push by someone other than its pusher), and `merge_pr.py` rereads it
+before submission. A push dismisses earlier approvals; unresolved threads and a
+`CHANGES_REQUESTED` decision still block. There are no review tiers, reviewer
+labels, provider rankings, capability probes or refresh helpers, and agents that
+share one GitHub account cannot approve each other.
 
-For Tier 2-3, CodeRabbit is the sole preferred external provider. Sourcery and
-CodeAnt are retired: registration and historical evidence never make them
-eligible for new assignments. Use one bounded authenticated check for usable
-CodeRabbit access to the current repository/head. If access is denied, errored,
-rate-limited, unavailable or unproven, immediately select an available distinct
-coding reviewer; never wait through retired providers. Generic green checks,
-cached installation inventory and empty/skipped reviews are not approval.
-The optional `review-policy:timeout=<seconds>` is a completion deadline only
-for an accepted review (default 900 seconds, informed by the observed 11-minute
-CodeRabbit review). Explicit unavailability bypasses it. Ranked declarations
-remain invalid. Use `create_pr.py --refresh-reviewer <PR>` to migrate a retired
-assignment; do not hand-edit authority or erase prior findings/history.
-
-Inspect `create_pr.py --reviewer-status --json` for v3 configuration/status;
-`--probe-reviewers` adds bounded CodeRabbit current-head App evidence and coding
-liveness checks. A new head without usable App evidence immediately uses coding
-fallback. Coding subscriptions remain machine-local in `ARU_CODING_REVIEWERS`.
-This v2 source-policy migration changes the v1 provider behavior; retain old
-release tags and pin consumer reconciliation to the verified merged source.
-
-The Kernel never waits or polls. For each pending Tier 2-3 authority assignment,
-an external Driver owns the single continuation event defined in the
-[canonical contract](docs/KERNEL-CONTRACT.md).
-
-```bash
-python3 "$ARU_SDLC_HOME/scripts/create_pr.py" \
-  --refresh-reviewer <PR> --json
-```
-
-The Driver rereads the current head and authority, invokes one bounded refresh,
-and stops. The helper evaluates trusted provider evidence and retains or changes
-authority. For Tier 2-3, a push invalidates earlier review; self-review,
-unresolved findings, no-op provider results, and stale or conflicting
-attestations block merge.
+The Kernel never waits or polls for review. `fetch_next_work.py` reports a PR
+with a green check and no such approval as `review` work, which the author
+cannot do; an operator or external Driver arranges a reviewer on another account.
 
 Merge queues and pending auto-merge requests are unsupported in the v2.0.0 release: the helper refuses them before submission. The workflow verifies
 same-repository PR heads only. `--finalize` recovers a confirmed direct merge;

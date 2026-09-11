@@ -26,11 +26,10 @@ def context(config, repo, work):
     }, sort_keys=True).encode()).hexdigest()
 
 def stamp(config, record, work_type):
-    if record["kind"] != "review":
-        record["retry_context"] = context(config, record["repo"], {
-            "issue": record["issue"], "type": work_type,
-            "pr": record.get("pr"), "head": record.get("head"),
-        })
+    record["retry_context"] = context(config, record["repo"], {
+        "issue": record["issue"], "type": work_type,
+        "pr": record.get("pr"), "head": record.get("head"),
+    })
 
 def validate(record):
     if "retry_context" in record and not _fingerprint(record["retry_context"]):

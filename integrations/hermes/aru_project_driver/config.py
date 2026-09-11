@@ -55,6 +55,8 @@ class Config:
         if not isinstance(self.lanes, dict) or not self.lanes:
             raise DriverError("lanes must explicitly name at least one coding identity")
         for repo, project in self.projects.items():
+            if isinstance(project, dict) and "coding_reviewers" in project:
+                raise DriverError(f"{repo}: delete coding_reviewers from the Driver config; review workers were removed")
             self._project(repo, project)
         for identity, lane in self.lanes.items():
             self._lane(identity, lane)
@@ -62,9 +64,6 @@ class Config:
         self._sessions_agree()
         from .quota import validate_config
         validate_config(self)
-        from .reviewers import inventory
-        for repo in self.projects:
-            inventory(self, repo)
         self._persona_policy()
         self._bind(bind=bind)
 
@@ -201,10 +200,7 @@ class Config:
 
     def kernel_adapter(self, repo: str, factory=None):
         from .kernel import KernelAdapter
-        from .reviewers import inventory
-        value = inventory(self, repo)
-        options = {} if value is None else {"coding_reviewers": value}
-        return (factory or KernelAdapter)(self.kernel_root, Path(self.project(repo)["repo_dir"]), repo, **options)
+        return (factory or KernelAdapter)(self.kernel_root, Path(self.project(repo)["repo_dir"]), repo)
 
     def runner_profile(self, repo: str) -> str:
         """Return the one profile this repository verifies on, or refuse.
