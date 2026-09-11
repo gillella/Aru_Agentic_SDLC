@@ -378,3 +378,4 @@ fixes are admitted during the freeze.
 ## Historical releases
 
 The full pre-v0.2 history and release notes remain available in Git and GitHub.
+
