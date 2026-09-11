@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased - Authorized reviewers
+
+- A repository declares who may approve in `.aru/review.json` on its default branch.
+  `human` requires the approving account to be listed and refuses any GitHub App, `any`
+  reproduces the previous rule, and `none` requires no approval. An absent, malformed or
+  unknown declaration resolves to `human`, so the gate cannot be lost by omission.
+- The declaration is read from the default branch, never the pull-request head, so a
+  change cannot authorize itself: weakening the posture, or adding a reviewer, needs an
+  approval that the posture already on the default branch accepts.
+- `merge_pr.py` and the `aru-merge-policy` workflow apply the same refusal, so neither
+  path alone admits a merge. That workflow now also runs on `pull_request_review`,
+  because an approval is not a push and would otherwise never be re-evaluated.
+- The bootstrap seeds the creating account as the first authorized reviewer, so a new
+  repository is not deadlocked by its own strict default.
+- A repository that has never declared a posture authorizes the account that owns it,
+  so the strict default cannot refuse a repository its own first merge. An
+  organization owner matches no person, so an organization declares its reviewers.
+- This binds approval authority to named accounts and structurally excludes Apps. It does
+  not establish that a person read the change: an agent holding a credential for a listed
+  account is indistinguishable from its owner at every API, and that residual is covered
+  by credential hygiene rather than by this gate.
+
 ## Unreleased - Safer local cleanup
 
 - `cleanup_worktrees.py` retains worktrees that git reports locked (a worker

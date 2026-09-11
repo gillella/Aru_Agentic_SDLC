@@ -32,3 +32,17 @@ def isolate_github_app_runner(monkeypatch):
     monkeypatch.delenv("ARU_GITHUB_APP_RUNNER", raising=False)
     monkeypatch.delenv("ARU_MERGE_APP_RUNNER", raising=False)
     monkeypatch.delenv("ARU_MERGE_APP_ID", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def default_review_posture(monkeypatch):
+    """Resolve the review posture without reaching GitHub.
+
+    The suite predates the posture and was written against the permissive rule, so that is
+    what it keeps exercising. The strict posture, and every way an unusable declaration
+    resolves, are covered directly in tests/test_review_authority.py, and the wiring from
+    the merge gate into the posture is asserted there too.
+    """
+    import review_authority
+
+    monkeypatch.setattr(review_authority, "read_policy_text", lambda **_: '{"authority": "any"}')

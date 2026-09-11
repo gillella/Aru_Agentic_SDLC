@@ -101,6 +101,7 @@ def test_scaffold_creates_only_minimal_governance(tmp_path):
         ".github/PULL_REQUEST_TEMPLATE.md",
         ".github/workflows/governed-pr.yml",
         ".github/workflows/merge-policy.yml",
+        ".aru/review.json",
         ".aru/verify.sh",
         ".aru/verify-project.sh",
         ".aru/lib/touches.py",

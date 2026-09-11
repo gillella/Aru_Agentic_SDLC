@@ -41,7 +41,9 @@ def test_merge_policy_runs_the_base_branch_copy_of_itself(source):
     """The point of the workflow: a pull request cannot edit the check that judges it."""
     workflow = yaml.safe_load(policy_workflows()[source])
     # PyYAML resolves the bare `on:` key to the boolean True.
-    assert list(workflow[True]) == ["pull_request_target"]
+    # pull_request_review is here because an approval is not a push: without it the check
+    # would never re-evaluate after someone approves.
+    assert list(workflow[True]) == ["pull_request_target", "pull_request_review"]
     job = workflow["jobs"]["merge-policy"]
     assert job["name"] == "aru-merge-policy"
     # Distinct from the head-run check, so the two cannot be confused in a ruleset.
