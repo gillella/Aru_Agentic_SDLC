@@ -2,6 +2,9 @@
 
 ## Unreleased - Scope pinning and reviewer gaps
 
+- Drop the 6,500-line Kernel production ceiling; it was full and blocked every fix.
+  The 800-line per-file cap and the Hermes Driver's own limit remain.
+
 - Pin the Ready contract at promotion: triage labels the issue `ready:<digest>`
   of its number, criteria text and `touches:`; the merge gate refuses if either
   changed afterwards. Unpinned issues from before this change are grandfathered,

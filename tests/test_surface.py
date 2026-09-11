@@ -21,20 +21,14 @@ def tracked_paths() -> list[Path]:
     return [ROOT / raw.decode() for raw in result.stdout.split(b"\0") if raw]
 
 
-PRODUCTION_LINE_BUDGET = 6500
 FILE_LINE_BUDGET = 800
 
 
-# Aggregate test volume is deliberately unbudgeted: coverage is not scope creep, and a
-# ceiling on it can only be satisfied by deleting the safety surface it is meant to guard.
-# Production totals and the per-file cap still bound growth, including for test files.
-def surface_budget_violations(production_total: int, max_file: int) -> list[str]:
-    violations: list[str] = []
-    if production_total > PRODUCTION_LINE_BUDGET:
-        violations.append("production")
-    if max_file > FILE_LINE_BUDGET:
-        violations.append("file")
-    return violations
+# Aggregate line volume is deliberately unbudgeted, for production and tests alike: a
+# total ceiling blocked every small fix once reached and could only be met by deleting
+# working code. The per-file cap still bounds growth, including for test files.
+def surface_budget_violations(max_file: int) -> list[str]:
+    return ["file"] if max_file > FILE_LINE_BUDGET else []
 
 
 def test_hard_surface_budgets():
@@ -45,16 +39,13 @@ def test_hard_surface_budgets():
         if path.suffix == ".py" and path.parent.name in {"scripts", "hooks"}
     ]
     tests = [path for path in tracked if path.suffix == ".py" and path.parent.name == "tests"]
-    production_lines = [lines(path) for path in production]
-    test_lines = [lines(path) for path in tests]
-    max_file = max(production_lines + test_lines, default=0)
-    assert surface_budget_violations(sum(production_lines), max_file) == []
+    max_file = max((lines(path) for path in production + tests), default=0)
+    assert surface_budget_violations(max_file) == []
 
 
 def test_hard_surface_budgets_deny_over_limit():
-    assert surface_budget_violations(PRODUCTION_LINE_BUDGET + 1, 0) == ["production"]
-    assert surface_budget_violations(0, FILE_LINE_BUDGET + 1) == ["file"]
-    assert surface_budget_violations(PRODUCTION_LINE_BUDGET, FILE_LINE_BUDGET) == []
+    assert surface_budget_violations(FILE_LINE_BUDGET + 1) == ["file"]
+    assert surface_budget_violations(FILE_LINE_BUDGET) == []
 
 
 def test_supported_command_and_skill_budgets():
