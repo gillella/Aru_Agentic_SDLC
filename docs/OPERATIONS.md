@@ -1548,3 +1548,41 @@ CHOPIN_REQUIRE_TELEGRAM=1 python3 -m pytest \
 An explicitly missing runtime or required Telegram capability fails. These
 compatibility checks are separate from source-unit results and do not prove
 autonomous Driver continuation, consumer deployment, or production health.
+
+
+### Protect active work and verify checkpoints before cleanup
+
+Any agent or local supervisor using a managed worktree must hold a Git worktree
+lock for the whole worker lifetime, including its child processes:
+`git worktree lock --reason "<execution-id>: active worker" <worktree>`.
+Cleanup retains locked worktrees, including in dry-run output. A lock is a local
+cooperation guard; it does not prove that a process has stopped. Only its owner
+may unlock after confirming the worker and its children have exited. After an
+uncertain exit, retain the lock and inspect rather than automatically reclaiming.
+
+A durable source checkpoint is an intended commit pushed to its origin work
+branch, with `git ls-remote --heads origin refs/heads/<branch>` confirming the
+same SHA as local HEAD. Check tracked and untracked changes before and after
+verification. An earlier pushed SHA does not preserve later edits; uncommitted
+or unpushed work still requires a separate backup policy. Never blindly add
+ignored files or credentials to a checkpoint.
+
+Cleanup retains **all ignored files**, including caches, because a filename
+alone cannot prove data is disposable. Inspect and preserve unique data first;
+remove only artifacts you have established are regenerable, then repeat the
+dry run. There is no force-discard option. Keep worker locks in place while any
+process can create or change files; inspection and removal are not one atomic
+filesystem transaction.
+
+Each worktree failure is reported independently and the remaining candidates
+are still inspected. JSON includes `removed`, `retained`, and `failed`; any
+failure makes the command exit nonzero. If removing a worktree succeeds but
+safe local branch deletion fails, the removed path and the failed branch stage
+are both reported. Preserve that branch and investigate; do not force-delete it.
+Dry-run predicts eligible worktree removals and performs no branch deletion,
+so it cannot promise a later Git deletion command will succeed.
+
+A confirmed merge and GitHub Done can precede physical cleanup. Retry cleanup
+locally without repeating the merge or reopening the issue. Remote branches
+are never deleted by this helper; their deletion remains a separate verified
+operator action.
