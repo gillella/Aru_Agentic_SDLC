@@ -442,7 +442,7 @@ def github_setup(
     mutation = """
     mutation($field:ID!){
       updateProjectV2Field(input:{
-        projectV2FieldId:$field
+        fieldId:$field
         singleSelectOptions:[
           {name:"Backlog",color:GRAY,description:""}
           {name:"Ready",color:BLUE,description:""}
