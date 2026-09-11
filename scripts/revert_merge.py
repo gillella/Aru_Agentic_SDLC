@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 
 from common import KernelError, gh_json, git, run
 from create_branch import create_worktree
@@ -47,7 +48,8 @@ def create_revert(original: int, revert_issue: int, agent: str) -> dict[str, obj
         f"Reverts merged PR #{original} at {merge_sha}.\n\n"
         "This is the governed reverse gear; the original history is preserved."
     )
-    result_pr = create(revert_issue, title, body, agent)
+    with contextlib.chdir(path):  # create() reads the branch and diff from the working directory
+        result_pr = create(revert_issue, title, body, agent)
     return {
         "original_pr": original,
         "revert_issue": revert_issue,

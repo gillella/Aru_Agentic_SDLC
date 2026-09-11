@@ -9,7 +9,8 @@ agent-global instructions.
 
 1. Use the GitHub issue and linked Project Board as lifecycle authority.
 2. Require the Ready contract: unchecked acceptance criteria, one safe
-   `touches:` declaration, and no unresolved dependency.
+   `touches:` declaration, and no unresolved dependency. Promotion pins it as a
+   `ready:<digest>` label; widening scope later needs a fresh promotion.
 3. Claim before editing and work only in the issue's isolated worktree.
 4. Keep the change inside `touches:` and run useful local preflight as needed.
 5. Open the PR through `create_pr.py` with `Closes #N`. Require the exact-head

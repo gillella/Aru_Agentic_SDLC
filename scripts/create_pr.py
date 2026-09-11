@@ -104,6 +104,13 @@ def local_changed_paths() -> list[str]:
         raise KernelError("published branch has no changed files")
     return sorted(set(paths))
 
+NEEDS_REVIEWER = "needs-reviewer"  # a marker, deliberately outside the review:* authority namespace
+
+
+class NoReviewerAvailable(KernelError):
+    """No external or distinct coding-agent reviewer can take a Tier 2-3 PR yet."""
+
+
 def choose_initial_reviewer(
     number: int, author_identity: str, author_family: str, author_actor: str = "", *,
     external_states: dict[str, str] | None = None,
@@ -129,7 +136,7 @@ def choose_initial_reviewer(
         coding_probe=probe_coding_reviewer,
     )
     if selected is None:
-        raise KernelError("no external or distinct coding-agent reviewer is available")
+        raise NoReviewerAvailable("no external or distinct coding-agent reviewer is available")
     return selected
 
 
@@ -232,7 +239,7 @@ def replace_authority(
     controlled = [
         name
         for name in label_names(live)
-        if name.startswith((REVIEW_PREFIX, REVIEWER_PREFIX, REVIEWER_ACTOR_PREFIX))
+        if name.startswith((REVIEW_PREFIX, REVIEWER_PREFIX, REVIEWER_ACTOR_PREFIX)) or name == NEEDS_REVIEWER
     ]
     arguments = ["gh", "pr", "edit", str(number), "--add-label", ",".join(assignment_labels)]
     removed = [name for name in controlled if name not in assignment_labels]
@@ -564,19 +571,23 @@ def create(  # noqa: C901, PLR0912, PLR0915 -- one fail-closed creation transact
     reviewer_identity: str | None = None
     reviewer_actor: str | None = None
     policy: ReviewPolicy | None = None
+    needs_reviewer = False
     if risk_tier >= 2:
         policy = effective_review_policy(None, external_states)
         external_states = external_states if external_states is not None else registered_external_states(head=head)
-        authority, reviewer_identity, reviewer_actor = choose_initial_reviewer(
-            number,
-            owner_identity,
-            family,
-            author_actor,
-            external_states=external_states,
-            policy=policy,
-            reviewer_actors=reviewer_actors,
-            probe_runner=probe_runner,
-        )
+        try:
+            authority, reviewer_identity, reviewer_actor = choose_initial_reviewer(
+                number,
+                owner_identity,
+                family,
+                author_actor,
+                external_states=external_states,
+                policy=policy,
+                reviewer_actors=reviewer_actors,
+                probe_runner=probe_runner,
+            )
+        except NoReviewerAvailable:  # open anyway; merge refuses until --refresh-reviewer assigns one
+            needs_reviewer = True
     author_label = AUTHOR_PREFIX + owner_identity
     family_label = AUTHOR_FAMILY_PREFIX + family
     label_metadata = {
@@ -594,6 +605,9 @@ def create(  # noqa: C901, PLR0912, PLR0915 -- one fail-closed creation transact
         label_metadata[reviewer_label] = ("5319e7", f"Assigned reviewer: {reviewer_identity}")
         label_metadata[actor_label] = ("5319e7", f"Trusted review actor: {reviewer_actor}")
         labels.extend([reviewer_label, actor_label])
+    if needs_reviewer:
+        label_metadata[NEEDS_REVIEWER] = ("fbca04", "Tier 2-3 PR waiting for an available reviewer")
+        labels.append(NEEDS_REVIEWER)
     for label, (color, description) in label_metadata.items():
         ensure_label(label, color=color, description=description)
     arguments = ["gh", "pr", "create", "--title", title, "--body", final_body]
@@ -670,6 +684,8 @@ def create(  # noqa: C901, PLR0912, PLR0915 -- one fail-closed creation transact
         }
     elif authority in CODING_REVIEWERS:
         continuation["next_action"] = "await-authoritative-review"
+    elif needs_reviewer:
+        continuation["next_action"] = "refresh-reviewer"
     return {
         "pr": int(pr["number"]),
         "url": pr["url"],

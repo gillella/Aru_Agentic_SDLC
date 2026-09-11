@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any
 
@@ -23,6 +25,14 @@ from common import (
     set_status,
     status_of,
 )
+
+READY_PREFIX = "ready:"
+
+
+def ready_digest(number: int, body: str) -> str:
+    """Fingerprint the scope approved at promotion: criteria text (not tick state) and touches:."""
+    contract = [number, [text for _done, text in acceptance_items(body)], sorted(parse_touches(body))]
+    return hashlib.sha256(json.dumps(contract).encode()).hexdigest()[:16]
 
 _MERGE_QUEUE_QUERY = """
 query($owner:String!,$name:String!,$number:Int!){
@@ -191,6 +201,10 @@ def issue_gate(
     if not items or any(not done for done, _ in items):
         raise KernelError(f"issue #{number} has incomplete Acceptance Criteria")
     declared = parse_touches(body)
+    pins = [name for name in label_names(record) if name.startswith(READY_PREFIX)]
+    # Issues promoted before pinning carry no ready:* label and are checked as before.
+    if len(pins) > 1 or (pins and pins[0] != READY_PREFIX + ready_digest(number, body)):
+        raise KernelError(f"issue #{number} criteria or touches changed after promotion; return it to Backlog and re-triage")
     violations = [path for path in changed_paths if not path_allowed(path, declared)]
     if violations:
         raise KernelError(
@@ -222,6 +236,7 @@ def close_out(
     # network check. A queued or immediate merge must not mark an issue Done
     # from an earlier claimant, Acceptance Criteria, or touches snapshot.
     issue_gate(numbers, changed_paths, allow_closed=True, allow_done=True)
+    pins: list[str] = []
     for number in numbers:
         record = issue(number)
         lifecycle = status_of(record)
@@ -234,6 +249,10 @@ def close_out(
         settled = issue(number)
         if status_of(settled) != "Done" or settled.get("state") != "CLOSED":
             raise KernelError(f"issue #{number} close-out did not settle")
+        pins.extend(name for name in label_names(settled) if name.startswith(READY_PREFIX))
     # Detect contract drift during the status/close mutations as well. GitHub
     # cannot make these separate issue and Project updates one transaction.
-    return issue_gate(numbers, changed_paths, allow_closed=True, allow_done=True)
+    evidence = issue_gate(numbers, changed_paths, allow_closed=True, allow_done=True)
+    for pin in pins:  # a pin only lives while its issue is in flight; best effort after merge
+        run(["gh", "label", "delete", pin, "--yes"], check=False)
+    return evidence

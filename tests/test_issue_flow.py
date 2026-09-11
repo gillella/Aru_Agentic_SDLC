@@ -50,6 +50,7 @@ def test_triage_promotes_one_complete_issue(monkeypatch):
     records = [{"number": 2, "title": "blocked"}, {"number": 3, "title": "ready"}, {"number": 4, "title": "also ready"}]
     monkeypatch.setattr(triage_backlog, "list_issues", lambda **_: records)
     monkeypatch.setattr(triage_backlog, "evaluate", lambda item: ["missing"] if item["number"] == 2 else [])
+    monkeypatch.setattr(triage_backlog, "pin_ready_contract", lambda *_args: None)  # see test_ready_pin
     promoted = []
 
     def transactional_set_status(
