@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+input="$(cat)"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [[ -z "${local_ref:-}" ]] && continue
+  if [[ "${remote_ref}" =~ ^refs/heads/(main|master)$ ]]; then
+    echo "Aru: direct pushes to main/master are refused; merge a PR." >&2
+    exit 1
+  fi
+  [[ "${local_ref}" != refs/heads/* ]] && continue
+  branch="${local_ref#refs/heads/}"
+  if [[ "${remote_sha}" == "0000000000000000000000000000000000000000" ]]; then
+    if git show-ref --verify --quiet refs/remotes/origin/main; then
+      diff_range="origin/main...${local_sha}"
+    else
+      empty_tree="$(git hash-object -t tree /dev/null)"
+      diff_range="${empty_tree}..${local_sha}"
+    fi
+  else
+    diff_range="${remote_sha}..${local_sha}"
+  fi
+  python3 "${hook_dir}/enforce_touches.py" --range "${diff_range}" --branch "${branch}"
+done <<< "${input}"
+
+prior="${hook_dir}/pre-push.pre-aru"
+if [[ -x "${prior}" ]]; then
+  printf '%s\n' "${input}" | "${prior}" "$@"
+fi

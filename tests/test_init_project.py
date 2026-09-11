@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 import yaml
@@ -241,6 +242,28 @@ def test_governed_pr_workflow_provenance_and_python3(source):
     assert 'enforce_touches.py --pr "$ARU_PR_NUMBER"' in raw
 
 
+def probe_path(tmp_path) -> str:
+    """A PATH entry satisfying the step's toolchain probes, deterministically.
+
+    The step checks python3's version, pip and the presence of gh before the work it
+    guards, so a host whose python3 predates 3.11 or that has no gh installed would fail
+    the guard's own cases for reasons unrelated to the trust boundary. python3 resolves to
+    the interpreter running this suite, which already satisfies the version floor; gh is a
+    stub, because the step only probes that it exists.
+    """
+    probe = tmp_path / "probe-bin"
+    probe.mkdir()
+    python3 = probe / "python3"
+    # A wrapper rather than a symlink: a venv interpreter locates its prefix from the
+    # path it is invoked through, and a symlink elsewhere would hide its site-packages.
+    python3.write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+    python3.chmod(0o755)
+    gh = probe / "gh"
+    gh.write_text("#!/bin/sh\nexit 0\n")
+    gh.chmod(0o755)
+    return str(probe)
+
+
 @pytest.mark.parametrize("source", WORKFLOW_SOURCES)
 @pytest.mark.parametrize(
     ("event_name", "head_repo", "repo", "expected_code"),
@@ -255,7 +278,9 @@ def test_governed_pr_workflow_provenance_and_python3(source):
         ("workflow_dispatch", "owner/repo", "owner/repo", 1),
     ],
 )
-def test_trust_boundary_script_execution(source, event_name, head_repo, repo, expected_code):
+def test_trust_boundary_script_execution(
+    source, event_name, head_repo, repo, expected_code, tmp_path
+):
     workflow = yaml.safe_load(profiled_workflows()[source])
     step = workflow["jobs"]["governed-pr"]["steps"][0]
     assert step["name"].startswith("Validate ") and step["name"].endswith("trust boundary")
@@ -263,7 +288,8 @@ def test_trust_boundary_script_execution(source, event_name, head_repo, repo, ex
     assert step["env"]["ARU_REPOSITORY"] == "${{ github.repository }}"
     assert step["env"]["ARU_EVENT_NAME"] == "${{ github.event_name }}"
     env = {**os.environ, "ARU_EVENT_NAME": event_name,
-           "ARU_HEAD_REPOSITORY": head_repo, "ARU_REPOSITORY": repo}
+           "ARU_HEAD_REPOSITORY": head_repo, "ARU_REPOSITORY": repo,
+           "PATH": probe_path(tmp_path) + os.pathsep + os.environ.get("PATH", "")}
     result = subprocess.run(
         ["bash", "-c", step["run"]], env=env, capture_output=True, text=True, check=False
     )
