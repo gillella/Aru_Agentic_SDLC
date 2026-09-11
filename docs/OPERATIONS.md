@@ -250,6 +250,40 @@ is posted, the helper posts a newer failed run so the head cannot be merged by
 hand; re-run the helper. For break-glass, an administrator edits the ruleset,
 which the ruleset history records.
 
+### Who may approve, and what to do when nobody can
+
+A repository declares its review posture in `.aru/review.json` on its default branch:
+
+```json
+{ "authority": "human", "reviewers": ["your-github-login"] }
+```
+
+`human` requires the approving account to be listed, and refuses any GitHub App even if
+one is listed. `any` accepts any account other than the author, which is the rule that
+applied before the posture existed. `none` requires no approval. Anything absent,
+malformed, or unrecognised resolves to `human`, so a repository cannot lose the gate by
+omission. A repository that has declared nothing authorizes the account that owns it,
+which is why a newly created repository can still merge its first change.
+
+The declaration is read from the default branch, never from the pull request. Adding a
+reviewer, or weakening the posture, is therefore judged by the declaration already on the
+default branch: changing who may approve needs an approval from someone who already may.
+
+Understand what this does and does not establish. It binds approval authority to named
+accounts and structurally excludes Apps. It does not establish that a person read the
+change: an agent holding a credential for a listed account is indistinguishable from its
+owner at every API. Keep credentials for listed accounts away from agents; that is the
+control, not this gate.
+
+**When no authorized reviewer is available.** Under `human` with nobody able to approve,
+nothing merges, including a revert. Do not resolve this by disabling branch protection:
+that is the practice this kernel exists to remove, and it leaves the repository unguarded
+for as long as anyone forgets to restore it. Instead an administrator adds themselves to
+the ruleset as a temporary bypass actor, merges, and removes the entry. GitHub records
+each ruleset version, so the window is visible afterwards and its length is a fact rather
+than a recollection. Prefer adding a second authorized reviewer before an emergency to
+relying on this during one.
+
 ### Installed agent guidance
 
 Run `scripts/install_agent_integration.sh` from the verified canonical checkout
