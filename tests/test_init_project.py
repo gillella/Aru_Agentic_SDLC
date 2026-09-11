@@ -227,6 +227,10 @@ def test_github_setup_marks_project_graphql_authority(monkeypatch, tmp_path):
     ruleset_calls = calls_with("gh", "api", "repos/gillella/consumer/rulesets")
     assert [auth for _, auth in ruleset_calls] == [init_project.REPOSITORY_AUTH]
     assert result["ruleset"] == "https://example.test/rules/1"
+    query = next(a for a in calls_with("gh", "api", "graphql")[0][0] if a.startswith("query="))
+    # GitHub renamed this input; the old name is rejected after the Project already exists.
+    assert "fieldId:$field" in query and "projectV2FieldId" not in query
+    assert [s for s in init_project.STATUSES if f'name:"{s}"' in query] == list(init_project.STATUSES)
 
 
 @pytest.mark.parametrize("source", WORKFLOW_SOURCES)

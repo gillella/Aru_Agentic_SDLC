@@ -399,6 +399,17 @@ Use the [read-only compatibility report](../integrations/adoption/README.md)
 to inspect copied files, canonical revision, runner policy and whether the product
 verifier is configured. Matching files do not replace the governed pilot.
 
+### Recovering a bootstrap that failed part-way
+
+`init_project.py --github` creates the repository, then the Project, then the Status
+options, then the ruleset. A failure after the first of those leaves real state behind,
+and rerunning the command from the start creates a second repository or a second Project.
+
+Inspect before repeating anything: `gh repo view <owner>/<slug>` and `gh project list
+--owner <owner>`. Resume from the first step whose result is missing rather than from the
+beginning, and provision the remaining pieces against the objects that already exist.
+Delete a partially created Project only when you are certain nothing is linked to it.
+
 ## 7. Adopt Aru in an existing project
 
 `init_project.py` refuses to overwrite conflicting files. That is a safety
