@@ -13,4 +13,4 @@ max-complexity = 12
 
 [tool.pytest.ini_options]
 addopts = "-q"
-testpaths = ["tests", "integrations/hermes/tests"]
+testpaths = ["tests"]

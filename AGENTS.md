@@ -65,7 +65,7 @@ words do not create a persistent loop or route to an unlisted skill.
 ## Layer boundary
 
 - **Kernel:** the issue-to-safe-merge rules and helpers in this repository.
-- **External Driver:** optional human, Hermes, or scheduled/event-driven
+- **External Driver:** optional human, any agent, or scheduled/event-driven
   continuation. It may surface PRs waiting for an approval or start a reviewer
   under another account; it owns no lifecycle state.
 - **Consumer policy:** product acceptance, additional risk controls, wider
