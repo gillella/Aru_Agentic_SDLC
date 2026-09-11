@@ -8,6 +8,7 @@ import pytest
 import claim_issue
 import create_pr
 import merge_pr
+import review_authority
 import merge_state
 import triage_backlog
 
@@ -22,6 +23,9 @@ def verification_body(command: str) -> str:
 
 def traverse(monkeypatch, number: int) -> dict:
     monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("unexpected external call"))
+    # This traversal stubs every external. The review posture is one: resolve it to the
+    # permissive rule so the merge gate is exercised without reaching the default branch.
+    monkeypatch.setattr(review_authority, "read_policy_text", lambda **_: '{"authority": "any"}')
     finalized = []
     state = {
         "issue": {

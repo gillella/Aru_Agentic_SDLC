@@ -17,6 +17,8 @@
 | current board and dependencies | merge submission and direct-merge finalization | `merge_state.py` fresh Project/card/status-field identity, label agreement and closed dependencies |
 | configured product verification | consumer check success | `.aru/verify.sh` requires executable `.aru/verify-project.sh`; generated starter fails |
 | unresolved findings | merge | `fetch_pr_feedback.py`, `merge_pr.py` |
+| approval by an authorized reviewer | merge, under the `human` posture | `.aru/review.json` on the default branch names the accounts that may approve; `review_authority.py` refuses an unlisted account and refuses any GitHub App outright, and both `merge_pr.py` and `aru-merge-policy` apply the same refusal |
+| posture resolution | merge, when the declaration is unusable | absent, malformed or unknown resolves to `human`, so a repository cannot lose the gate by omission; a repository that declared nothing authorizes its owner rather than nobody |
 | approval by another account | merge | ruleset: one approval, stale approvals dismissed, last-push approval; `merge_pr.py` `approved_at_head` rereads the reviews before submission |
 | base/head race | merge | `merge_pr.py --expected-head` |
 | helper-only merge (optional) | merge submission by any other path | `merge_pr.py` posts `aru-merge-authorized` as the configured merge-authority App; the ruleset requires it pinned by `integration_id` |

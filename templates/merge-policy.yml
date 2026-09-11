@@ -6,6 +6,12 @@ name: Aru merge policy
 # point of this workflow: `aru-governed-pr` runs from the pull-request head, so a pull
 # request that rewrites it keeps the check name and goes green without running anything.
 #
+# This workflow deliberately triggers on `pull_request_target` alone. A
+# `pull_request_review` trigger would re-evaluate after an approval, but GitHub runs
+# the pull request's own copy of the workflow for that event, which would hand a
+# change control of the check that judges it. The review posture is therefore enforced
+# by `merge_pr.py`, the only path that submits a merge.
+#
 # The safety rule that makes `pull_request_target` acceptable: nothing here checks out,
 # installs, or executes pull-request code. The base branch is checked out, and the write
 # boundary is recomputed from the GitHub API by the trusted copy of the enforcement

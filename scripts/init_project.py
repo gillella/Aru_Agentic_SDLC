@@ -104,6 +104,17 @@ def resolve_runner_profile(owner: str | None, declared: str | None) -> str:
     return assigned
 
 
+def review_declaration(reviewers: list[str] | None) -> str:
+    """The repository's review posture, seeded so a new repository is not deadlocked.
+
+    The strict posture with nobody authorized refuses every merge including the first, so
+    the account creating the repository is seeded as its first authorized reviewer.
+    """
+    return json.dumps(
+        {"authority": "human", "reviewers": list(reviewers or [])}, indent=2
+    ) + "\n"
+
+
 def render_profile(content: str, profile: str) -> str:
     spec = profile_spec(profile)
     for token, value in (
@@ -218,7 +229,10 @@ def contained_git_hooks(destination: Path) -> Path:
     return configured
 
 
-def scaffold(name: str, directory: Path, *, runner_profile: str) -> list[str]:
+def scaffold(
+    name: str, directory: Path, *, runner_profile: str,
+    reviewers: list[str] | None = None,
+) -> list[str]:
     safe_name(name)
     profile_spec(runner_profile)
     destination = directory.expanduser().resolve()
@@ -243,6 +257,7 @@ def scaffold(name: str, directory: Path, *, runner_profile: str) -> list[str]:
             (framework / "templates" / "merge-policy.yml").read_text(encoding="utf-8"),
             runner_profile,
         ),
+        ".aru/review.json": review_declaration(reviewers),
         ".aru/verify.sh": (framework / "templates" / "verify.sh").read_text(
             encoding="utf-8"
         ),
@@ -495,7 +510,12 @@ def main() -> int:
         if args.github and args.owner is None:
             raise BootstrapError("--github requires --owner to name the account that owns the repository")
         profile = resolve_runner_profile(args.owner, args.runner_profile)
-        written = scaffold(args.name, args.directory, runner_profile=profile)
+        # The creating account is the first authorized reviewer; without one the strict
+        # posture would refuse the repository's own first merge.
+        written = scaffold(
+            args.name, args.directory, runner_profile=profile,
+            reviewers=[args.owner] if args.owner else [],
+        )
         remote = (
             github_setup(
                 args.name, args.directory.resolve(), args.private,

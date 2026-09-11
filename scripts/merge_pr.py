@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 import merge_authority
+import review_authority
 from check_ci import ci_verdict, finalization_verdict
 from common import KernelError, canonical_github_actor, gh_paginated, json_print, repo_slug, run, same_github_actor
 from fetch_pr_feedback import fetch_feedback
@@ -50,6 +51,23 @@ def approved_at_head(pr: dict[str, Any], reviews: list[dict[str, Any]]) -> bool:
         review["state"] == "APPROVED" and review.get("commit_id") == head
         and not same_github_actor(account, author)
         for account, review in latest.items()
+    )
+
+
+def authority_refusal(pr: dict[str, Any], reviews: list[dict[str, Any]]) -> str | None:
+    """Why the repository's declared posture rejects these approvals, or None.
+
+    Read from the default branch, so a pull request cannot authorize itself.
+    """
+    author = pr["author"].get("login") if isinstance(pr.get("author"), dict) else None
+    if not isinstance(author, str) or not author.strip():
+        raise KernelError("PR author is unreadable")
+    policy = review_authority.load_policy()
+    return review_authority.refusal(
+        author=author,
+        head=str(pr.get("headRefOid") or ""),
+        reviews=reviews,
+        policy=policy,
     )
 
 
@@ -135,14 +153,19 @@ def require_ci_review(pr: dict, number: int, head: str, *, context: str = "", fi
         raise KernelError(f"{len(feedback)} unresolved {context}review thread(s)")
     if pr.get("reviewDecision") == "CHANGES_REQUESTED":
         raise KernelError(f"a submitted {context}review still requests changes")
-    if not approved_at_head(pr, pull_reviews(number)):
+    reviews = pull_reviews(number)
+    if not approved_at_head(pr, reviews):
         raise KernelError(f"no {context}approval of the exact head by an account other than the author")
+    denial = authority_refusal(pr, reviews)
+    if denial:
+        raise KernelError(f"{context}{denial}")
     return ci
 
 
 def revalidate_review(pr: dict[str, Any], number: int) -> None:
     """Recheck the approval and threads after the final PR/issue/queue reads."""
-    if not approved_at_head(pr, pull_reviews(number)):
+    reviews = pull_reviews(number)
+    if not approved_at_head(pr, reviews) or authority_refusal(pr, reviews):
         raise KernelError("approval of the exact head was withdrawn before merge submission")
     feedback = fetch_feedback(number)
     if feedback:
