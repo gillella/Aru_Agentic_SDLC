@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased - Safer local cleanup
+
+- `cleanup_worktrees.py` retains worktrees that git reports locked (a worker
+  holds them) in both dry-run and real runs, and retains worktrees whose ignored
+  files include anything other than disposable caches. A failure on one worktree
+  is reported, the sweep continues, and the command exits non-zero.
+- The operations guide documents verified checkpoints, worktree locks and
+  host-local cleanup.
+
 ## Unreleased - One approval from another account (v3)
 
 - Review is one rule for every PR: an approval of the exact head from a GitHub
