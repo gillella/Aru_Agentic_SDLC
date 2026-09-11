@@ -8,7 +8,9 @@ add merge gates.
 
 The v2 public API is the five lifecycle statuses, the issue contract,
 the `touches:` write boundary, the eleven supported lifecycle commands named
-below, the six installed skills, the `aru-governed-pr` check name and the
+below, the six installed skills, the `aru-governed-pr` check name, the optional
+`aru-merge-authorized` check with its `ARU_MERGE_APP_RUNNER` / `ARU_MERGE_APP_ID`
+configuration, the
 `self-hosted-mac` / `github-hosted` runner-profile contract, the path-derived risk
 tiers, the `review-policy:*`, `reviewer-registered:*`, `reviewer-binding:*`,
 `review:*`, and `agent:*` label contracts, and the seven operating documents.
@@ -81,7 +83,10 @@ The issue contract is:
    Tier 2-3 changes also require one assigned authoritative reviewer distinct
    from the author. A push invalidates earlier check and review evidence.
 8. Submit a direct merge with `merge_pr.py --expected-head`. Queue configuration
-   or a pending queue/auto-merge request blocks admission. Close out only after
+   or a pending queue/auto-merge request blocks admission. With the merge-authority
+   App configured, the helper posts `aru-merge-authorized` at the exact head after
+   its final revalidation and supersedes it with a failure if submission fails.
+   Close out only after
    GitHub confirms the exact PR head merged and current authority still passes.
    `--finalize` recovers confirmed direct merges; a bounded, exact-head and
    merge-commit-bound history read refuses any historical queue entry because
@@ -291,15 +296,33 @@ A profile is a verification decision, not a deployment decision. Neither
 profile authorizes a release, a deployment, or production access; those remain
 consumer-owned and are never implied by merge.
 
-The portable bootstrap ruleset has no configured bypass actors and requires
-the `aru-governed-pr` context from the GitHub Actions App. That workflow is
-scaffolded for the account's assigned profile. It does not make
-`merge_pr.py` the only technically possible GitHub merge path, condition
-server-side review on a path tier, or pin the repository-owned workflow outside
-the repository. Helper-only merge is a Kernel process rule. Consumers needing
-a stronger security boundary own plan-appropriate GitHub controls such as a
-pinned required workflow, dedicated merge App identity, or team/file-pattern
-review rules.
+The portable bootstrap ruleset has no configured bypass actors, allows merge
+commits only (the helper never squashes or rebases), and requires the
+`aru-governed-pr` context from the GitHub Actions App. That workflow is
+scaffolded for the account's assigned profile. It does not condition
+server-side review on a path tier or pin the repository-owned workflow outside
+the repository.
+
+Helper-only merge is a Kernel process rule unless the optional merge-authority
+App is configured. With `ARU_MERGE_APP_RUNNER` (an executable with the
+`<runner> --repo OWNER/REPO -- gh ...` interface) and `ARU_MERGE_APP_ID` both
+set, `merge_pr.py` posts `aru-merge-authorized` as that App once every gate
+passes, and the ruleset requires that context pinned to the App's
+`integration_id`, so no personal token or Actions job can satisfy it. Exactly one
+of the two variables set is a misconfiguration and refuses. While the gate is on,
+the helper treats `BLOCKED` as admissible because its own required check is
+absent until it posts it; GitHub still refuses the submission if anything else
+blocks. Bootstrap adds the rule only when the App can already act on the new
+repository, because a required check nothing can post deadlocks the first pull
+request. Existing repositories opt in by adding the pinned context to their
+ruleset after installing the App.
+
+The App must be distinct from any App that agents use for ordinary repository
+commands, and it needs only the Checks write permission. The gate stops an
+agent from finishing a merge with `gh pr merge`; it does not stop whoever holds
+the App's key from posting the check directly, or an administrator from editing
+the ruleset. Consumers needing more own plan-appropriate GitHub controls such as
+a pinned required workflow or team/file-pattern review rules.
 
 ## Supported surface and non-goals
 

@@ -15,3 +15,5 @@ if str(SCRIPTS) not in sys.path:
 def isolate_github_app_runner(monkeypatch):
     """Keep operator App-runner configuration out of the focused test suite."""
     monkeypatch.delenv("ARU_GITHUB_APP_RUNNER", raising=False)
+    monkeypatch.delenv("ARU_MERGE_APP_RUNNER", raising=False)
+    monkeypatch.delenv("ARU_MERGE_APP_ID", raising=False)

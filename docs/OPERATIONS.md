@@ -212,6 +212,46 @@ identity for repository creation. Configure the App runner only after the new
 repository has an installation; routine governed repository automation should
 then use the App route.
 
+### Optional merge-authority App
+
+This makes `merge_pr.py` the only way an agent can complete a merge. Without it,
+`gh pr merge` satisfies the ruleset whenever `aru-governed-pr` is green, even for
+an unreviewed Tier 2 change.
+
+1. Register a **new** GitHub App. Never reuse the App behind
+   `ARU_GITHUB_APP_RUNNER`: agents use that one for ordinary commands and could
+   post the check with it. Grant Checks: read and write, and nothing else
+   (Metadata: read is implicit). Install it on each governed repository.
+2. Store its App id and private key in their own credentials directory, and give
+   it a runner with the same `<runner> --repo OWNER/REPO -- gh ...` interface as
+   the Factory wrapper. The runner must not print the installation token.
+3. On every machine or Driver host that runs `merge_pr.py`, export both variables:
+
+   ```bash
+   export ARU_MERGE_APP_RUNNER="$HOME/.local/bin/aru-merge-app-run"
+   export ARU_MERGE_APP_ID="<numeric App id>"
+   ```
+
+   Setting only one of them makes `merge_pr.py` refuse every merge.
+4. Require the check. `init_project.py --github` adds it when the App can
+   already act on the new repository and reports `merge_authority: required`;
+   `not-installed` means the rule was left out. For an existing repository, add
+   it to the default-branch ruleset:
+
+   ```bash
+   gh api repos/OWNER/REPO/rulesets/RULESET_ID | jq --argjson app "$ARU_MERGE_APP_ID" '{name,target,enforcement,conditions,bypass_actors,rules:(.rules|map(if .type=="required_status_checks" then .parameters.required_status_checks += [{"context":"aru-merge-authorized","integration_id":$app}] else . end))}' | gh api -X PUT repos/OWNER/REPO/rulesets/RULESET_ID --input -
+   ```
+
+5. Prove it on one Tier 0 pull request: `gh pr merge` must now be refused, and
+   `merge_pr.py --expected-head` must merge it.
+
+While the rule is active, every open pull request shows `BLOCKED` until the
+helper posts its check; that is expected. A machine without the variables can
+still inspect and dry-run, but cannot merge. If submission fails after the check
+is posted, the helper posts a newer failed run so the head cannot be merged by
+hand; re-run the helper. For break-glass, an administrator edits the ruleset,
+which the ruleset history records.
+
 ### Installed agent guidance
 
 Run `scripts/install_agent_integration.sh` from the verified canonical checkout
@@ -622,13 +662,14 @@ use, and install any coding-agent CLIs that may serve as reviewers. For Tier
 
 ```text
 review:coderabbit
-review:sourcery
-review:codeant
 review:claude-code
 review:openai-codex
 review:xai-cursor
 review:google-antigravity
 ```
+
+Bootstrap no longer creates `review:sourcery` or `review:codeant`. Repositories
+that still carry them keep them; the helper refuses either as a retired authority.
 
 When review is required, the PR must not carry zero or multiple `review:*`
 labels at merge time. A coding authority also carries exactly one

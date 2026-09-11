@@ -20,6 +20,7 @@
 | unresolved findings | merge | `fetch_pr_feedback.py`, `merge_pr.py` |
 | current-head external or coding-agent verdict | Tier 2-3 merge | `merge_pr.py` |
 | base/head race | merge | `merge_pr.py --expected-head` |
+| helper-only merge (optional) | merge submission by any other path | `merge_pr.py` posts `aru-merge-authorized` as the configured merge-authority App; the ruleset requires it pinned by `integration_id` |
 | issue Done and cleanup | close-out | `merge_pr.py`, `cleanup_worktrees.py` |
 | reverse gear | unsafe merged change | `revert_merge.py` |
 | anti-regrowth budgets | CI | `tests/test_surface.py` |
@@ -31,5 +32,7 @@ is defined once in `docs/KERNEL-CONTRACT.md`.
 
 For this repository, the live default-branch ruleset requires the
 `aru-governed-pr` context produced by the authenticated GitHub Actions App.
-The portable rule still cannot make `merge_pr.py` technically exclusive for a
-repository administrator; that stronger boundary remains consumer-owned.
+Without the merge-authority App, nothing server-side makes `merge_pr.py` the
+only merge path. With it, only a holder of that App's key can satisfy the
+pinned check, and a repository administrator can still edit the ruleset; that
+residual boundary remains consumer-owned.
