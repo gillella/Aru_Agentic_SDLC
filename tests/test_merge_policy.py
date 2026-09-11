@@ -68,16 +68,21 @@ def test_merge_policy_never_reads_or_runs_pull_request_code(source):
 
 
 @pytest.mark.parametrize("source", WORKFLOW_SOURCES)
-def test_merge_policy_publishes_its_verdict_on_the_head(source):
-    """The job's own check run lands on the base commit, so the head needs a status."""
-    workflow = yaml.safe_load(policy_workflows()[source])
-    assert workflow["permissions"]["statuses"] == "write"
+def test_merge_policy_publishes_its_verdict_exactly_once(source):
+    """The job's own check run attaches to the head, so it is the required check.
+
+    This was originally built the other way round, on the belief that a
+    pull_request_target job's check run lands on the base commit and could never be
+    required. Observed on PR #678: the head carried both a check run and a commit status
+    of the same name. The explicit status step was therefore a duplicate, and the
+    permission it needed is not requested any more.
+    """
+    raw = policy_workflows()[source]
+    workflow = yaml.safe_load(raw)
+    assert "statuses" not in workflow["permissions"]
     assert workflow["permissions"]["contents"] == "read"
+    assert "statuses/" not in raw
     steps = workflow["jobs"]["merge-policy"]["steps"]
-    publish = steps[-1]
-    assert "always()" in publish["if"]
-    assert "context=aru-merge-policy" in publish["run"]
-    assert "statuses/$ARU_HEAD_SHA" in publish["run"]
     enforce = [step for step in steps if "enforce_touches.py" in str(step.get("run", ""))]
     assert len(enforce) == 1 and "--expected-head" in enforce[0]["run"]
 

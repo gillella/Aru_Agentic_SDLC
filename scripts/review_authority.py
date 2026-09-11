@@ -18,7 +18,6 @@ every API, so that residual is covered by credential hygiene, not by this gate.
 
 from __future__ import annotations
 
-import argparse
 import base64
 import binascii
 import json
@@ -211,41 +210,3 @@ def refusal(
             "characters"
         )
     return None
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--pr", type=int, required=True)
-    parser.add_argument("--expected-head", required=True)
-    parser.add_argument("--json", action="store_true")
-    args = parser.parse_args()
-    from common import gh_paginated
-
-    slug = repo_slug()
-    pr = gh_json(["api", f"repos/{slug}/pulls/{args.pr}"])
-    author = pr.get("user", {}).get("login") if isinstance(pr.get("user"), dict) else None
-    if not isinstance(author, str) or not author.strip():
-        raise KernelError("PR author is unreadable")
-    if str(pr.get("head", {}).get("sha") or "").lower() != args.expected_head.lower():
-        raise KernelError("expected head does not match the current PR head")
-    policy = resolve(read_policy_text())
-    reason = refusal(
-        author=author,
-        head=args.expected_head,
-        reviews=gh_paginated(f"repos/{slug}/pulls/{args.pr}/reviews?per_page=100"),
-        policy=policy,
-    )
-    if args.json:
-        print(json.dumps({"posture": policy.posture, "source": policy.source, "refusal": reason}))
-    if reason:
-        raise KernelError(reason)
-    print(f"approved under the {policy.posture} posture")
-    return 0
-
-
-if __name__ == "__main__":
-    try:
-        raise SystemExit(main())
-    except KernelError as error:
-        print(f"error: {error}", file=sys.stderr)
-        raise SystemExit(2) from error
