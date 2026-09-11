@@ -13,7 +13,6 @@
 | exact-head consumer verification | merge | `aru-governed-pr`, `.aru/verify.sh`, `check_ci.py`, `merge_pr.py` |
 | one account-assigned runner profile | required verification dispatch | `init_project.py` account policy, workflow `# aru-runner-profile:` marker, `.aru/verify.sh` marker/`runs-on:` agreement |
 | no cross-profile runner fallback | required verification dispatch | `.aru/verify.sh` per-profile forbidden patterns: `self-hosted-mac` rejects hosted images, `github-hosted` rejects `self-hosted` |
-| unproven verification capacity | Driver work admission | `aru_project_driver/kernel.py` `_ci()`: self-hosted runner inventory, hosted active-workflow plus queue evidence, unassigned account blocked |
 | current board and dependencies | merge submission and direct-merge finalization | `merge_state.py` fresh Project/card/status-field identity, label agreement and closed dependencies |
 | configured product verification | consumer check success | `.aru/verify.sh` requires executable `.aru/verify-project.sh`; generated starter fails |
 | unresolved findings | merge | `fetch_pr_feedback.py`, `merge_pr.py` |

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from integrations.personas.tests.source_inventory import assert_static_persona_json
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -157,18 +156,13 @@ def test_wrong_layer_surfaces_are_absent():
 
 
 def test_one_state_authority_no_tracked_runtime_ledgers():
-    # A static install template contains no execution or lifecycle state.
-    example = ROOT / "integrations/hermes/config.example.json"
-    for path in tracked_paths():
-        if path.suffix.lower() in {".json", ".jsonl", ".db", ".sqlite", ".sqlite3"} and path != example:
-            assert_static_persona_json(path, ROOT)
+    # GitHub is the only lifecycle store: no tracked database, ledger or runtime lock.
+    ledgers = {".jsonl", ".db", ".sqlite", ".sqlite3"}
+    runtime = {"binding.json", "jobs.json", "coordination.lock", "continuity.json"}
+    assert not [path for path in tracked_paths() if path.suffix.lower() in ledgers or path.name in runtime]
 
 
-def test_external_driver_is_separately_bounded_and_has_no_tracked_state():
-    adapter = ROOT / "integrations/hermes"
-    paths = [path for path in tracked_paths() if path.is_relative_to(adapter)]
-    source = [p for p in paths if p.suffix == ".py" and p.parent.name != "tests"]
-    tests = [p for p in paths if p.suffix == ".py" and p.parent.name == "tests"]
-    assert sum(lines(p) for p in source) <= 6000
-    assert all(lines(p) <= FILE_LINE_BUDGET for p in source + tests)
-    assert not any(p.name in {"binding.json", "jobs.json", "coordination.lock"} for p in paths)
+def test_repository_ships_no_agent_framework_integration():
+    # Aru stays agent-independent: any agent enforces these rules, so no framework adapter is tracked.
+    removed = ("integrations/hermes/", "integrations/chopin/", "integrations/personas/")
+    assert not [path for path in tracked_paths() if path.relative_to(ROOT).as_posix().startswith(removed)]

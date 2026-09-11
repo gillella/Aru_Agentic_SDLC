@@ -136,10 +136,7 @@ def test_finalization_refuses_missing_board_before_mutation(monkeypatch):
     ("README-unknown", 2), ("scripts/README.py", 2),
 ])
 def test_documentation_names_do_not_hide_executable_code(path, tier):
-    from integrations.personas.risk import review_risk_tier as persona_risk
-
     assert review_risk_tier([path]) == tier
-    assert persona_risk([path]) == tier
 
 
 def test_every_kernel_helper_requires_independent_review():
