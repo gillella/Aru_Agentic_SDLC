@@ -40,7 +40,9 @@ from common import (  # noqa: E402
 POLICY_PATH = ".aru/review.json"
 STRICT = "human"
 POSTURES = (STRICT, "any", "none")
-# A body short enough to be a reflex is not a judgement. Stated here rather than tuned.
+# The shortest body that is not a reflex. Twelve characters excludes the tokens people
+# type without looking -- ok, lgtm, +1, ship it -- and admits a short real sentence.
+# It is a floor on effort, not evidence of reading, and the contract says so.
 MIN_JUDGEMENT = 12
 
 

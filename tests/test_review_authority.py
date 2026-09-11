@@ -156,3 +156,34 @@ def test_a_declared_posture_is_never_overridden_by_the_owner_fallback(monkeypatc
     monkeypatch.setattr(ra, "read_policy_text", lambda **_: '{\"authority\": \"any\"}')
     monkeypatch.setattr(ra, "repo_slug", lambda **_: "gillella/x")
     assert ra.load_policy().posture == "any"
+
+
+def gate(monkeypatch, posture, body):
+    """What merge_pr makes of one approval under a given posture."""
+    import merge_pr
+
+    monkeypatch.setattr(
+        ra, "read_policy_text",
+        lambda **_: json.dumps({"authority": posture, "reviewers": ["gillella"]}),
+    )
+    pr = {"author": {"login": "factory-app"}, "headRefOid": HEAD}
+    return merge_pr.authority_refusal(pr, [review("gillella", body=body)])
+
+
+def test_the_merge_gate_requires_a_written_judgement_under_the_strict_posture(monkeypatch):
+    assert "written judgement" in gate(monkeypatch, "human", "lgtm")
+    assert "written judgement" in gate(monkeypatch, "human", "   ")
+    assert gate(monkeypatch, "human", "the fallback path is the part I checked") is None
+
+
+def test_the_permissive_posture_does_not_inherit_the_requirement(monkeypatch):
+    """A project that chose speed must not acquire this by side effect."""
+    assert gate(monkeypatch, "any", "lgtm") is None
+    assert gate(monkeypatch, "none", "") is None
+
+
+def test_the_minimum_is_stated_rather_than_hidden():
+    """The refusal must name the number, so nobody has to read the source to learn it."""
+    terse = [review("gillella", body="ok")]
+    reason = refuse(terse, STRICT, require_judgement=True)
+    assert str(ra.MIN_JUDGEMENT) in reason
