@@ -908,9 +908,13 @@ cleaned up. The helper retains a worktree that is:
 
 - locked with `git worktree lock` (lock the worktree while a worker runs and
   unlock it when the worker exits);
-- dirty, or holding ignored files other than regenerable tool caches
-  (`__pycache__`, `*.pyc`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`,
-  `.DS_Store`), so a `.venv` or `node_modules` keeps the worktree;
+- dirty, or holding any ignored path that is not a reserved tool cache. The
+  reserved cache directories are `__pycache__`, `.pytest_cache`, `.ruff_cache`
+  and `.mypy_cache`; whatever they contain is disposable along with them. The
+  only disposable ignored file is `.DS_Store`. A name counts only in the role it
+  actually has, so a *directory* named `.DS_Store`, a stray `reports/data.pyc`
+  outside `__pycache__`, and a `.venv` or `node_modules` are all treated as
+  unique data and keep the worktree;
 - linked to an open or absent PR, or checked out at a head that differs from
   the PR head;
 - missing its directory, unregistered, or user-created.
