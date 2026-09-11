@@ -239,6 +239,10 @@ def scaffold(name: str, directory: Path, *, runner_profile: str) -> list[str]:
             (framework / "templates" / "governed-pr.yml").read_text(encoding="utf-8"),
             runner_profile,
         ),
+        ".github/workflows/merge-policy.yml": render_profile(
+            (framework / "templates" / "merge-policy.yml").read_text(encoding="utf-8"),
+            runner_profile,
+        ),
         ".aru/verify.sh": (framework / "templates" / "verify.sh").read_text(
             encoding="utf-8"
         ),
@@ -274,7 +278,13 @@ def scaffold(name: str, directory: Path, *, runner_profile: str) -> list[str]:
 
 def ruleset_payload(merge_app_id: int | None = None) -> dict[str, object]:
     """Return the minimal server-enforced merge boundary for consumers."""
-    checks = [{"context": "aru-governed-pr", "integration_id": GITHUB_ACTIONS_APP_ID}]
+    # aru-governed-pr runs the pull request's own copy of its workflow; aru-merge-policy
+    # runs the base branch's copy and posts its verdict on the head. Requiring both means
+    # a pull request cannot rewrite the only check that is standing in its way.
+    checks = [
+        {"context": "aru-governed-pr", "integration_id": GITHUB_ACTIONS_APP_ID},
+        {"context": "aru-merge-policy", "integration_id": GITHUB_ACTIONS_APP_ID},
+    ]
     if merge_app_id is not None:
         checks.append({"context": merge_authority.MERGE_AUTHORITY_CHECK, "integration_id": merge_app_id})
     return {

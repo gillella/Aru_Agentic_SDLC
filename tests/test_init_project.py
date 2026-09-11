@@ -63,6 +63,10 @@ def test_ruleset_requires_the_server_exact_head_check_and_no_bypass():
         {
             "context": "aru-governed-pr",
             "integration_id": init_project.GITHUB_ACTIONS_APP_ID,
+        },
+        {
+            "context": "aru-merge-policy",
+            "integration_id": init_project.GITHUB_ACTIONS_APP_ID,
         }
     ]
 
@@ -96,6 +100,7 @@ def test_scaffold_creates_only_minimal_governance(tmp_path):
         ".github/ISSUE_TEMPLATE/governed-task.yml",
         ".github/PULL_REQUEST_TEMPLATE.md",
         ".github/workflows/governed-pr.yml",
+        ".github/workflows/merge-policy.yml",
         ".aru/verify.sh",
         ".aru/verify-project.sh",
         ".aru/lib/touches.py",

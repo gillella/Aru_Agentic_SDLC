@@ -152,7 +152,12 @@ def test_wrong_layer_surfaces_are_absent():
     present = {path.name for path in tracked_paths()}
     assert forbidden.isdisjoint(present)
     workflows = ROOT / ".github/workflows"
-    assert {path.name for path in workflows.glob("*.yml")} == {"governed-pr.yml"}
+    # Two, and only two: the check that runs from the pull-request head, and the one
+    # that runs from the base branch so a pull request cannot rewrite its own gate.
+    assert {path.name for path in workflows.glob("*.yml")} == {
+        "governed-pr.yml",
+        "merge-policy.yml",
+    }
 
 
 def test_one_state_authority_no_tracked_runtime_ledgers():

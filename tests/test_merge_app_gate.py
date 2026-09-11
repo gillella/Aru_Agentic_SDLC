@@ -187,6 +187,7 @@ def test_consumer_ruleset_allows_only_merge_commits_and_pins_the_app():
     checks = {rule["type"]: rule for rule in init_project.ruleset_payload(4242)["rules"]}
     assert checks["required_status_checks"]["parameters"]["required_status_checks"] == [
         {"context": "aru-governed-pr", "integration_id": init_project.GITHUB_ACTIONS_APP_ID},
+        {"context": "aru-merge-policy", "integration_id": init_project.GITHUB_ACTIONS_APP_ID},
         {"context": "aru-merge-authorized", "integration_id": 4242},
     ]
 
