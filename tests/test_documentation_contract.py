@@ -128,7 +128,7 @@ def test_operating_documents_record_the_account_runner_split():
     for relative in (
         "AGENTS.md", "README.md", "docs/KERNEL-CONTRACT.md", "docs/OPERATIONS.md",
         "docs/DEGRADED-MODE.md", "docs/ENFORCEMENT-REGISTER.md",
-        "integrations/hermes/README.md", "skills/init-agent-project/SKILL.md",
+        "skills/init-agent-project/SKILL.md",
         "skills/implement-next-issue/SKILL.md",
     ):
         content = text(ROOT / relative)

@@ -32,12 +32,10 @@ summary. It separates the **Kernel** (issue to safe merge), an optional
 **consumer policy** (additional risk controls, broader engineering checks,
 release, deploy, and production).
 
-The optional [Hermes Project Driver integration](integrations/hermes/README.md)
-is versioned here and installed separately into an operator-owned Hermes home.
-It combines immediate events with a ten-minute recovery heartbeat, fills safe
-free coding lanes, and coordinates typed cross-project dependencies. The kernel
-and consumer bootstrap do not install or run it. Live installation and canary
-acceptance remain tracked by [#557](https://github.com/gillella/Aru_Agentic_SDLC/issues/557).
+Aru is agent-independent. Any agent in any framework, a person or a scheduled
+task can act as the optional external Driver by calling the same kernel commands
+from outside this repository. The kernel and consumer bootstrap do not install
+or run one.
 
 ## See the whole system in one minute
 
@@ -144,15 +142,10 @@ upgrade.
 
 ### 2. Bootstrap a new local project
 
-With Hermes, request `Hermes Project Driver Setup OWNER/REPO` for first-time
-adoption or `Hermes Project Driver Update OWNER/REPO` for an existing governed
-project. These are requests to Hermes using the existing helpers. They apply
-only to the named repository, or the repository already confirmed for that
-conversation. Updating this shared Aru source does not update or enroll other
-projects. `Hermes Project Driver Loop OWNER/REPO` explicitly starts continuation;
-`Status` inspects it and `Stop` disables future dispatch while preserving workers.
-See the [project command guide](docs/OPERATIONS.md#project-commands) for each
-command's scope and the separate shared-adapter installation step.
+Bootstrap a new project as below. For an existing repository, follow the staged
+migration in [section 7 of the operations guide](docs/OPERATIONS.md#7-adopt-aru-in-an-existing-project).
+Adoption applies only to the named repository; updating this shared Aru source
+does not update or enroll other projects.
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/init_project.py" \

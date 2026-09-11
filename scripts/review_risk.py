@@ -46,14 +46,12 @@ def _sensitive_contract_path(normalized: str, name: str) -> bool:
     return bool(
         name in {"agents.md", "claude.md", "copilot-instructions.md", "codeowners"}
         or normalized == ".github/pull_request_template.md"
-        or normalized == "integrations/hermes/install.py"
         or normalized in _KERNEL_POLICY_DOCS
         or normalized.startswith(
             (
                 ".agents/", ".aru/", ".codex/", ".cursor/rules/",
                 ".github/issue_template/", ".github/pull_request_template/",
                 ".github/workflows/", "hooks/", "skills/", "templates/", "scripts/",
-                "integrations/hermes/aru_project_driver/", "integrations/hermes/skill/",
             )
         )
         or "/skills/" in normalized

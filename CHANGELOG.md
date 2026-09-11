@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased - Agent-independent Aru
+
+- Removed the Hermes Project Driver (`integrations/hermes`), its Hermes plugin
+  (`integrations/chopin`) and the Driver-only persona routing
+  (`integrations/personas`). Aru's rules work for any agent in any project; an
+  optional external Driver is any person, scheduler or agent outside this
+  repository.
+- Operating documents drop the Hermes project commands, installed-Driver
+  operations, canary records and Driver recovery sections. Tests and the pytest
+  path no longer reference the removed integrations.
+- Installed Hermes runtimes are unaffected and are retired separately.
+
 ## Unreleased - One approval from another account (v3)
 
 - Review is one rule for every PR: an approval of the exact head from a GitHub
