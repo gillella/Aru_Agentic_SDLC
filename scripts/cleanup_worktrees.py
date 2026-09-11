@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Remove only clean Factory worktrees whose PR is closed or merged.
 
-A worktree is kept when git reports it locked (a worker holds it), when it is
-dirty or holds ignored files other than disposable caches, when its PR is open
-or absent, or when its HEAD differs from the PR head. A failure on one worktree
-is recorded, the sweep continues, and the command exits non-zero.
+A worktree is kept when git reports it locked (a worker holds it) or its
+directory is missing, when it is dirty or holds ignored files other than
+regenerable tool caches, when its PR is open or absent, or when its HEAD differs
+from the PR head. A failure is recorded with the stage it happened in, the sweep
+continues, and the command exits non-zero. A removal that succeeded is reported
+even if deleting the local branch afterwards fails.
 """
 
 from __future__ import annotations
@@ -16,8 +18,9 @@ from pathlib import Path
 from common import KernelError, gh_json, git, json_print, primary_worktree
 
 FACTORY_BRANCH = re.compile(r"^(?:feat|fix|docs)/issue-\d+-|^codex/")
-# Ignored paths that are safe to delete with a worktree; any other ignored path keeps it.
-DISPOSABLE_IGNORED = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".venv", "node_modules", ".DS_Store"}
+# Regenerable tool caches that may be deleted with a worktree. Any other ignored path,
+# including a .venv or node_modules that may hold local changes, keeps the worktree.
+DISPOSABLE_IGNORED = {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", ".DS_Store"}
 
 
 def parse_worktrees(raw: str) -> list[dict[str, str]]:
@@ -71,24 +74,19 @@ def local_state(path: Path) -> tuple[bool, list[str]]:
     return dirty, kept
 
 
-def clean_one(root: Path, path: Path, branch: str, dry_run: bool) -> str | None:
-    """Remove one eligible worktree, or return why it is retained."""
+def inspect(path: Path, branch: str) -> tuple[str | None, dict | None]:
+    """Return why the worktree must be retained (None when eligible) and its PR record."""
     dirty, kept = local_state(path)
     if dirty:
-        return "dirty"
+        return "dirty", None
     if kept:
-        return "ignored data " + ", ".join(kept[:5]) + (" ..." if len(kept) > 5 else "")
+        return "ignored data " + ", ".join(kept[:5]) + (" ..." if len(kept) > 5 else ""), None
     pr = pr_for_branch(branch)
     if not pr or (pr.get("state") != "CLOSED" and not pr.get("mergedAt")):
-        return "PR open or absent"
+        return "PR open or absent", pr
     if pr.get("headRefOid") != git(["rev-parse", "HEAD"], cwd=path):
-        return "head differs from preserved PR"
-    if not dry_run:
-        # No --force: git itself still refuses a tree that became dirty or locked meanwhile.
-        git(["worktree", "remove", str(path)], cwd=root)
-        if pr.get("mergedAt"):
-            git(["branch", "-d", branch], cwd=root)
-    return None
+        return "head differs from preserved PR", pr
+    return None, pr
 
 
 def sweep(*, dry_run: bool = False) -> dict[str, list[str]]:
@@ -115,14 +113,26 @@ def sweep(*, dry_run: bool = False) -> dict[str, list[str]]:
             retained.append(f"{path}: directory missing; inspect, then git worktree prune")
             continue
         try:
-            reason = clean_one(root, path, branch, dry_run)
-        except KernelError as exc:
-            failed.append(f"{path}: {exc}")
+            reason, pr = inspect(path, branch)
+        except (KernelError, OSError) as exc:
+            failed.append(f"{path}: inspect: {exc}")
             continue
         if reason:
             retained.append(f"{path}: {reason}")
-        else:
-            removed.append(str(path))
+            continue
+        if not dry_run:
+            try:
+                # No --force: git itself still refuses a tree that became dirty or locked meanwhile.
+                git(["worktree", "remove", str(path)], cwd=root)
+            except (KernelError, OSError) as exc:
+                failed.append(f"{path}: remove worktree: {exc}")
+                continue
+        removed.append(str(path))
+        if not dry_run and pr and pr.get("mergedAt"):
+            try:
+                git(["branch", "-d", branch], cwd=root)
+            except (KernelError, OSError) as exc:
+                failed.append(f"{path}: worktree removed, local branch {branch} kept: {exc}")
     return {"removed": removed, "retained": retained, "failed": failed}
 
 

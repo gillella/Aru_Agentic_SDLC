@@ -81,17 +81,17 @@ def test_one_failed_worktree_does_not_stop_the_sweep(monkeypatch, tmp_path, caps
     monkeypatch.setattr(sys, "argv", ["cleanup_worktrees.py"])
     assert cleanup_worktrees.main() == 1
     out = capsys.readouterr().out
-    assert f"failed {root}/.worktrees/bad: ambiguous pull-request history" in out
+    assert f"failed {root}/.worktrees/bad: inspect: ambiguous pull-request history" in out
     assert f"removed {root}/.worktrees/good" in out
 
 
 def test_ignored_data_is_kept_but_disposable_caches_are_not(monkeypatch, tmp_path):
     root, _ = fake_repo(monkeypatch, tmp_path, {"data": [], "caches": []}, status={
-        "data": "!! .env\n!! __pycache__/\n",
+        "data": "!! .env\n!! .venv/\n!! __pycache__/\n",
         "caches": "!! __pycache__/\n!! src/.pytest_cache/\n!! build/module.pyc\n",
     })
     result = cleanup_worktrees.sweep()
-    assert result["retained"] == [f"{root}/.worktrees/data: ignored data .env"]
+    assert result["retained"] == [f"{root}/.worktrees/data: ignored data .env, .venv"]
     assert result["removed"] == [f"{root}/.worktrees/caches"]
 
 
@@ -111,3 +111,22 @@ def test_unsafe_worktrees_are_still_retained_and_nothing_is_deleted(monkeypatch,
     result = cleanup_worktrees.sweep()
     assert result == {"removed": [], "retained": [f"{root}/.worktrees/{case}: {expected}"], "failed": []}
     assert removals(calls) == []
+
+
+def test_branch_deletion_failure_still_reports_the_completed_removal(monkeypatch, tmp_path):
+    root, calls = fake_repo(monkeypatch, tmp_path, {"merged": []})
+    recorded = cleanup_worktrees.git
+
+    def git(args, cwd=None):
+        output = recorded(args, cwd=cwd)
+        if args[:2] == ["branch", "-d"]:
+            raise KernelError("not fully merged")
+        return output
+
+    monkeypatch.setattr(cleanup_worktrees, "git", git)
+    result = cleanup_worktrees.sweep()
+    assert result["removed"] == [f"{root}/.worktrees/merged"]
+    assert result["failed"] == [
+        f"{root}/.worktrees/merged: worktree removed, local branch feat/issue-1-merged kept: not fully merged"]
+    assert [args[:2] for args in calls if args[0] in {"worktree", "branch"} and args[1] != "list"] == [
+        ["worktree", "remove"], ["branch", "-d"]]

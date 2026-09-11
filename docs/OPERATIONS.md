@@ -908,15 +908,17 @@ cleaned up. The helper retains a worktree that is:
 
 - locked with `git worktree lock` (lock the worktree while a worker runs and
   unlock it when the worker exits);
-- dirty, or holding ignored files other than disposable caches
-  (`__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `.venv`,
-  `node_modules`, `.DS_Store`);
+- dirty, or holding ignored files other than regenerable tool caches
+  (`__pycache__`, `*.pyc`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`,
+  `.DS_Store`), so a `.venv` or `node_modules` keeps the worktree;
 - linked to an open or absent PR, or checked out at a head that differs from
   the PR head;
 - missing its directory, unregistered, or user-created.
 
-A failure on one worktree is reported, the sweep continues with the others, and
-the command exits non-zero. Cleanup never deletes remote branches.
+A failure on one worktree is reported with the stage it happened in, the sweep
+continues with the others, and the command exits non-zero. If the local branch
+cannot be deleted after its worktree was removed, the removal is still reported.
+Cleanup never deletes remote branches.
 
 Only a verified checkpoint is durable: commit the work, push it, and confirm
 `git ls-remote --heads origin <branch>` returns the local `HEAD`. Uncommitted or
