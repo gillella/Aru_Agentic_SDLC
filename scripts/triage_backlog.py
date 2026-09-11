@@ -10,16 +10,12 @@ from common import (
     KernelError,
     contract_errors,
     dependencies,
-    ensure_label,
-    issue,
     json_print,
     label_names,
     list_issues,
-    run,
     set_status,
     unresolved_dependencies,
 )
-from merge_state import READY_PREFIX, ready_digest
 
 
 def _priority(record: dict) -> int:
@@ -109,23 +105,12 @@ def backlog_candidates(
     return candidates, rejected
 
 
-def pin_ready_contract(number: int, record: dict | None = None) -> None:
-    """Stamp the approved scope so the merge gate refuses later criteria or touches: edits."""
-    record = record or issue(number)
-    pin = READY_PREFIX + ready_digest(number, str(record.get("body") or ""))
-    ensure_label(pin, color="c2e0c6", description="Ready contract pinned at promotion")
-    stale = [name for name in label_names(record) if name.startswith(READY_PREFIX) and name != pin]
-    run(["gh", "issue", "edit", str(number), "--add-label", pin,
-         *(["--remove-label", ",".join(stale)] if stale else [])])
-
-
 def promote_issue(
     number: int,
     *,
     pre_mutation_check: Callable[[], None] | None = None,
     record: dict | None = None,
 ) -> None:
-    pin_ready_contract(number, record)
     try:
         set_status(
             number,

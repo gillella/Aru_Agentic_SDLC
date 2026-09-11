@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased - The scope contract is judged live
+
+- Promotion no longer stamps a `ready:<digest>` scope pin, and the merge gate no longer
+  refuses an issue whose body changed after promotion. Correcting a `touches:` declaration
+  on a claimed, in-flight issue now needs no status change and no hand-edited board.
+- The declaration is still required at Ready, still reserves paths, and is still enforced
+  against the actual diff; the declaration that was enforced is still recorded as merge
+  evidence, so the approved scope stays auditable.
+- The pin directed the operator to return the issue to Backlog. The kernel implements no
+  transition to Backlog, and once a pull request is open the issue is In Review and
+  releasing the claim is refused, so the instruction could not be followed at all. No
+  kernel message now instructs a transition the kernel does not implement, and a test
+  asserts it.
+- Stale `ready:*` labels on issues promoted before this change are inert.
+
+
 ## Unreleased - Authorized reviewers
 
 - A repository declares who may approve in `.aru/review.json` on its default branch.
