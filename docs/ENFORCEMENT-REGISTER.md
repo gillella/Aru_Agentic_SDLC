@@ -3,6 +3,7 @@
 | Control | Blocks or authorizes | Mechanism |
 | --- | --- | --- |
 | issue contract | Backlog -> Ready | `triage_backlog.py` |
+| Ready contract pin | merge after criteria or `touches:` changed since promotion | `triage_backlog.py` stamps `ready:<digest>`; `merge_state.issue_gate` recomputes it |
 | five statuses | invariant-bearing lifecycle transitions | `triage_backlog.py`, `claim_issue.py`, `create_pr.py`, `merge_pr.py` |
 | exclusive claim | Ready -> In Progress | `claim_issue.py` |
 | path budget | writes outside `touches:` | `hooks/enforce_touches.py`, `aru-governed-pr` actual-diff check |
@@ -10,6 +11,7 @@
 | worktree isolation | first implementation edit | `create_branch.py` |
 | closure link | PR creation | `create_pr.py` |
 | policy-ordered current-head review authority plus configured-timeout refresh | Tier 2-3 review authority | `create_pr.py` |
+| no reviewer available | Tier 2-3 merge (not PR creation) | `create_pr.py` opens the PR as `needs-reviewer`; `merge_pr.py` refuses without a `review:*` authority |
 | exact-head consumer verification | merge | `aru-governed-pr`, `.aru/verify.sh`, `check_ci.py`, `merge_pr.py` |
 | one account-assigned runner profile | required verification dispatch | `init_project.py` account policy, workflow `# aru-runner-profile:` marker, `.aru/verify.sh` marker/`runs-on:` agreement |
 | no cross-profile runner fallback | required verification dispatch | `.aru/verify.sh` per-profile forbidden patterns: `self-hosted-mac` rejects hosted images, `github-hosted` rejects `self-hosted` |

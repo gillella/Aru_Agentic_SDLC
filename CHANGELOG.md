@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased - Scope pinning and reviewer gaps
+
+- Pin the Ready contract at promotion: triage labels the issue `ready:<digest>`
+  of its number, criteria text and `touches:`; the merge gate refuses if either
+  changed afterwards. Unpinned issues from before this change are grandfathered,
+  and close-out deletes the pin label.
+- With no reviewer available, `create_pr.py` opens the PR as `needs-reviewer`
+  instead of refusing; the merge gate still refuses until `--refresh-reviewer`
+  assigns an authority.
+- Triage lists issues without gh's `--label` filter, which went through the
+  lagging search index and hid freshly labelled issues; truncated inventories
+  now refuse.
+- `revert_merge.py` opens its PR from the revert worktree; it previously always
+  failed with "current branch does not belong to the issue".
+- Tier 3 docs no longer imply a stricter Kernel gate than Tier 2.
+- Tests fail if they reach live GitHub; one existing test had been reading the
+  real repository.
+
 ## Unreleased - Merge authority
 
 - Add an optional merge-authority App. With `ARU_MERGE_APP_RUNNER` and

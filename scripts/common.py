@@ -407,13 +407,12 @@ def issue(number: int, *, cwd: str | Path | None = None) -> dict[str, Any]:
 
 
 def list_issues(*, state: str = "open", label: str | None = None, cwd: str | Path | None = None) -> list[dict[str, Any]]:
-    args = ["issue", "list", "--state", state, "--limit", "200", "--json", "number,title,body,state,labels,assignees,url"]
-    if label:
-        args.extend(["--label", label])
+    # gh routes --label through the search index, which lags fresh labels; filter locally.
+    args = ["issue", "list", "--state", state, "--limit", "1000", "--json", "number,title,body,state,labels,assignees,url"]
     data = gh_json(args, cwd=cwd)
-    if not isinstance(data, list):
-        raise KernelError("GitHub returned malformed issue inventory")
-    return data
+    if not isinstance(data, list) or len(data) >= 1000:
+        raise KernelError("GitHub returned malformed or truncated issue inventory")
+    return [record for record in data if label is None or label in label_names(record)]
 
 
 def status_of(record: dict[str, Any]) -> str | None:

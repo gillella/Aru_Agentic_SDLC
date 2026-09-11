@@ -67,7 +67,15 @@ def traverse(monkeypatch, number: int) -> dict:
     monkeypatch.setattr(triage_backlog, "list_issues", lambda **_: [current_issue(number)])
     monkeypatch.setattr(triage_backlog, "unresolved_dependencies", lambda _record: [])
     monkeypatch.setattr(triage_backlog, "set_status", move_status)
+    monkeypatch.setattr(triage_backlog, "ensure_label", lambda *_args, **_kwargs: None)
+
+    def pin_command(argv, **_kwargs):  # apply the Ready pin so the merge gate verifies it later
+        if "--add-label" in argv:
+            state["issue"]["labels"].append({"name": argv[argv.index("--add-label") + 1]})
+
+    monkeypatch.setattr(triage_backlog, "run", pin_command)
     assert triage_backlog.triage()["promoted"] == [number]
+    assert any(label["name"].startswith("ready:") for label in state["issue"]["labels"])
     assert pre_mutation_observations == [(number, "Ready", "Backlog")]
 
     monkeypatch.setattr(claim_issue, "issue", current_issue)

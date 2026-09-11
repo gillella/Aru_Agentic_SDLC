@@ -64,6 +64,15 @@ The issue contract is:
 - exactly one safe `touches:` declaration of repository-relative paths;
 - no unresolved `depends-on: #N` issue.
 
+Promotion pins that contract: `triage_backlog.py` labels the issue
+`ready:<digest>`, a digest of the issue number, the criteria text and the
+`touches:` paths. Ticking criteria does not change it. The merge gate recomputes
+the digest from the live issue and refuses on a mismatch or on more than one pin,
+so a claimant cannot widen its own scope or reword its criteria mid-flight; that
+needs a return to Backlog and a fresh promotion. Issues promoted before pinning
+carry no pin and are checked as before; removing a pin is hand-editing lifecycle
+labels, which this contract forbids. Close-out deletes the pin label.
+
 ## Required lifecycle
 
 1. File or refine the issue in Backlog.
@@ -157,8 +166,11 @@ assignment; do not hand-edit authority or erase prior findings/history.
 A coding reviewer must be bound to an actor distinct from the PR author and
 submit a full-current-head formal attestation. All applicable findings remain
 resolved before merge. Availability, assignment and actual execution/verdict
-are different observations. No available independent reviewer leaves an owned
-blocked action; never manufacture approval.
+are different observations. When no independent reviewer is available,
+`create_pr.py` still opens the PR, labelled `needs-reviewer` and carrying no
+`review:*` authority; CI runs, and the merge gate refuses a Tier 2-3 PR without
+an authority until `create_pr.py --refresh-reviewer` assigns one and clears the
+marker. Never manufacture approval.
 
 The writer owns remediation; a reviewer who becomes an author loses independent
 authority and must be replaced through the governed helper with a truthful
@@ -229,6 +241,11 @@ statuses or labels:
 | **1 — ordinary code** | Ordinary source and tests | No authoritative review | Focused affected build, lint, and tests |
 | **2 — sensitive/contract** | Agent rules, skills, workflows, `.aru/`, hooks, Kernel gate scripts, auth, security, migrations, dependencies, configuration, trading, payments, infrastructure, or unrecognized safe paths | One distinct authoritative review | Targeted integration, migration, compatibility, or security evidence |
 | **3 — production/destructive** | Deploy, production, destructive, rollback, or revert paths; empty, malformed, or unsafe paths | One distinct authoritative review | Human/domain approval, broader release evidence, rollback rehearsal, staged deployment, and observability |
+
+Tier 3 carries exactly the Tier 2 Kernel requirement, and no tier requires a
+person: review authorities are external review bots and coding agents. The
+consumer-owned column lists evidence a consumer's own policy may demand; the
+Kernel neither requests nor checks it.
 
 All `scripts/` paths are conservatively classified as sensitive control surfaces.
 Documentation-name exceptions apply only to documentation; executable files such

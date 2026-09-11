@@ -270,6 +270,8 @@ def test_external_recovery_before_write_aborts_fallback(monkeypatch):
     initial = assignment_pr(created_at=created, state="unavailable")
     recovered = assignment_pr(created_at=created, state="available")
     monkeypatch.setattr(create_pr, "gh_json", lambda _argv: initial)
+    # Previously read the live repository's CodeRabbit capability; the decisions are stubbed below.
+    monkeypatch.setattr(create_pr, "registered_external_states", lambda *_args, **_kwargs: {})
     decisions = iter(
         [("external-unavailable", None), ("external-available", None)]
     )
