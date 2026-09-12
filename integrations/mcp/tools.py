@@ -65,7 +65,7 @@ TOOLS: dict[str, dict[str, Any]] = {
             "Create the issue's branch and its isolated worktree. Requires the issue to be "
             "In Progress and claimed by this exact agent."
         ),
-        "schema": _schema({"issue": INT, "type": {**STR, "enum": ["feat", "fix", "docs", "chore", "refactor", "test"]}, "agent": STR},
+        "schema": _schema({"issue": INT, "type": {**STR, "enum": ["feat", "fix", "docs"]}, "agent": STR},
                           ["issue", "type", "agent"]),
         "args": {"issue": "--issue", "type": "--type", "agent": "--agent"},
         "json": False,
@@ -76,7 +76,7 @@ TOOLS: dict[str, dict[str, Any]] = {
             "Open the governed pull request for a claimed issue. The helper appends the "
             "closing directive itself; do not include one in the body."
         ),
-        "schema": _schema({"issue": INT, "title": STR, "body": STR, "agent": STR}, ["issue", "title"]),
+        "schema": _schema({"issue": INT, "title": STR, "body": STR, "agent": STR}, ["issue", "title", "body"]),
         "args": {"issue": "--issue", "title": "--title", "body": "--body", "agent": "--agent"},
         "json": True,
     },
@@ -150,12 +150,45 @@ def descriptors() -> list[dict[str, Any]]:
     ]
 
 
+# The JSON Schema types this surface declares, mapped onto the Python types a
+# JSON decoder actually produces. `bool` is excluded from "integer" on purpose:
+# Python's bool subclasses int, so `true` would otherwise pass as an issue
+# number and reach the helper as `--issue True`.
+_TYPE_PREDICATES = {
+    "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+    "string": lambda value: isinstance(value, str),
+    "boolean": lambda value: isinstance(value, bool),
+}
+
+
+def _check_value(name: str, key: str, value: Any, declared: dict[str, Any]) -> None:
+    """Refuse a value the declared schema does not actually admit.
+
+    Nothing upstream validates these. The server hands through whatever the
+    client sent, so without this check a declared `type` or `enum` is only
+    advertising: a wrong value reaches the helper's argparse, which exits 2 with
+    a usage string the calling agent cannot act on. `null` is refused here too
+    rather than skipped, because dropping a value the caller believed it passed
+    is the same failure as dropping an unknown key.
+    """
+    expected = declared.get("type")
+    predicate = _TYPE_PREDICATES.get(expected)
+    if predicate is None:
+        raise ValueError(f"{name}.{key} declares unsupported type {expected!r}")
+    if not predicate(value):
+        raise ValueError(f"{name}.{key} must be {expected}, got {type(value).__name__}")
+    choices = declared.get("enum")
+    if choices is not None and value not in choices:
+        raise ValueError(f"{name}.{key} must be one of {sorted(choices)}, got {value!r}")
+
+
 def build_argv(name: str, arguments: dict[str, Any]) -> list[str]:
-    """Map validated tool arguments onto the helper's own flags.
+    """Validate tool arguments and map them onto the helper's own flags.
 
     Unknown keys are refused rather than dropped: silently ignoring an argument
     an agent believed it was passing is how a caller ends up merging the wrong
-    pull request.
+    pull request. Declared types and enums are enforced here for the same
+    reason, since this is the only gate between the client and the helper.
     """
     spec = TOOLS[name]
     unknown = set(arguments) - set(spec["args"])
@@ -164,16 +197,18 @@ def build_argv(name: str, arguments: dict[str, Any]) -> list[str]:
     missing = [key for key in spec["schema"]["required"] if key not in arguments]
     if missing:
         raise ValueError(f"missing required argument(s) for {name}: {missing}")
+    properties = spec["schema"]["properties"]
     argv: list[str] = []
     for key, flag in spec["args"].items():
         if key not in arguments:
             continue
         value = arguments[key]
+        _check_value(name, key, value, properties[key])
+        # A false boolean must omit its flag: every one of these maps to a
+        # store_true option, so passing the bare flag would invert the caller.
         if isinstance(value, bool):
             if value:
                 argv.append(flag)
-            continue
-        if value is None:
             continue
         argv += [flag, str(value)]
     if spec["json"]:
