@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from io import StringIO
 from pathlib import Path
@@ -85,6 +86,63 @@ def test_missing_required_arguments_are_refused():
     with pytest.raises(ValueError, match="missing required argument"):
         tool_table.build_argv("aru_merge", {"pr": 1})
     assert call("tools/call", {"name": "aru_merge", "arguments": {"pr": 1}})["error"]["code"] == server.INVALID_PARAMS
+
+
+def test_opening_a_pull_request_requires_a_body():
+    # create_pr.py puts --body in a required mutually exclusive group, so a call
+    # without one is an argparse exit, not a refusal the agent can read.
+    with pytest.raises(ValueError, match="missing required argument"):
+        tool_table.build_argv("aru_open_pr", {"issue": 1, "title": "t"})
+
+
+def test_a_value_of_the_wrong_type_is_refused():
+    with pytest.raises(ValueError, match="must be integer"):
+        tool_table.build_argv("aru_check_ci", {"pr": "seven"})
+    with pytest.raises(ValueError, match="must be string"):
+        tool_table.build_argv("aru_claim", {"issue": 5, "agent": 5})
+    # bool subclasses int in Python; an issue number must still refuse `true`.
+    with pytest.raises(ValueError, match="must be integer"):
+        tool_table.build_argv("aru_check_ci", {"pr": True})
+
+
+def test_a_null_value_is_refused_not_dropped():
+    with pytest.raises(ValueError, match="must be string"):
+        tool_table.build_argv("aru_claim", {"issue": 5, "agent": None})
+
+
+def test_a_value_outside_the_declared_enum_is_refused():
+    with pytest.raises(ValueError, match="must be one of"):
+        tool_table.build_argv("aru_create_branch", {"issue": 1, "type": "chore", "agent": "a"})
+    assert tool_table.build_argv("aru_create_branch", {"issue": 1, "type": "fix", "agent": "a"}) == [
+        "--issue", "1", "--type", "fix", "--agent", "a"]
+
+
+def _argparse_choices(script, flag):
+    """The choices the helper's own argparse accepts for a flag.
+
+    Read from source rather than by import: every helper builds its parser
+    inside main(), so there is nothing to introspect without running it.
+    """
+    source = (ROOT / "scripts" / script).read_text(encoding="utf-8")
+    match = re.search(rf'add_argument\(\s*"{re.escape(flag)}",\s*choices=\(([^)]*)\)', source)
+    return set(re.findall(r'"([^"]+)"', match.group(1))) if match else set()
+
+
+def test_every_declared_enum_matches_the_helpers_own_choices():
+    # An enum the helper refuses is advertising, not a constraint: a compliant
+    # client picks a listed value and the helper exits 2 on it.
+    checked = 0
+    for name, spec in tool_table.TOOLS.items():
+        for key, declared in spec["schema"]["properties"].items():
+            if "enum" not in declared:
+                continue
+            accepted = _argparse_choices(spec["script"], spec["args"][key])
+            assert accepted, f"{name}.{key} declares an enum but {spec['script']} declares no choices"
+            offered = set(declared["enum"])
+            assert offered <= accepted, (
+                f"{name}.{key} offers {sorted(offered - accepted)}, which {spec['script']} refuses")
+            checked += 1
+    assert checked, "no enum was checked; this guard would otherwise pass vacuously"
 
 
 def test_non_object_arguments_are_refused():
