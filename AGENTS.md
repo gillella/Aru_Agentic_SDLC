@@ -42,8 +42,11 @@ A governed repository verifies on exactly one profile, selected by its account:
 | `self-hosted-mac` | `[self-hosted, macOS, ARM64, aru-ci]` | `gillella` personal repositories, including Aru itself |
 | `github-hosted` | `ubuntu-latest` | `Unum-Inc` repositories |
 
-There is no default: an account outside that table has no profile and stays
-blocked. The scaffolded workflow declares its profile in an
+There is no default and bootstrap never guesses. An account in that table is
+pinned to its assigned profile and cannot be scaffolded onto another one. An
+account outside it has no assigned profile and must name one explicitly with
+`--runner-profile`; without that flag the bootstrap refuses. The scaffolded
+workflow declares its profile in an
 `# aru-runner-profile:` marker, and `.aru/verify.sh` refuses a workflow whose
 marker and `runs-on:` disagree, an unknown marker, or a `github-hosted`
 workflow that mentions `self-hosted`. A `self-hosted-mac` outage never falls

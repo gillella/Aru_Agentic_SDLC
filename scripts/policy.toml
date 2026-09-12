@@ -17,14 +17,21 @@ is defined once in `docs/KERNEL-CONTRACT.md`.""",
 For this repository, the live default-branch ruleset requires the
 `aru-governed-pr` and `aru-merge-policy` contexts produced by the
 authenticated GitHub Actions App, and one approving review with stale
-approvals dismissed and the last push approved by another account. GitHub
-enforces the approval rule; `merge_pr.py` rereads the same evidence before
-submission.
-The merge-authority App gate is not enabled here: `aru-merge-authorized` is
-absent from the required contexts, so nothing server-side makes `merge_pr.py`
-the only merge path. With it enabled, only a holder of that App's key can
-satisfy the pinned check, and a repository administrator can still edit the
-ruleset; that residual boundary remains consumer-owned.""",
+approvals dismissed. GitHub enforces the approval rule; `merge_pr.py` rereads
+the same evidence before submission.
+The merge-authority App gate is enabled here: `aru-merge-authorized` is
+required, pinned by `integration_id` to the merge-authority App, so only a
+holder of that App's key can satisfy it and `merge_pr.py` is the only path that
+completes a merge. A consumer scaffolded without `--merge-app-id` has no App to
+pin and therefore does not get this check; there, any account with write access
+can merge once the other contexts pass.
+Approval of the most recent push by an account other than its pusher is not
+required. The App pushes on the factory's behalf and a person approves, so that
+rule demanded a second approver on every pull request and nothing could merge;
+it is declared false rather than silently removed. Stale-approval dismissal
+stays on, so a new push still voids every approval.
+A repository administrator can still edit the ruleset; that residual boundary
+remains consumer-owned.""",
 ]
 
 [[gate]]
@@ -183,15 +190,33 @@ mechanism = "`tests/test_surface.py`"
 
 [ruleset]
 # The server-enforced merge boundary written by init_project.py.
-name = "aru-protect-default"
+name = "aru-protect-main"
 allowed_merge_methods = ["merge"]
 required_approving_review_count = 1
 dismiss_stale_reviews_on_push = true
-require_last_push_approval = true
 required_review_thread_resolution = true
 require_code_owner_review = false
+# An App pushes on the factory's behalf and a person approves, so GitHub sees a
+# push whose author is never the approver. This rule therefore demanded a second
+# approver on every pull request the factory produced and nothing could merge.
+# Switched off deliberately on 2026-09-12; dismiss_stale_reviews_on_push stays
+# true and already voids every approval on a new push, which is the protection
+# that actually mattered. Declared here rather than edited into the live ruleset
+# so the decision is reviewable instead of invisible.
+require_last_push_approval = false
+# Requires a second approval when a push carries changes the pusher did not
+# write. Live on this repository and previously undeclared, which is the drift
+# this table exists to prevent.
+require_extra_approval_for_unattributed_changes = true
 # Empty on purpose: no actor may bypass the boundary.
 bypass_actors = []
+# Empty on purpose: authority to approve is resolved from .aru/review.json by
+# review_authority.py, not pinned into the ruleset.
+required_reviewers = []
+# Pinned by integration_id to the merge-authority App, so only merge_pr.py can
+# satisfy it. Absent from required_checks because a consumer scaffolded without
+# --merge-app-id has no App to pin; init_project.py appends it when one exists.
+merge_authority_check = "aru-merge-authorized"
 # aru-governed-pr runs the pull request's own copy of its workflow; aru-merge-policy
 # runs the base branch's copy and posts its verdict on the head. Requiring both means
 # a pull request cannot rewrite the only check standing in its way.
