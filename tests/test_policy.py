@@ -88,12 +88,15 @@ def test_a_pipe_in_a_gate_field_is_refused(tmp_path):
         policy.load(bad)
 
 
-def test_register_does_not_claim_the_approval_rule_is_unapplied():
-    # The rule is live on ruleset 20802441; the register used to say it was not.
+def test_register_describes_the_rules_that_are_actually_live():
+    # Two separate claims have drifted from ruleset 20802441 already: first the
+    # approval rule was described as unapplied, then the merge-authority check
+    # as absent while it was required. Both are asserted against here.
     content = " ".join(policy.REGISTER_PATH.read_text(encoding="utf-8").split())
     assert "Until the approval rule is added" not in content
     assert "one approving review" in content
-    assert "`aru-merge-authorized` is absent" in content
+    assert "`aru-merge-authorized` is absent" not in content
+    assert "The merge-authority App gate is enabled here" in content
 
 
 # --- rendered agent rules and bootstrap ruleset (#695) ----------------------
@@ -133,23 +136,84 @@ def test_bootstrap_ruleset_is_built_from_the_policy():
     assert pull["allowed_merge_methods"] == declared["allowed_merge_methods"] == ["merge"]
     assert pull["required_approving_review_count"] == 1
     assert pull["dismiss_stale_reviews_on_push"] is True
-    assert pull["require_last_push_approval"] is True
+    assert pull["require_last_push_approval"] is False  # deliberate; see the policy rationale
     checks = next(r for r in payload["rules"] if r["type"] == "required_status_checks")["parameters"]
     contexts = [c["context"] for c in checks["required_status_checks"]]
     assert contexts == declared["required_checks"] == ["aru-governed-pr", "aru-merge-policy"]
 
 
 def test_the_boundary_cannot_be_softened_by_a_policy_edit(tmp_path):
-    # bypass actors, the approval count and the checks are the boundary itself.
+    # Every declared value, not only the three that used to be checked. A policy
+    # edit that flipped any of these would scaffold a weaker rule into every
+    # consumer repository with nothing refusing.
     base = policy.load()
     for key, value, match in (
         ("bypass_actors", [{"actor_id": 1}], "bypass_actors must stay empty"),
         ("required_approving_review_count", 0, "at least one approving review"),
-        ("required_checks", [], "at least one status check"),
+        ("required_checks", [], "required_checks must include"),
+        ("required_checks", ["aru-governed-pr"], "aru-merge-policy"),
+        ("required_checks", ["lint"], "required_checks must include"),
+        ("allowed_merge_methods", ["squash", "merge"], "merge method only"),
+        ("allowed_merge_methods", ["rebase"], "merge method only"),
+        ("dismiss_stale_reviews_on_push", False, "dismiss_stale_reviews_on_push must stay true"),
+        ("required_review_thread_resolution", False, "required_review_thread_resolution must stay true"),
+        ("require_extra_approval_for_unattributed_changes", False,
+         "require_extra_approval_for_unattributed_changes must stay true"),
+        ("require_last_push_approval", "no", "must be an explicit boolean"),
     ):
         weakened = {**base, "ruleset": {**base["ruleset"], key: value}}
         with pytest.raises(policy.PolicyError, match=match):
             policy.ruleset_parameters(weakened)
+
+
+def test_every_declared_key_is_required_to_be_present():
+    base = policy.load()
+    for key in policy.RULESET_KEYS:
+        without = {k: v for k, v in base["ruleset"].items() if k != key}
+        with pytest.raises(policy.PolicyError, match=r"\[ruleset\] is missing"):
+            policy.ruleset_parameters({**base, "ruleset": without})
+
+
+# The pull-request parameters ruleset 20802441 actually carried on 2026-09-12,
+# read from the live ruleset. Update this only alongside the declaration it
+# mirrors -- that is the point of the guard.
+LIVE_PULL_REQUEST_PARAMETERS = (
+    "allowed_merge_methods",
+    "dismiss_stale_reviews_on_push",
+    "require_code_owner_review",
+    "require_extra_approval_for_unattributed_changes",
+    "require_last_push_approval",
+    "required_approving_review_count",
+    "required_review_thread_resolution",
+    "required_reviewers",
+)
+
+
+def test_every_live_pull_request_parameter_is_declared():
+    # A live parameter the policy never declares is a boundary nobody reviewed.
+    # require_extra_approval_for_unattributed_changes sat undeclared while
+    # governing how many approvals every pull request needed.
+    undeclared = set(LIVE_PULL_REQUEST_PARAMETERS) - set(policy.RULESET_PULL_REQUEST_KEYS)
+    assert not undeclared, f"live parameters the policy does not declare: {sorted(undeclared)}"
+    assert LIVE_PULL_REQUEST_PARAMETERS, "an empty fixture would pass vacuously"
+
+
+def test_the_scaffolded_rule_carries_every_declared_parameter():
+    import init_project
+    declared = policy.ruleset_parameters()
+    payload = init_project.ruleset_payload()
+    pull = next(r for r in payload["rules"] if r["type"] == "pull_request")["parameters"]
+    for key in policy.RULESET_PULL_REQUEST_KEYS:
+        assert key in pull, f"{key} is declared but never scaffolded"
+        assert pull[key] == declared[key], key
+
+
+def test_last_push_approval_is_deliberately_off():
+    # Recorded decision 2026-09-12, not drift. The App pushes and a person
+    # approves, so this rule demanded a second approver on every pull request.
+    assert policy.ruleset_parameters()["require_last_push_approval"] is False
+    register = " ".join(policy.REGISTER_PATH.read_text(encoding="utf-8").split())
+    assert "is not required" in register
 
 
 def test_missing_ruleset_table_refuses():
@@ -184,9 +248,7 @@ def test_every_merge_refusal_names_a_declared_gate():
 
 def test_every_gate_merge_pr_claims_to_enforce_actually_refuses():
     claimed = policy.gates_enforced_by("merge_pr.py")
-    # current-board-and-dependencies is delegated to merge_state.py, which merge_pr
-    # calls; it refuses through issue_gate() rather than its own refuse() site.
-    unenforced = claimed - _refused_gates() - {"current-board-and-dependencies"}
+    unenforced = claimed - _refused_gates()
     assert not unenforced, f"policy says merge_pr.py enforces these, but it never refuses: {sorted(unenforced)}"
 
 

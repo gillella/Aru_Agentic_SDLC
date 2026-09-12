@@ -310,7 +310,7 @@ def ruleset_payload(merge_app_id: int | None = None) -> dict[str, object]:
         for context in declared["required_checks"]
     ]
     if merge_app_id is not None:
-        checks.append({"context": merge_authority.MERGE_AUTHORITY_CHECK, "integration_id": merge_app_id})
+        checks.append({"context": declared["merge_authority_check"], "integration_id": merge_app_id})
     return {
         "name": declared["name"],
         "target": "branch",
@@ -328,9 +328,12 @@ def ruleset_payload(merge_app_id: int | None = None) -> dict[str, object]:
                     "allowed_merge_methods": list(declared["allowed_merge_methods"]),
                     "dismiss_stale_reviews_on_push": declared["dismiss_stale_reviews_on_push"],
                     "require_code_owner_review": declared["require_code_owner_review"],
+                    "require_extra_approval_for_unattributed_changes":
+                        declared["require_extra_approval_for_unattributed_changes"],
                     "require_last_push_approval": declared["require_last_push_approval"],
                     "required_approving_review_count": declared["required_approving_review_count"],
                     "required_review_thread_resolution": declared["required_review_thread_resolution"],
+                    "required_reviewers": list(declared["required_reviewers"]),
                 },
             },
             {

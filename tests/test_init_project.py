@@ -54,9 +54,9 @@ def test_ruleset_requires_the_server_exact_head_check_and_no_bypass():
     review = rules["pull_request"]["parameters"]
     assert review["required_review_thread_resolution"] is True
     assert review["require_code_owner_review"] is False
-    # The one review rule: an account other than the author and last pusher approves the latest commit.
+    # One review rule: a non-author approves the latest commit. Non-pusher approval is off by policy.
     assert (review["required_approving_review_count"], review["dismiss_stale_reviews_on_push"],
-            review["require_last_push_approval"]) == (1, True, True)
+            review["require_last_push_approval"]) == (1, True, False)
     checks = rules["required_status_checks"]["parameters"]
     assert checks["strict_required_status_checks_policy"] is True
     assert checks["required_status_checks"] == [

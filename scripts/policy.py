@@ -30,6 +30,27 @@ REGEN_COMMAND = "python3 -c \"import sys; sys.path.insert(0, 'scripts'); import 
 
 GATE_FIELDS = ("id", "control", "blocks", "mechanism")
 
+# Every pull-request parameter the boundary declares. This is the whole set
+# GitHub exposes on a `pull_request` rule: anything live that is absent here is
+# a rule nobody declared, which is how a boundary drifts from its policy.
+RULESET_PULL_REQUEST_KEYS = (
+    "allowed_merge_methods",
+    "dismiss_stale_reviews_on_push",
+    "require_code_owner_review",
+    "require_extra_approval_for_unattributed_changes",
+    "require_last_push_approval",
+    "required_approving_review_count",
+    "required_review_thread_resolution",
+    "required_reviewers",
+)
+RULESET_KEYS = ("name", "bypass_actors", "required_checks", "merge_authority_check",
+                *RULESET_PULL_REQUEST_KEYS)
+
+# The two contexts every governed repository must require. The merge-authority
+# check is named separately: a consumer scaffolded without an App cannot pin it
+# by integration_id, so it is appended by init_project.py only when one exists.
+GOVERNED_CHECKS = ("aru-governed-pr", "aru-merge-policy")
+
 
 class PolicyError(ValueError):
     """The gate declaration is missing, malformed, or ambiguous."""
@@ -126,23 +147,31 @@ def ruleset_parameters(policy: dict[str, Any] | None = None) -> dict[str, Any]:
     ruleset = policy.get("ruleset")
     if not isinstance(ruleset, dict):
         raise PolicyError("policy is missing a [ruleset] table")
-    required = (
-        "name", "allowed_merge_methods", "required_approving_review_count",
-        "dismiss_stale_reviews_on_push", "require_last_push_approval",
-        "required_review_thread_resolution", "require_code_owner_review",
-        "bypass_actors", "required_checks",
-    )
-    missing = [key for key in required if key not in ruleset]
+    missing = [key for key in RULESET_KEYS if key not in ruleset]
     if missing:
         raise PolicyError(f"[ruleset] is missing: {missing}")
-    # These three are the boundary. A policy edit must not be able to soften them
-    # silently, so the renderer refuses rather than scaffolding a weaker rule.
+    # Every one of these is the boundary. Presence is not enough: a policy edit
+    # that flipped a value would scaffold a weaker rule into every consumer
+    # repository without anything refusing, so each declared value is checked
+    # against what the boundary actually requires.
     if ruleset["bypass_actors"]:
         raise PolicyError("[ruleset] bypass_actors must stay empty")
     if int(ruleset["required_approving_review_count"]) < 1:
         raise PolicyError("[ruleset] must require at least one approving review")
-    if not ruleset["required_checks"]:
-        raise PolicyError("[ruleset] must require at least one status check")
+    if list(ruleset["allowed_merge_methods"]) != ["merge"]:
+        raise PolicyError("[ruleset] must allow the merge method only")
+    for key in ("dismiss_stale_reviews_on_push", "required_review_thread_resolution",
+                "require_extra_approval_for_unattributed_changes"):
+        if ruleset[key] is not True:
+            raise PolicyError(f"[ruleset] {key} must stay true")
+    # Pinned, not asserted true. It is deliberately false (see the [ruleset]
+    # rationale) and must stay an explicit boolean so it cannot drift in either
+    # direction: a missing or non-boolean value is a silent change of boundary.
+    if not isinstance(ruleset["require_last_push_approval"], bool):
+        raise PolicyError("[ruleset] require_last_push_approval must be an explicit boolean")
+    missing_checks = set(GOVERNED_CHECKS) - set(ruleset["required_checks"])
+    if missing_checks:
+        raise PolicyError(f"[ruleset] required_checks must include: {sorted(missing_checks)}")
     return dict(ruleset)
 
 
