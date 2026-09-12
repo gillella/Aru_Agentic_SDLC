@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased - Reducing the CLI token
+
+- The operations guide records the scopes the kernel requires (`repo`, `project`,
+  `read:org`), that `gh auth refresh` only adds scopes so reducing them means
+  authenticating again, and that a new repository's first push fails without `workflow`
+  until the App is installed on it.
+- It states what the change is worth now: with a base-branch check judging pull requests
+  and a ruleset carrying no bypass actors, removing the scope is least privilege rather
+  than the control that closes the workflow-rewrite route.
+
+
 ## Unreleased - Runner isolation runbook
 
 - The operations guide now states what pull-request code can reach on a self-hosted runner,
