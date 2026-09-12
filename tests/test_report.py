@@ -153,6 +153,95 @@ def test_summarize_shape_is_stable():
     }
 
 
+# --- evidence actually fetched from GitHub -----------------------------------
+# These drive fetch_one itself. The pure-function tests above run on synthetic
+# records, so they stayed green while the production path read the wrong commit
+# and asserted a constant thread count.
+
+PULL = {"number": 7, "merged_at": "2026-09-10T12:00:00Z", "body": "",
+        "merge_commit_sha": "MERGECOMMIT", "head": {"sha": "HEADSHA"}}
+
+
+def _stub_github(monkeypatch, *, check_runs=None, threads=None):
+    """Answer fetch_one's GitHub calls from fixtures, recording what it asked."""
+    calls = {"check_run_urls": [], "graphql": 0}
+
+    def fake_json(args, **kw):
+        if len(args) > 1 and args[1] == "graphql":
+            calls["graphql"] += 1
+            pages = threads if threads is not None else [[]]
+            page = pages[calls["graphql"] - 1]
+            return {"data": {"repository": {"pullRequest": {"reviewThreads": {
+                "nodes": page,
+                "pageInfo": {"hasNextPage": calls["graphql"] < len(pages), "endCursor": "c"},
+            }}}}}
+        url = args[1]
+        calls["check_run_urls"].append(url)
+        # Model GitHub honestly: the merge commit on the base branch carries
+        # none of the pull request's checks. Answering any commit with the same
+        # runs would let a test pass against code reading the wrong one.
+        served = check_runs if (check_runs is not None and "HEADSHA" in url) else []
+        return {"check_runs": served}
+
+    monkeypatch.setattr(report, "gh_paginated", lambda *a, **k: [])
+    monkeypatch.setattr(report, "gh_json", fake_json)
+    return calls
+
+
+def test_check_runs_are_read_from_the_head_not_the_merge_commit(monkeypatch):
+    calls = _stub_github(monkeypatch)
+    report.fetch_one("o/r", dict(PULL))
+    assert len(calls["check_run_urls"]) == 1
+    url = calls["check_run_urls"][0]
+    assert "HEADSHA" in url, url
+    assert "MERGECOMMIT" not in url, "governed checks never run on the merge commit"
+
+
+def test_a_merged_pull_request_reports_its_check_runs(monkeypatch):
+    # The defect: every merged PR reported zero runs, because the merge commit
+    # on the base branch carries none of the pull request's checks.
+    _stub_github(monkeypatch, check_runs=[{"name": "aru-governed-pr", "conclusion": "failure"}])
+    record = report.fetch_one("o/r", dict(PULL))
+    assert record["check_runs"] == [{"name": "aru-governed-pr", "conclusion": "failure"}]
+    assert report.blocks_by_gate([record]) == {"exact-head-consumer-verification": 1}
+
+
+def test_unresolved_threads_come_from_github_not_a_constant(monkeypatch):
+    _stub_github(monkeypatch, threads=[[{"isResolved": False, "isOutdated": False},
+                                        {"isResolved": False, "isOutdated": False}]])
+    assert report.fetch_one("o/r", dict(PULL))["unresolved_threads"] == 2
+
+
+def test_resolved_and_outdated_threads_are_not_counted(monkeypatch):
+    _stub_github(monkeypatch, threads=[[{"isResolved": True, "isOutdated": False},
+                                        {"isResolved": False, "isOutdated": True},
+                                        {"isResolved": False, "isOutdated": False}]])
+    assert report.unresolved_threads("o/r", 7) == 1
+
+
+def test_the_thread_count_paginates_past_the_first_hundred(monkeypatch):
+    open_thread = {"isResolved": False, "isOutdated": False}
+    _stub_github(monkeypatch, threads=[[open_thread] * 100, [open_thread] * 3])
+    assert report.unresolved_threads("o/r", 7) == 103
+
+
+def test_unreadable_thread_evidence_refuses_rather_than_counting_zero(monkeypatch):
+    monkeypatch.setattr(report, "gh_json", lambda *a, **k: {"data": {"repository": None}})
+    with pytest.raises(report.ReportError, match="review-thread evidence"):
+        report.unresolved_threads("o/r", 7)
+
+
+def test_a_malformed_repository_refuses(monkeypatch):
+    with pytest.raises(report.ReportError, match="owner/name"):
+        report.unresolved_threads("not-a-slug", 7)
+
+
+def test_the_thread_count_is_not_a_literal_in_the_production_path():
+    from pathlib import Path
+    source = Path(report.__file__).read_text(encoding="utf-8")
+    assert '"unresolved_threads": 0' not in source, "the count must be read, not asserted"
+
+
 # --- read-only ---------------------------------------------------------------
 
 def test_report_performs_no_write(tmp_path):

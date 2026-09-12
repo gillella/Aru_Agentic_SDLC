@@ -25,7 +25,7 @@ from statistics import median
 from typing import Any
 
 import policy
-from common import KernelError, gh_json, gh_paginated, json_print, repo_slug
+from common import REPOSITORY_AUTH, KernelError, gh_json, gh_paginated, json_print, repo_slug
 
 # A declared gate is counted only where GitHub records the block. Values are
 # gate ids from scripts/policy.toml; validate_gate_map() proves they still exist.
@@ -164,7 +164,11 @@ def fetch_one(repo: str, pull: dict[str, Any]) -> dict[str, Any]:
     number = pull.get("number")
     if not isinstance(number, int):
         raise ReportError("a pull request has no readable number")
-    head = pull.get("merge_commit_sha") or (pull.get("head") or {}).get("sha")
+    # The governed contexts run on the pull request head, never on the merge
+    # commit GitHub writes onto the base branch. Preferring merge_commit_sha
+    # reported zero check runs for every merged pull request -- precisely the
+    # population this report exists to measure.
+    head = (pull.get("head") or {}).get("sha")
     commits = [
         {"committed_at": ((c.get("commit") or {}).get("committer") or {}).get("date")}
         for c in gh_paginated(f"repos/{repo}/pulls/{number}/commits?per_page=100")
@@ -187,9 +191,62 @@ def fetch_one(repo: str, pull: dict[str, Any]) -> dict[str, Any]:
         "commits": commits,
         "reviews": reviews,
         "check_runs": check_runs,
-        "unresolved_threads": 0,
+        "unresolved_threads": unresolved_threads(repo, number),
         "claimed_at": claim_moment(repo, str(pull.get("body") or "")),
     }
+
+
+THREADS_QUERY = """
+query($owner:String!,$name:String!,$number:Int!,$after:String){
+  repository(owner:$owner,name:$name){
+    pullRequest(number:$number){
+      reviewThreads(first:100,after:$after){
+        nodes{isResolved isOutdated}
+        pageInfo{hasNextPage endCursor}
+      }
+    }
+  }
+}
+"""
+
+
+def unresolved_threads(repo: str, number: int) -> int:
+    """Count the review threads still standing open on a pull request.
+
+    Counts what `fetch_pr_feedback.py` treats as a block: a thread counts only
+    while it is neither resolved nor outdated. Paginated, because a count that
+    silently stopped at the first hundred threads would understate the very gate
+    it exists to measure. Unreadable evidence refuses the report rather than
+    reporting a partial count as complete -- the surrounding code makes the same
+    trade, and a thread figure that fails open is indistinguishable from a clean
+    run.
+    """
+    if repo.count("/") != 1:
+        raise ReportError(f"repository {repo!r} is not owner/name")
+    owner, name = repo.split("/", 1)
+    cursor: str | None = None
+    open_threads = 0
+    while True:
+        args = ["api", "graphql", "-f", f"query={THREADS_QUERY}",
+                "-F", f"owner={owner}", "-F", f"name={name}", "-F", f"number={number}"]
+        if cursor:
+            args.extend(["-F", f"after={cursor}"])
+        data = gh_json(args, auth=REPOSITORY_AUTH)
+        pull = (((data or {}).get("data") or {}).get("repository") or {}).get("pullRequest")
+        connection = (pull or {}).get("reviewThreads")
+        if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+            raise ReportError(f"PR #{number}: review-thread evidence is unreadable")
+        for thread in connection["nodes"]:
+            if not isinstance(thread, dict):
+                raise ReportError(f"PR #{number}: review-thread evidence is malformed")
+            if not thread.get("isResolved") and not thread.get("isOutdated"):
+                open_threads += 1
+        page = connection.get("pageInfo")
+        if not isinstance(page, dict) or not page.get("hasNextPage"):
+            return open_threads
+        cursor = page.get("endCursor")
+        if not isinstance(cursor, str) or not cursor:
+            raise ReportError(f"PR #{number}: review-thread pagination is broken")
 
 
 def claim_moment(repo: str, body: str) -> str | None:
