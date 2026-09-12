@@ -1137,6 +1137,34 @@ create a scheduler, autonomous loop, or second work queue.
 | `merge_pr.py` | Evaluate, perform, or recover a confirmed direct merge | Requires expected head, exact-head server verification, a non-author exact-head approval, clean threads, and complete queue-state evidence; queue admission and historical queue close-out are refused |
 | `cleanup_worktrees.py` | Remove eligible Factory worktrees | Retains locked, dirty, ignored-data, open, and ambiguous worktrees; reports per-worktree failures and exits non-zero |
 | `revert_merge.py` | Create governed reverse gear | Requires a separate approved revert issue |
+| `report.py` | Read-only delivery report over a time window | Writes nothing and keeps no state; refuses on unreadable evidence rather than reporting a partial figure; names the gates it cannot observe |
+
+### Delivery report
+
+`report.py` answers whether the guardrails are helping, rather than whether each
+change followed the process. It is read-only: it writes nothing, creates no file,
+and re-derives every figure from GitHub on each run.
+
+```bash
+python3 "$ARU_SDLC_HOME/scripts/report.py" --repo OWNER/REPO --since 30d
+python3 "$ARU_SDLC_HOME/scripts/report.py" --since 14d --limit 25 --json
+```
+
+`--since` takes a window such as `30d`, `6w` or `48h` (default `30d`); `--limit`
+bounds how many recent merged pull requests are read (default 50). Omitting
+`--repo` uses the current checkout's remote.
+
+It reports merged pull requests, how many were reworked after review (a commit
+pushed after the first review), claim-to-merge duration from the `agent:*` label
+to the merge, and observed blocks counted against the gate identifiers declared
+in `scripts/policy.toml`.
+
+**Read the last line.** A `merge_pr.py` refusal raises in the operator's terminal
+and leaves no GitHub record, because the Kernel has no telemetry or ledger by
+design. Only gates with a GitHub-visible signal — the governed checks, a
+`CHANGES_REQUESTED` review, unresolved threads — can be counted. The report names
+the declared gates it cannot observe, so a low block count is never mistaken for
+proof of a clean run.
 
 ### Installation commands
 
