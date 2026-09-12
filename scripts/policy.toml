@@ -29,132 +29,154 @@ ruleset; that residual boundary remains consumer-owned.""",
 
 [[gate]]
 id = "issue-contract"
+enforcers = ["triage_backlog.py"]
 control = "issue contract"
 blocks = "Backlog -> Ready"
 mechanism = "`triage_backlog.py`"
 
 [[gate]]
 id = "five-statuses"
+enforcers = ["triage_backlog.py", "claim_issue.py", "create_pr.py", "merge_pr.py"]
 control = "five statuses"
 blocks = "invariant-bearing lifecycle transitions"
 mechanism = "`triage_backlog.py`, `claim_issue.py`, `create_pr.py`, `merge_pr.py`"
 
 [[gate]]
 id = "exclusive-claim"
+enforcers = ["claim_issue.py"]
 control = "exclusive claim"
 blocks = "Ready -> In Progress"
 mechanism = "`claim_issue.py`"
 
 [[gate]]
 id = "path-budget"
+enforcers = ["enforce_touches.py", "aru-governed-pr"]
 control = "path budget"
 blocks = "writes outside `touches:`"
 mechanism = "`hooks/enforce_touches.py`, `aru-governed-pr` actual-diff check"
 
 [[gate]]
 id = "path-budget-unrewritable"
+enforcers = ["aru-merge-policy"]
 control = "path budget, unrewritable"
 blocks = "writes outside `touches:` when the pull request edits its own workflow"
 mechanism = "`aru-merge-policy` runs the base branch copy of itself on `pull_request_target`, never reads the head, and posts its verdict as a required status on the head"
 
 [[gate]]
 id = "default-branch-protection"
+enforcers = ["pre-push"]
 control = "default-branch protection"
 blocks = "direct push to the resolved remote default branch"
 mechanism = "`hooks/pre-push`"
 
 [[gate]]
 id = "worktree-isolation"
+enforcers = ["create_branch.py"]
 control = "worktree isolation"
 blocks = "first implementation edit"
 mechanism = "`create_branch.py`"
 
 [[gate]]
 id = "closure-link"
+enforcers = ["create_pr.py"]
 control = "closure link"
 blocks = "PR creation"
 mechanism = "`create_pr.py`"
 
 [[gate]]
 id = "exact-head-consumer-verification"
+enforcers = ["check_ci.py", "merge_pr.py", "aru-governed-pr", ".aru/verify.sh"]
 control = "exact-head consumer verification"
 blocks = "merge"
 mechanism = "`aru-governed-pr`, `.aru/verify.sh`, `check_ci.py`, `merge_pr.py`"
 
 [[gate]]
 id = "one-account-assigned-runner-profile"
+enforcers = ["init_project.py", ".aru/verify.sh"]
 control = "one account-assigned runner profile"
 blocks = "required verification dispatch"
 mechanism = "`init_project.py` account policy, workflow `# aru-runner-profile:` marker, `.aru/verify.sh` marker/`runs-on:` agreement"
 
 [[gate]]
 id = "no-cross-profile-runner-fallback"
+enforcers = [".aru/verify.sh"]
 control = "no cross-profile runner fallback"
 blocks = "required verification dispatch"
 mechanism = "`.aru/verify.sh` per-profile forbidden patterns: `self-hosted-mac` rejects hosted images, `github-hosted` rejects `self-hosted`"
 
 [[gate]]
 id = "current-board-and-dependencies"
+enforcers = ["merge_state.py"]
 control = "current board and dependencies"
 blocks = "merge submission and direct-merge finalization"
 mechanism = "`merge_state.py` fresh Project/card/status-field identity, label agreement and closed dependencies"
 
 [[gate]]
 id = "configured-product-verification"
+enforcers = [".aru/verify.sh"]
 control = "configured product verification"
 blocks = "consumer check success"
 mechanism = "`.aru/verify.sh` requires executable `.aru/verify-project.sh`; generated starter fails"
 
 [[gate]]
 id = "unresolved-findings"
+enforcers = ["fetch_pr_feedback.py", "merge_pr.py"]
 control = "unresolved findings"
 blocks = "merge"
 mechanism = "`fetch_pr_feedback.py`, `merge_pr.py`"
 
 [[gate]]
 id = "approval-by-an-authorized-reviewer"
+enforcers = ["merge_pr.py", "review_authority.py", "aru-merge-policy"]
 control = "approval by an authorized reviewer"
 blocks = "merge, under the `human` posture"
 mechanism = "`.aru/review.json` on the default branch names the accounts that may approve; `review_authority.py` refuses an unlisted account and refuses any GitHub App outright, and requires the approval to carry a written body. Applied by `merge_pr.py`, the only path that submits a merge; `aru-merge-policy` does not apply it, because the trigger that would re-evaluate after an approval runs the pull request's own copy of the workflow"
 
 [[gate]]
 id = "posture-resolution"
+enforcers = ["review_authority.py"]
 control = "posture resolution"
 blocks = "merge, when the declaration is unusable"
 mechanism = "absent, malformed or unknown resolves to `human`, so a repository cannot lose the gate by omission; a repository that declared nothing authorizes its owner rather than nobody"
 
 [[gate]]
 id = "approval-by-another-account"
+enforcers = ["merge_pr.py", "ruleset"]
 control = "approval by another account"
 blocks = "merge"
 mechanism = "ruleset: one approval, stale approvals dismissed, last-push approval; `merge_pr.py` `approved_at_head` rereads the reviews before submission"
 
 [[gate]]
 id = "base-head-race"
+enforcers = ["merge_pr.py"]
 control = "base/head race"
 blocks = "merge"
 mechanism = "`merge_pr.py --expected-head`"
 
 [[gate]]
 id = "helper-only-merge-optional"
+enforcers = ["merge_pr.py", "ruleset"]
 control = "helper-only merge (optional)"
 blocks = "merge submission by any other path"
 mechanism = "`merge_pr.py` posts `aru-merge-authorized` as the configured merge-authority App; the ruleset requires it pinned by `integration_id`"
 
 [[gate]]
 id = "issue-done-and-cleanup"
+enforcers = ["merge_pr.py", "cleanup_worktrees.py"]
 control = "issue Done and cleanup"
 blocks = "close-out"
 mechanism = "`merge_pr.py`, `cleanup_worktrees.py`"
 
 [[gate]]
 id = "reverse-gear"
+enforcers = ["revert_merge.py"]
 control = "reverse gear"
 blocks = "unsafe merged change"
 mechanism = "`revert_merge.py`"
 
 [[gate]]
 id = "anti-regrowth-budgets"
+enforcers = ["test_surface.py"]
 control = "anti-regrowth budgets"
 blocks = "CI"
 mechanism = "`tests/test_surface.py`"

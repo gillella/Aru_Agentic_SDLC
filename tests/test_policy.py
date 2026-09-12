@@ -163,3 +163,60 @@ def test_kernel_path_steps_are_numbered_in_order():
     numbers = [int(line.split(".")[0]) for line in rendered.split("\n") if line[:1].isdigit()]
     assert numbers == list(range(1, len(numbers) + 1))
     assert len(numbers) >= 7
+
+
+# --- refusals map to declared gates, both directions (#697) -----------------
+
+import re as _re  # noqa: E402
+
+import merge_pr  # noqa: E402
+
+
+def _refused_gates() -> set[str]:
+    source = (ROOT / "scripts" / "merge_pr.py").read_text(encoding="utf-8")
+    return set(_re.findall(r'refuse\(\s*"([a-z0-9-]+)"', source))
+
+
+def test_every_merge_refusal_names_a_declared_gate():
+    undeclared = _refused_gates() - policy.gate_ids()
+    assert not undeclared, f"merge_pr.py refuses for gates the policy does not declare: {sorted(undeclared)}"
+
+
+def test_every_gate_merge_pr_claims_to_enforce_actually_refuses():
+    claimed = policy.gates_enforced_by("merge_pr.py")
+    # current-board-and-dependencies is delegated to merge_state.py, which merge_pr
+    # calls; it refuses through issue_gate() rather than its own refuse() site.
+    unenforced = claimed - _refused_gates() - {"current-board-and-dependencies"}
+    assert not unenforced, f"policy says merge_pr.py enforces these, but it never refuses: {sorted(unenforced)}"
+
+
+def test_the_mapping_is_not_vacuous():
+    assert len(_refused_gates()) >= 6
+    assert policy.gates_enforced_by("merge_pr.py")
+    assert policy.gates_enforced_by("nonexistent_helper.py") == set()
+
+
+def test_a_refusal_carries_its_gate_at_runtime():
+    with pytest.raises(merge_pr.GateRefusal) as caught:
+        merge_pr.refuse("base-head-race", "boom")
+    assert caught.value.gate == "base-head-race"
+    assert str(caught.value) == "boom"
+    # Subclasses KernelError, so every existing handler still catches it.
+    from common import KernelError
+    assert isinstance(caught.value, KernelError)
+
+
+def test_a_refusal_can_chain_a_cause():
+    with pytest.raises(merge_pr.GateRefusal) as caught:
+        try:
+            raise ValueError("root")
+        except ValueError as exc:
+            merge_pr.refuse("issue-done-and-cleanup", "wrapped", cause=exc)
+    assert isinstance(caught.value.__cause__, ValueError)
+
+
+def test_malformed_enforcers_refuse():
+    base = policy.load()
+    broken = {**base, "gate": [{**base["gate"][0], "enforcers": "merge_pr.py"}]}
+    with pytest.raises(policy.PolicyError, match="malformed enforcers"):
+        policy.gates_enforced_by("merge_pr.py", broken)

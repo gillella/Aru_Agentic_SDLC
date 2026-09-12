@@ -18,6 +18,28 @@ from merge_state import (
     pull_changed_paths, pull_request,
 )
 
+
+class GateRefusal(KernelError):
+    """A refusal that names the declared gate it enforces.
+
+    Subclasses KernelError, so every existing handler still catches it; the gate
+    id makes the refusal attributable to scripts/policy.toml rather than to a
+    bare string. tests/test_policy.py proves the mapping is total in both
+    directions for this helper.
+    """
+
+    def __init__(self, gate: str, message: str) -> None:
+        super().__init__(message)
+        self.gate = gate
+
+
+def refuse(gate: str, message: str, *, cause: BaseException | None = None) -> None:
+    error = GateRefusal(gate, message)
+    if cause is not None:
+        raise error from cause
+    raise error
+
+
 MERGEABLE_STATES = {"CLEAN", "UNSTABLE"}
 DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
 
@@ -36,14 +58,14 @@ def approved_at_head(pr: dict[str, Any], reviews: list[dict[str, Any]]) -> bool:
     head = pr.get("headRefOid")
     author = pr["author"].get("login") if isinstance(pr.get("author"), dict) else None
     if not isinstance(author, str) or not author.strip():
-        raise KernelError("PR author is unreadable")
+        refuse("approval-by-another-account", "PR author is unreadable")
     latest: dict[str, dict[str, Any]] = {}
     for review in reviews:
         user = review.get("user") if isinstance(review, dict) else None
         login = user.get("login") if isinstance(user, dict) else None
         # A blank or non-string identity must never pass as "some other account".
         if not isinstance(login, str) or not login.strip():
-            raise KernelError("review evidence is malformed")
+            refuse("approval-by-another-account", "review evidence is malformed")
         if review.get("state") in DECISIVE_REVIEW_STATES:
             # Group by account: logins are case-insensitive and an App has two spellings.
             latest[canonical_github_actor(login)] = review
@@ -61,7 +83,7 @@ def authority_refusal(pr: dict[str, Any], reviews: list[dict[str, Any]]) -> str 
     """
     author = pr["author"].get("login") if isinstance(pr.get("author"), dict) else None
     if not isinstance(author, str) or not author.strip():
-        raise KernelError("PR author is unreadable")
+        refuse("approval-by-another-account", "PR author is unreadable")
     policy = review_authority.load_policy()
     return review_authority.refusal(
         author=author,
@@ -76,14 +98,14 @@ def authority_refusal(pr: dict[str, Any], reviews: list[dict[str, Any]]) -> str 
 
 def require_mergeable(pr: dict[str, Any], queue: dict[str, object]) -> None:
     if queue["configured"] or queue["entry"] is not None or queue["auto_merge"] is not None:
-        raise KernelError("merge queues and pending auto-merge are unsupported; no merge submitted")
+        refuse("base-head-race", "merge queues and pending auto-merge are unsupported; no merge submitted")
     merge_state = pr.get("mergeStateStatus")
     if pr.get("mergeable") != "MERGEABLE":
-        raise KernelError("PR is not currently mergeable")
+        refuse("base-head-race", "PR is not currently mergeable")
     # GitHub also reports BLOCKED while its required approval is missing or changes are
     # requested, so require_unblocked() judges BLOCKED only after the review gates.
     if merge_state not in MERGEABLE_STATES | {"BLOCKED"}:
-        raise KernelError(f"PR merge state is {merge_state}")
+        refuse("base-head-race", f"PR merge state is {merge_state}")
 
 
 def require_unblocked(pr: dict[str, Any]) -> None:
@@ -91,7 +113,7 @@ def require_unblocked(pr: dict[str, Any]) -> None:
     # posts it, so GitHub reports BLOCKED for every PR. GitHub still refuses the
     # submission if anything else blocks, and await_unblocked() names that case.
     if pr.get("mergeStateStatus") == "BLOCKED" and not merge_authority.configured():
-        raise KernelError("PR merge state is BLOCKED")
+        refuse("helper-only-merge-optional", "PR merge state is BLOCKED")
 
 
 def await_unblocked(number: int, head: str, attempts: int = 6) -> None:
@@ -99,12 +121,12 @@ def await_unblocked(number: int, head: str, attempts: int = 6) -> None:
     for attempt in range(attempts):
         pr = pull_request(number)
         if pr.get("headRefOid") != head:
-            raise KernelError("PR head changed after merge authorization")
+            refuse("helper-only-merge-optional", "PR head changed after merge authorization")
         if pr.get("mergeStateStatus") in MERGEABLE_STATES:
             return
         if attempt + 1 < attempts:
             time.sleep(2)
-    raise KernelError("PR is still blocked after merge authorization; another ruleset requirement is unmet")
+    refuse("helper-only-merge-optional", "PR is still blocked after merge authorization; another ruleset requirement is unmet")
 
 
 def _revoke_authorization(head: str, cause: KernelError) -> None:
@@ -113,20 +135,20 @@ def _revoke_authorization(head: str, cause: KernelError) -> None:
     try:
         merge_authority.post(head, "failure", "Merge submission failed; re-run merge_pr.py")
     except KernelError as revoke_error:
-        raise KernelError(f"{revoke_error}; original merge failure: {cause}") from cause
+        refuse("helper-only-merge-optional", f"{revoke_error}; original merge failure: {cause}", cause=cause)
 
 
 def evaluate(number: int, expected_head: str) -> dict[str, object]:
     pr = pull_request(number)
     if pr.get("state") != "OPEN" or pr.get("isDraft"):
-        raise KernelError("PR is not an open, ready pull request")
+        refuse("five-statuses", "PR is not an open, ready pull request")
     head = pr.get("headRefOid")
     if (
         head != expected_head
         or not isinstance(head, str)
         or not re.fullmatch(r"[0-9a-fA-F]{40}", head)
     ):
-        raise KernelError("expected head does not match the current PR head")
+        refuse("base-head-race", "expected head does not match the current PR head")
     base_sha = base_snapshot(pr)
     queue = merge_queue_snapshot(number, expected_head, base_sha)
     require_mergeable(pr, queue)
@@ -150,18 +172,18 @@ def require_ci_review(pr: dict, number: int, head: str, *, context: str = "", fi
     """Admission and close-out consume the same CI, thread and approval gates."""
     ci = finalization_verdict(pr) if finalizing else ci_verdict(number)
     if ci["head"] != head or ci["state"] != "success":
-        raise KernelError("exact-current-head required GitHub checks are not successful")
+        refuse("exact-head-consumer-verification", "exact-current-head required GitHub checks are not successful")
     feedback = fetch_feedback(number)
     if feedback:
-        raise KernelError(f"{len(feedback)} unresolved {context}review thread(s)")
+        refuse("unresolved-findings", f"{len(feedback)} unresolved {context}review thread(s)")
     if pr.get("reviewDecision") == "CHANGES_REQUESTED":
-        raise KernelError(f"a submitted {context}review still requests changes")
+        refuse("approval-by-another-account", f"a submitted {context}review still requests changes")
     reviews = pull_reviews(number)
     if not approved_at_head(pr, reviews):
-        raise KernelError(f"no {context}approval of the exact head by an account other than the author")
+        refuse("approval-by-another-account", f"no {context}approval of the exact head by an account other than the author")
     denial = authority_refusal(pr, reviews)
     if denial:
-        raise KernelError(f"{context}{denial}")
+        refuse("approval-by-an-authorized-reviewer", f"{context}{denial}")
     return ci
 
 
@@ -169,10 +191,10 @@ def revalidate_review(pr: dict[str, Any], number: int) -> None:
     """Recheck the approval and threads after the final PR/issue/queue reads."""
     reviews = pull_reviews(number)
     if not approved_at_head(pr, reviews) or authority_refusal(pr, reviews):
-        raise KernelError("approval of the exact head was withdrawn before merge submission")
+        refuse("approval-by-another-account", "approval of the exact head was withdrawn before merge submission")
     feedback = fetch_feedback(number)
     if feedback:
-        raise KernelError(f"{len(feedback)} unresolved review thread(s) before merge submission")
+        refuse("unresolved-findings", f"{len(feedback)} unresolved review thread(s) before merge submission")
 
 
 def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str, object]:
@@ -182,7 +204,7 @@ def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str
     issue_numbers = [int(item["issue"]) for item in gates["issues"]]
     live_gates = evaluate(number, expected_head)
     if live_gates != gates:
-        raise KernelError("merge authority changed during final gate evaluation")
+        refuse("current-board-and-dependencies", "merge authority changed during final gate evaluation")
     command = ["gh", "pr", "merge", str(number), "--merge", "--match-head-commit", expected_head]
     # One bounded semantic reread after CI/review reads, immediately before
     # submission. Separate GitHub metadata reads and merge remain non-atomic.
@@ -195,14 +217,14 @@ def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str
         or final_pr.get("reviewDecision") == "CHANGES_REQUESTED"
         or linked_issues(str(final_pr.get("body") or "")) != issue_numbers
     ):
-        raise KernelError("PR authorization changed before merge submission")
+        refuse("base-head-race", "PR authorization changed before merge submission")
     if issue_gate(issue_numbers, gates["changed_paths"]) != gates["issues"]:
-        raise KernelError("issue authorization changed before merge submission")
+        refuse("current-board-and-dependencies", "issue authorization changed before merge submission")
     final_queue = merge_queue_snapshot(number, expected_head, str(gates["base_sha"]))
     if (final_queue["configured"], final_queue["entry"], final_queue["auto_merge"]) != (
         gates["merge_queue"], gates["queue_entry"], gates["auto_merge"],
     ):
-        raise KernelError("merge queue or pending request changed before merge submission")
+        refuse("base-head-race", "merge queue or pending request changed before merge submission")
     revalidate_review(final_pr, number)
     authorized = merge_authority.post(expected_head, "success", f"merge_pr.py gates passed for PR #{number}")
     try:
@@ -215,18 +237,18 @@ def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str
         raise
     merged = pull_request(number)
     if merged.get("headRefOid") != expected_head:
-        raise KernelError("PR head changed during merge submission")
+        refuse("base-head-race", "PR head changed during merge submission")
     if not merged.get("mergedAt"):
-        raise KernelError("GitHub did not confirm the expected-head merge; no issue closed")
+        refuse("issue-done-and-cleanup", "GitHub did not confirm the expected-head merge; no issue closed")
     return finalize_queued(number, expected_head)
 
 
 def finalize_queued(number: int, expected_head: str) -> dict[str, object]:
     pr = pull_request(number)
     if pr.get("state") != "MERGED" or not pr.get("mergedAt"):
-        raise KernelError("PR has not merged yet")
+        refuse("issue-done-and-cleanup", "PR has not merged yet")
     if pr.get("headRefOid") != expected_head:
-        raise KernelError("expected head does not match the merged PR head")
+        refuse("issue-done-and-cleanup", "expected head does not match the merged PR head")
     changed_paths = pull_changed_paths(number)
     numbers = linked_issues(str(pr.get("body") or ""))
     issue_gate(numbers, changed_paths, allow_closed=True, allow_done=True)

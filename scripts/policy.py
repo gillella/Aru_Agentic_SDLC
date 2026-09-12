@@ -173,3 +173,19 @@ def render_agents(policy: dict[str, Any] | None = None, current: str | None = No
 def write_agents(policy: dict[str, Any] | None = None) -> Path:
     AGENTS_PATH.write_text(render_agents(policy), encoding="utf-8")
     return AGENTS_PATH
+
+
+def gates_enforced_by(helper: str, policy: dict[str, Any] | None = None) -> set[str]:
+    """Gate ids the policy says this helper enforces.
+
+    Makes the register's Mechanism column machine-checkable: a helper must refuse
+    for every gate it claims, and must not refuse for a gate it does not declare.
+    """
+    found = set()
+    for gate in gates(policy):
+        enforcers = gate.get("enforcers", [])
+        if not isinstance(enforcers, list) or not all(isinstance(e, str) for e in enforcers):
+            raise PolicyError(f"gate {gate['id']!r} has a malformed enforcers list")
+        if helper in enforcers:
+            found.add(gate["id"])
+    return found
