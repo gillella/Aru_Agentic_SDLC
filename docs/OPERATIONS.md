@@ -1166,6 +1166,22 @@ design. Only gates with a GitHub-visible signal — the governed checks, a
 the declared gates it cannot observe, so a low block count is never mistaken for
 proof of a clean run.
 
+### MCP server
+
+`integrations/mcp/server.py` serves the supported lifecycle commands as MCP
+tools over stdio, for agents that prefer typed tools to prose. It needs no
+dependencies.
+
+```bash
+claude mcp add aru -- python3 "$ARU_SDLC_HOME/integrations/mcp/server.py"
+```
+
+It is an adapter, not a gate: every tool shells out to the helper listed in
+[its README](../integrations/mcp/README.md), so it cannot authorize a transition
+the command line would refuse, and a refusal returns the helper's exact message
+under a stable code. `init_project.py` is not exposed, because bootstrapping a
+repository is an operator action.
+
 ### Installation commands
 
 | Command | Purpose |
