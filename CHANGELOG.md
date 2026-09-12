@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased - Runner isolation runbook
+
+- The operations guide now states what pull-request code can reach on a self-hosted runner,
+  and gives ordered steps for moving the runners onto an unprivileged account: create it,
+  make the verification toolchain reachable from it, deregister, re-register, and confirm.
+- It records the two details that are expensive to discover: a fresh account may not
+  resolve `gh`, which fails the trust-boundary step before any test runs, and a lone
+  `--ephemeral` runner deregisters after one job and halts verification.
+- It is explicit that an unprivileged account bounds what pull-request code reaches and
+  does not sandbox it.
+
+
 ## Unreleased - Less machinery around the review gate
 
 - `review_authority.py` no longer carries a command-line entry point. It existed for the

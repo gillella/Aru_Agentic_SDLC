@@ -250,6 +250,106 @@ is posted, the helper posts a newer failed run so the head cannot be merged by
 hand; re-run the helper. For break-glass, an administrator edits the ruleset,
 which the ruleset history records.
 
+### Moving the runners off the machine owner's account
+
+Continuous integration executes pull-request code. The workflow refuses pull requests
+whose head is in another repository, and that is the only thing standing between a change
+and the runner's account. Everything that account can read, a pull request's tests can
+read.
+
+Verified on 2026-09-11: both registered runners reported `ephemeral: null`,
+`Runner.Listener` ran as the machine owner on each host, and those home directories held
+`.config/gh/hosts.yml`, `.hermes/.env`, `.hermes/credentials` and an SSH private key. The
+Mac mini carried four registrations rather than one -- this repository, `agent-fleet`,
+`aru-golden-path-demo` and a separate JMC runner -- and its home directory also held the
+executable App runner, which mints installation tokens carrying `contents: write` and
+`workflows: write`. Pull-request code running as that account can invoke it and rewrite a
+workflow, reaching by a private route the outcome `aru-merge-policy` exists to prevent.
+
+A consumer on a hosted runner has none of this exposure. It is a property of running
+verification on a persistent machine that also holds credentials.
+
+**Do the credential isolation first and the ephemeral registration second.** They are
+different changes with different costs, and conflating them breaks verification.
+
+#### 1. Create an unprivileged account
+
+Create a local account, for example `aru-ci`, with no administrator rights. It needs no
+mail, no iCloud and no login items. Do not copy any credential into it: no `gh` login, no
+`.hermes` directory, no SSH key, no App runner.
+
+#### 2. Make the toolchain reachable from that account
+
+The verification step runs `command -v python3`, asserts the interpreter is 3.11 or newer,
+runs `python3 -m pip`, and runs `command -v gh`. A fresh account does not necessarily
+resolve those. On the Mac mini a fresh environment resolves `python3` to 3.11.9 but does
+**not** resolve `gh`, which lives under `/opt/homebrew/bin` and is not on the default path,
+so the trust-boundary step fails on its last line before any test runs.
+
+Put the directory holding `gh` on that account's path, then check as that account, not as
+yourself:
+
+```
+command -v gh
+python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+python3 -m pip --version
+```
+
+#### 3. Deregister the existing runners
+
+Verification stops until step 4 completes, so expect open pull requests to sit blocked.
+For each runner directory, as the account that currently owns it:
+
+```
+gh api -X POST repos/<owner>/<repo>/actions/runners/remove-token --jq .token
+./svc.sh stop && ./svc.sh uninstall
+./config.sh remove --token <removal token>
+```
+
+#### 4. Register them under the new account
+
+As `aru-ci`, in a directory under its own home, for each repository:
+
+```
+gh api -X POST repos/<owner>/<repo>/actions/runners/registration-token --jq .token
+./config.sh --url https://github.com/<owner>/<repo> --token <registration token> \
+  --name <runner name> --labels self-hosted,macOS,ARM64,aru-ci --unattended
+./svc.sh install && ./svc.sh start
+```
+
+Keep the labels identical. A repository's declared runner profile and its workflow's
+`runs-on:` must continue to agree, and `.aru/verify.sh` enforces that agreement.
+
+Do every runner on the host, not only this repository's. A runner left under the old
+account keeps the exposure open for whichever repository it serves, and on a shared
+machine that includes projects outside this one.
+
+#### 5. Confirm it worked
+
+```
+ps -eo user,command | grep [R]unner.Listener      # every line must show aru-ci
+sudo -u aru-ci gh auth status                     # must report no authentication
+sudo -u aru-ci ls ~aru-ci/.hermes ~aru-ci/.ssh    # must not exist
+```
+
+Then open a small pull request and confirm the governed check still passes. A green run is
+the only evidence that step 2 was complete.
+
+#### 6. Ephemeral registration, separately and later
+
+`--ephemeral` is worth having: it stops a poisoned runner persisting across jobs. But an
+ephemeral runner processes one job and deregisters itself, so a single ephemeral
+registration halts all verification after the next pull request. Adopt it only together
+with something that registers a fresh runner after each job, and treat that supervisor as
+the actual piece of work.
+
+#### What this does not do
+
+An unprivileged account bounds what pull-request code can reach. It does not sandbox it.
+The code still executes on the machine, can consume its resources, reach the network, and
+read anything world-readable. Isolation removes the credentials from reach; it does not
+make running untrusted code on a persistent host safe.
+
 ### Which check gates a pull request
 
 Two workflows publish required checks. `aru-governed-pr` runs the pull request's own copy
