@@ -88,14 +88,28 @@ surfaces to restore into this repo.
    test, or a document cannot do the job more simply. Scaffolding quality is
    proven on a consumer, not by expanding templates until they look complete.
 5. **Do not grow the reviewer machine as a substitute for progress.**
-   `create_pr.py` is already near the 800-line file cap. Completing a phase
-   means observable evidence in GitHub and consumer repos, not a larger
-   assignment helper.
+   This once warned that `create_pr.py` was near the 800-line cap. The
+   one-approval rule deleted that machine: the helper is 157 lines and opens the
+   pull request. Completing a phase still means observable evidence in GitHub and
+   consumer repos.
 
-Known leaks of the fail-closed slogan (UI merge still allowed, `touches:`
-parser split, path budget hook-only, docs vs external-first reviewer, stale
-version line) are recorded in PR #522 / `docs/AUDIT-2026-08-28.md` on branch
-`cursor/kernel-governance-audit-fd04`. Cite that audit; do not reopen it here.
+The leak list from PR #522 / `docs/AUDIT-2026-08-28.md`, reconciled against
+origin/main on 2026-09-12:
+
+- **Closed** — the `touches:` parser split: `scripts/touches.py` is the one
+  parser, imported by `common.py` and vendored for the hook.
+- **Closed** — path budget hook-only: `aru-governed-pr` validates the boundary
+  against the actual diff on the server, and `aru-merge-policy` runs the base
+  branch's copy so a pull request cannot rewrite its own gate.
+- **Closed** — docs versus external-first reviewer: that reviewer model no
+  longer exists. One approval from another account, enforced by the ruleset.
+- **Closed** — stale version line: README states v2.0.0 and tag `v2.0.0` exists.
+- **OPEN** — UI merge still allowed. This is the one that matters, and it is
+  named precisely: ruleset 20802441 requires `aru-governed-pr` and
+  `aru-merge-policy`, but **not** `aru-merge-authorized`, and
+  `ARU_MERGE_APP_RUNNER` / `ARU_MERGE_APP_ID` are unset. The merge-authority App
+  gate was built and never switched on, so helper-only merge is still a process
+  rule here rather than a server-enforced one.
 
 ## 5. Phases
 
@@ -176,18 +190,28 @@ parity, truthful docs/version) belong to Phase 0. Phase 1 *feature* work is
 not admitted until those are done. Do not start Phase 2 because Phase 1 feels
 slow.
 
-**Done when.**
+**Done when.** Status checked against origin/main on 2026-09-12. Phase 1 is
+**not complete**: one exit test is unmet and one is partial.
 
-- An operator with write access cannot merge to the default branch except
-  through the documented Aru gate (ruleset or App evidence, not a README
-  sentence).
-- `create_pr.py` and `merge_pr.py` refuse a diff outside the linked issue's
-  `touches:` (including deletes).
-- Hook and `common.py` accept the same `touches:` forms.
-- README/CHANGELOG version identity matches tags and HEAD.
-- One consumer repository has a merged PR that used claim → worktree →
-  exact-head focused local verification → one distinct reviewer →
-  `merge_pr.py`, with no preview-era leftover in that walk.
+- **UNMET** — an operator with write access cannot merge to the default branch
+  except through the documented Aru gate. `aru-merge-authorized` is absent from
+  the ruleset's required contexts and the merge-authority App is not configured,
+  so an administrator can still merge outside `merge_pr.py`. Turning that gate on
+  is operator work: install the App, set both environment variables, and add the
+  pinned context to the ruleset.
+- **PARTIAL** — `create_pr.py` and `merge_pr.py` refuse a diff outside the linked
+  issue's boundary. `merge_pr.py` does, through the issue gate; `create_pr.py`
+  does not check it itself. The boundary is enforced at push by
+  `hooks/enforce_touches.py` and on the server by `aru-governed-pr` against the
+  actual diff, so nothing is unguarded, but the named helper is not the enforcer.
+- **MET** — hook and `common.py` accept the same declaration forms: one
+  `scripts/touches.py`.
+- **MET** — README states v2.0.0 and the `v2.0.0` tag exists.
+- **MET** — `gillella/aru-golden-path-demo` has merged pull requests through the
+  governed path (#3, #6, #9, #10), and `jaji-mission-control` and
+  `hermes-trading-automation` run the contract at volume.
+
+No phase may be described as complete while one of its exit tests is unmet.
 
 ### Phase 2 — Ideation to Ready
 
