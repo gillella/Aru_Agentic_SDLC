@@ -94,3 +94,72 @@ def test_register_does_not_claim_the_approval_rule_is_unapplied():
     assert "Until the approval rule is added" not in content
     assert "one approving review" in content
     assert "`aru-merge-authorized` is absent" in content
+
+
+# --- rendered agent rules and bootstrap ruleset (#695) ----------------------
+
+def test_agents_kernel_path_matches_the_policy():
+    current = policy.AGENTS_PATH.read_text(encoding="utf-8")
+    assert current == policy.render_agents(current=current), (
+        "AGENTS.md generated block has drifted from scripts/policy.toml.\n"
+        "Edit the policy, then run:\n"
+        "    python3 -c \"import sys; sys.path.insert(0,'scripts'); import policy; policy.write_agents()\""
+    )
+
+
+def test_rendering_agents_touches_only_the_generated_block():
+    current = policy.AGENTS_PATH.read_text(encoding="utf-8")
+    head = current.split(policy.BEGIN_MARK)[0]
+    tail = current.split(policy.END_MARK)[1]
+    rendered = policy.render_agents(current=current)
+    assert rendered.split(policy.BEGIN_MARK)[0] == head
+    assert rendered.split(policy.END_MARK)[1] == tail
+
+
+def test_agents_without_markers_refuses(tmp_path):
+    with pytest.raises(policy.PolicyError, match="marker pair"):
+        policy.render_agents(current="# no markers here\n")
+    with pytest.raises(policy.PolicyError, match="marker pair"):
+        policy.render_agents(current=f"{policy.BEGIN_MARK}\nx\n{policy.BEGIN_MARK}\n{policy.END_MARK}\n")
+
+
+def test_bootstrap_ruleset_is_built_from_the_policy():
+    import init_project
+    declared = policy.ruleset_parameters()
+    payload = init_project.ruleset_payload()
+    pull = next(r for r in payload["rules"] if r["type"] == "pull_request")["parameters"]
+    assert payload["name"] == declared["name"]
+    assert payload["bypass_actors"] == []
+    assert pull["allowed_merge_methods"] == declared["allowed_merge_methods"] == ["merge"]
+    assert pull["required_approving_review_count"] == 1
+    assert pull["dismiss_stale_reviews_on_push"] is True
+    assert pull["require_last_push_approval"] is True
+    checks = next(r for r in payload["rules"] if r["type"] == "required_status_checks")["parameters"]
+    contexts = [c["context"] for c in checks["required_status_checks"]]
+    assert contexts == declared["required_checks"] == ["aru-governed-pr", "aru-merge-policy"]
+
+
+def test_the_boundary_cannot_be_softened_by_a_policy_edit(tmp_path):
+    # bypass actors, the approval count and the checks are the boundary itself.
+    base = policy.load()
+    for key, value, match in (
+        ("bypass_actors", [{"actor_id": 1}], "bypass_actors must stay empty"),
+        ("required_approving_review_count", 0, "at least one approving review"),
+        ("required_checks", [], "at least one status check"),
+    ):
+        weakened = {**base, "ruleset": {**base["ruleset"], key: value}}
+        with pytest.raises(policy.PolicyError, match=match):
+            policy.ruleset_parameters(weakened)
+
+
+def test_missing_ruleset_table_refuses():
+    base = policy.load()
+    with pytest.raises(policy.PolicyError, match="missing a \\[ruleset\\] table"):
+        policy.ruleset_parameters({k: v for k, v in base.items() if k != "ruleset"})
+
+
+def test_kernel_path_steps_are_numbered_in_order():
+    rendered = policy.render_kernel_path()
+    numbers = [int(line.split(".")[0]) for line in rendered.split("\n") if line[:1].isdigit()]
+    assert numbers == list(range(1, len(numbers) + 1))
+    assert len(numbers) >= 7

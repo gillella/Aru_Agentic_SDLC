@@ -7,6 +7,7 @@ agent-global instructions.
 
 ## Non-negotiable kernel path
 
+<!-- BEGIN GENERATED: kernel-path -->
 1. Use the GitHub issue and linked Project Board as lifecycle authority.
 2. Require the Ready contract: unchecked acceptance criteria, one safe
    `touches:` declaration, and no unresolved dependency. Scope is not frozen at
@@ -26,6 +27,7 @@ agent-global instructions.
 7. Submit only through `merge_pr.py --expected-head`. Configured merge queues
    and pending queue/auto-merge requests are unsupported and refused. Verify
    GitHub actually merged before Done and cleanup.
+<!-- END GENERATED: kernel-path -->
 
 Any missing, stale, partial, contradictory, or unreadable authority blocks the
 transition. Never push directly to `main` or `master`, approve your own PR,

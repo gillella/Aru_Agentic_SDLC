@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 import merge_authority
+import policy
 from common import PROJECT_AUTH, REPOSITORY_AUTH, KernelError, run
 
 STATUSES = ("Backlog", "Ready", "In Progress", "In Review", "Done")
@@ -292,21 +293,24 @@ def scaffold(
 
 
 def ruleset_payload(merge_app_id: int | None = None) -> dict[str, object]:
-    """Return the minimal server-enforced merge boundary for consumers."""
-    # aru-governed-pr runs the pull request's own copy of its workflow; aru-merge-policy
-    # runs the base branch's copy and posts its verdict on the head. Requiring both means
-    # a pull request cannot rewrite the only check that is standing in its way.
+    """Return the minimal server-enforced merge boundary for consumers.
+
+    Built from the declaration in scripts/policy.toml so the boundary a consumer
+    is scaffolded with and the boundary docs/ENFORCEMENT-REGISTER.md documents
+    cannot drift apart.
+    """
+    declared = policy.ruleset_parameters()
     checks = [
-        {"context": "aru-governed-pr", "integration_id": GITHUB_ACTIONS_APP_ID},
-        {"context": "aru-merge-policy", "integration_id": GITHUB_ACTIONS_APP_ID},
+        {"context": context, "integration_id": GITHUB_ACTIONS_APP_ID}
+        for context in declared["required_checks"]
     ]
     if merge_app_id is not None:
         checks.append({"context": merge_authority.MERGE_AUTHORITY_CHECK, "integration_id": merge_app_id})
     return {
-        "name": "aru-protect-default",
+        "name": declared["name"],
         "target": "branch",
         "enforcement": "active",
-        "bypass_actors": [],
+        "bypass_actors": list(declared["bypass_actors"]),
         "conditions": {
             "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []},
         },
@@ -316,14 +320,12 @@ def ruleset_payload(merge_app_id: int | None = None) -> dict[str, object]:
             {
                 "type": "pull_request",
                 "parameters": {
-                    "allowed_merge_methods": ["merge"],
-                    "dismiss_stale_reviews_on_push": True,
-                    "require_code_owner_review": False,
-                    # The one review rule, enforced by GitHub: an account other than the
-                    # author and the last pusher approves the latest commit.
-                    "require_last_push_approval": True,
-                    "required_approving_review_count": 1,
-                    "required_review_thread_resolution": True,
+                    "allowed_merge_methods": list(declared["allowed_merge_methods"]),
+                    "dismiss_stale_reviews_on_push": declared["dismiss_stale_reviews_on_push"],
+                    "require_code_owner_review": declared["require_code_owner_review"],
+                    "require_last_push_approval": declared["require_last_push_approval"],
+                    "required_approving_review_count": declared["required_approving_review_count"],
+                    "required_review_thread_resolution": declared["required_review_thread_resolution"],
                 },
             },
             {

@@ -20,6 +20,12 @@ from typing import Any
 SCRIPTS = Path(__file__).resolve().parent
 POLICY_PATH = SCRIPTS / "policy.toml"
 REGISTER_PATH = SCRIPTS.parent / "docs" / "ENFORCEMENT-REGISTER.md"
+AGENTS_PATH = SCRIPTS.parent / "AGENTS.md"
+
+# The generated block in AGENTS.md. Prose outside these markers is hand-written
+# and never touched by the renderer.
+BEGIN_MARK = "<!-- BEGIN GENERATED: kernel-path -->"
+END_MARK = "<!-- END GENERATED: kernel-path -->"
 REGEN_COMMAND = "python3 -c \"import sys; sys.path.insert(0, 'scripts'); import policy; policy.write_register()\""
 
 GATE_FIELDS = ("id", "control", "blocks", "mechanism")
@@ -108,3 +114,62 @@ def write_register(policy: dict[str, Any] | None = None, path: Path | None = Non
     target = path or REGISTER_PATH
     target.write_text(render_register(policy), encoding="utf-8")
     return target
+
+
+def ruleset_parameters(policy: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The declared server-enforced merge boundary.
+
+    `init_project.py` builds its ruleset payload from this, so the boundary a
+    consumer gets and the boundary the register documents cannot disagree.
+    """
+    policy = policy or load()
+    ruleset = policy.get("ruleset")
+    if not isinstance(ruleset, dict):
+        raise PolicyError("policy is missing a [ruleset] table")
+    required = (
+        "name", "allowed_merge_methods", "required_approving_review_count",
+        "dismiss_stale_reviews_on_push", "require_last_push_approval",
+        "required_review_thread_resolution", "require_code_owner_review",
+        "bypass_actors", "required_checks",
+    )
+    missing = [key for key in required if key not in ruleset]
+    if missing:
+        raise PolicyError(f"[ruleset] is missing: {missing}")
+    # These three are the boundary. A policy edit must not be able to soften them
+    # silently, so the renderer refuses rather than scaffolding a weaker rule.
+    if ruleset["bypass_actors"]:
+        raise PolicyError("[ruleset] bypass_actors must stay empty")
+    if int(ruleset["required_approving_review_count"]) < 1:
+        raise PolicyError("[ruleset] must require at least one approving review")
+    if not ruleset["required_checks"]:
+        raise PolicyError("[ruleset] must require at least one status check")
+    return dict(ruleset)
+
+
+def render_kernel_path(policy: dict[str, Any] | None = None) -> str:
+    """The numbered non-negotiable list, as it appears inside the markers."""
+    policy = policy or load()
+    path = policy.get("kernel_path")
+    if not isinstance(path, dict) or not isinstance(path.get("steps"), list) or not path["steps"]:
+        raise PolicyError("policy is missing [kernel_path] steps")
+    steps = path["steps"]
+    if not all(isinstance(s, str) and s.strip() for s in steps):
+        raise PolicyError("[kernel_path] steps must be non-empty strings")
+    return "\n".join(s.strip("\n") for s in steps)
+
+
+def render_agents(policy: dict[str, Any] | None = None, current: str | None = None) -> str:
+    """Replace only the generated block, leaving hand-written prose untouched."""
+    text = current if current is not None else AGENTS_PATH.read_text(encoding="utf-8")
+    if text.count(BEGIN_MARK) != 1 or text.count(END_MARK) != 1:
+        raise PolicyError("AGENTS.md needs exactly one generated-block marker pair")
+    head, rest = text.split(BEGIN_MARK, 1)
+    _stale, tail = rest.split(END_MARK, 1)
+    if not head.endswith("\n"):
+        raise PolicyError("AGENTS.md generated block must start on its own line")
+    return f"{head}{BEGIN_MARK}\n{render_kernel_path(policy)}\n{END_MARK}{tail}"
+
+
+def write_agents(policy: dict[str, Any] | None = None) -> Path:
+    AGENTS_PATH.write_text(render_agents(policy), encoding="utf-8")
+    return AGENTS_PATH

@@ -158,3 +158,50 @@ id = "anti-regrowth-budgets"
 control = "anti-regrowth budgets"
 blocks = "CI"
 mechanism = "`tests/test_surface.py`"
+
+[ruleset]
+# The server-enforced merge boundary written by init_project.py.
+name = "aru-protect-default"
+allowed_merge_methods = ["merge"]
+required_approving_review_count = 1
+dismiss_stale_reviews_on_push = true
+require_last_push_approval = true
+required_review_thread_resolution = true
+require_code_owner_review = false
+# Empty on purpose: no actor may bypass the boundary.
+bypass_actors = []
+# aru-governed-pr runs the pull request's own copy of its workflow; aru-merge-policy
+# runs the base branch's copy and posts its verdict on the head. Requiring both means
+# a pull request cannot rewrite the only check standing in its way.
+required_checks = ["aru-governed-pr", "aru-merge-policy"]
+
+[kernel_path]
+# Rendered into the AGENTS.md non-negotiable list between its generated markers.
+steps = [
+"""
+1. Use the GitHub issue and linked Project Board as lifecycle authority.""",
+"""
+2. Require the Ready contract: unchecked acceptance criteria, one safe
+   `touches:` declaration, and no unresolved dependency. Scope is not frozen at
+   promotion: the merge gate reads the declaration that is live at merge time,
+   so a claimant who needs an omitted path corrects the declaration and the
+   gate judges the corrected one.""",
+"""
+3. Claim before editing and work only in the issue's isolated worktree.""",
+"""
+4. Keep the change inside `touches:` and run useful local preflight as needed.""",
+"""
+5. Open the PR through `create_pr.py` with `Closes #N`. Require the exact-head
+   `aru-governed-pr` check: GitHub Actions orchestrates it on the one runner
+   profile the repository's account is assigned, where it runs the consumer's
+   `.aru/verify.sh` and validates `touches:` against the actual diff. Never
+   fall back to another profile's runners.""",
+"""
+6. Resolve every finding and thread, and obtain one approval of the exact head
+   from a GitHub account other than the PR author. Every PR needs it,
+   documentation included; a push dismisses earlier approvals.""",
+"""
+7. Submit only through `merge_pr.py --expected-head`. Configured merge queues
+   and pending queue/auto-merge requests are unsupported and refused. Verify
+   GitHub actually merged before Done and cleanup.""",
+]
