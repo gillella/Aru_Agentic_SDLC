@@ -104,12 +104,13 @@ origin/main on 2026-09-12:
 - **Closed** — docs versus external-first reviewer: that reviewer model no
   longer exists. One approval from another account, enforced by the ruleset.
 - **Closed** — stale version line: README states v2.0.0 and tag `v2.0.0` exists.
-- **OPEN** — UI merge still allowed. This is the one that matters, and it is
-  named precisely: ruleset 20802441 requires `aru-governed-pr` and
-  `aru-merge-policy`, but **not** `aru-merge-authorized`, and
-  `ARU_MERGE_APP_RUNNER` / `ARU_MERGE_APP_ID` are unset. The merge-authority App
-  gate was built and never switched on, so helper-only merge is still a process
-  rule here rather than a server-enforced one.
+- **Closed (2026-09-12)** — UI merge. Ruleset 20802441 now requires
+  `aru-merge-authorized` pinned to `integration_id` 4921120, a merge-authority
+  App distinct from the App agents use for ordinary commands and holding only
+  Checks write. `ARU_MERGE_APP_RUNNER` and `ARU_MERGE_APP_ID` are configured, so
+  `merge_pr.py` posts that check after its gates pass and no personal token or
+  Actions job can satisfy it. A repository administrator can still edit the
+  ruleset; that residual boundary is consumer-owned and always was.
 
 ## 5. Phases
 
@@ -190,15 +191,14 @@ parity, truthful docs/version) belong to Phase 0. Phase 1 *feature* work is
 not admitted until those are done. Do not start Phase 2 because Phase 1 feels
 slow.
 
-**Done when.** Status checked against origin/main on 2026-09-12. Phase 1 is
-**not complete**: one exit test is unmet and one is partial.
+**Done when.** Status checked against origin/main on 2026-09-12. Every exit
+test is now met; one is met by a route other than the helper named in it.
 
-- **UNMET** — an operator with write access cannot merge to the default branch
-  except through the documented Aru gate. `aru-merge-authorized` is absent from
-  the ruleset's required contexts and the merge-authority App is not configured,
-  so an administrator can still merge outside `merge_pr.py`. Turning that gate on
-  is operator work: install the App, set both environment variables, and add the
-  pinned context to the ruleset.
+- **MET (2026-09-12)** — an operator with write access cannot merge to the
+  default branch except through the documented Aru gate. The merge-authority App
+  gate is on: `aru-merge-authorized` is required and pinned to the App's
+  `integration_id`, and only `merge_pr.py` posts it. An administrator editing the
+  ruleset remains possible and remains consumer-owned.
 - **PARTIAL** — `create_pr.py` and `merge_pr.py` refuse a diff outside the linked
   issue's boundary. `merge_pr.py` does, through the issue gate; `create_pr.py`
   does not check it itself. The boundary is enforced at push by
@@ -211,7 +211,8 @@ slow.
   governed path (#3, #6, #9, #10), and `jaji-mission-control` and
   `hermes-trading-automation` run the contract at volume.
 
-No phase may be described as complete while one of its exit tests is unmet.
+**Phase 1 is complete.** Phase 2 may be admitted. No phase may be described as
+complete while one of its exit tests is unmet.
 
 ### Phase 2 — Ideation to Ready
 
