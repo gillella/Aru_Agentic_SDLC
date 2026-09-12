@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased - The contract states rules, not history
+
+- `docs/KERNEL-CONTRACT.md` drops from 334 to 210 lines. Every remaining paragraph
+  states a rule that blocks or authorizes a transition; rationale, implementation
+  detail and one consumer's incident runbook moved to `docs/decisions/`.
+- New records: `0001-scope-is-judged-live` (why the promotion digest pin went),
+  `0002-risk-tiers-are-not-kernel-gates` (the tier table, kept for consumers),
+  `0003-merge-evidence-is-non-atomic` (which evidence each gate pass compares and
+  which races remain), `0004-jmc-185-downstream-regeneration` (the JMC #185
+  procedure, which bound no transition in this repository).
+- Decision records are nested under `docs/`, so `tests/test_surface.py` does not
+  count them against the seven operating documents; a new test asserts that and
+  that the budget still binds.
+- Migration accounting that was in the contract lives here: the one-approval rule
+  replaced the path-tiered, provider-routed review of v2, retiring the `review:*`,
+  `reviewer*`, `review-policy:*`, `author:*`, `author-family:*` and
+  `needs-reviewer` label contracts and the reviewer options of `create_pr.py`.
+  That removal is a major-version change (v3, not yet released). The v2.0.0
+  migration withdrew merge-queue support; the workflow verifies same-repository PR
+  heads only and cannot prove a combined queue revision, so the helper refuses
+  configured queues and pending queue or auto-merge requests before submission,
+  and no existing queue is canceled by that correction.
+- No rule was dropped: every load-bearing identifier in the previous contract was
+  checked to survive in the contract, a decision record, or this file.
+
 ## Unreleased - Reducing the CLI token
 
 - The operations guide records the scopes the kernel requires (`repo`, `project`,

@@ -125,6 +125,15 @@ def test_nested_docs_are_not_counted_as_operating_documents():
     }
 
 
+def test_decision_records_are_not_operating_documents():
+    """Rationale lives in docs/decisions/. Those are nested, so they are not
+    counted against the seven-document budget, and the budget still binds."""
+    records = sorted((ROOT / "docs" / "decisions").glob("*.md"))
+    assert records, "the contract cites docs/decisions/; it must exist"
+    assert counted_operating_documents(records) == set()
+    assert counted_operating_documents(tracked_paths()) == OPERATING_DOCUMENTS
+
+
 def test_north_star_is_vision_not_an_operating_document():
     north_star = ROOT / "docs" / "NORTH-STAR.md"
     assert north_star.is_file()
