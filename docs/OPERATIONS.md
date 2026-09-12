@@ -335,6 +335,41 @@ sudo -u aru-ci ls ~aru-ci/.hermes ~aru-ci/.ssh    # must not exist
 Then open a small pull request and confirm the governed check still passes. A green run is
 the only evidence that step 2 was complete.
 
+#### Reducing the CLI token while you are here
+
+The token the CLI holds lives in the same home directory the runner executes from, so
+until step 4 is done, pull-request code can read it. Reducing what it can do is worth
+doing on the runner host first and the control machine second.
+
+The kernel needs `repo`, `project` and `read:org`. It needs nothing else: no kernel script
+pushes -- `init_project.py` scaffolds locally and provisions through the API, and neither
+branch nor pull-request creation pushes -- and workflow changes are pushed by the App,
+which holds `workflows: write`. Verified on 2026-09-11, both hosts also carried `gist` and
+`workflow`, and one carried `user`.
+
+`gh auth refresh` only *adds* scopes, whatever you pass it. Reducing them means
+authenticating again:
+
+```
+gh auth logout --hostname github.com
+gh auth login --hostname github.com --git-protocol https --scopes 'repo,read:org,project'
+```
+
+**One operation stops working.** Bootstrapping a new governed repository scaffolds workflow
+files, and the operator's first push of that repository is rejected without `workflow`. The
+App cannot cover it, because it is not installed on a repository that did not exist a
+moment ago. Install the App on the new repository before the first push, or restore the
+scope for that one operation.
+
+**What this is worth, stated honestly.** The audit called removing this scope the change
+that alone makes the workflow-rewrite route impossible. That was true when it was written:
+the ruleset then required no approvals and no check ran from the default branch. Both have
+since changed. A pull request that rewrites a workflow is now judged by `aru-merge-policy`
+running the default branch's copy, and a direct push to the default branch is refused by a
+ruleset with no bypass actors. Reducing the scope is least privilege and defence in depth.
+It is no longer the control that closes that route, and it should not be relied on as if it
+were.
+
 #### 6. Ephemeral registration, separately and later
 
 `--ephemeral` is worth having: it stops a poisoned runner persisting across jobs. But an
