@@ -242,7 +242,7 @@ if [ -f "${governance_flag}" ]; then
   fi
   echo "no cross-profile runner, cache, artifact, deployment secret, or write permission"
 
-  vendored="$(git ls-files -- '.aru/**' | grep -E '/(merge_pr|create_pr|create_branch|claim_issue|check_ci|fetch_next_work|fetch_pr_feedback|triage_backlog|init_project|cleanup_worktrees|revert_merge|review_policy|review_risk|review_evidence|reviewer_probe|merge_state|common)\.py$' || true)"
+  vendored="$(git ls-files -- '.aru/**' | grep -E '/(merge_pr|create_pr|create_branch|claim_issue|check_ci|fetch_next_work|fetch_pr_feedback|triage_backlog|init_project|cleanup_worktrees|revert_merge|merge_state|common)\.py$' || true)"
   [ -z "${vendored}" ] || fail "Factory lifecycle scripts must not be vendored: ${vendored}"
   if [ -e .aru/skills ]; then
     fail "Factory skills must not be vendored under .aru/skills"

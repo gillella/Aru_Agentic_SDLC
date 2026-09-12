@@ -2,13 +2,16 @@
 
 Date: 2026-09-12. Status: accepted.
 
-`scripts/review_risk.py` still derives a tier from changed paths, but no Kernel
-gate reads it: the one-approval review rule does not vary by path. The tier
-table below is retained for consumers who want to scale their *own* evidence,
-and for an external Driver's capacity admission. It is not Aru policy.
+`scripts/review_risk.py` derived a tier from changed paths, but no Kernel gate
+ever read it: the one-approval review rule does not vary by path. Its only
+stated consumer was an external Driver that does not live in this repository,
+so it was retained abstraction with no caller.
 
-Issue #696 removes the unused module and its re-export. This record keeps the
-table so that removal loses no information.
+**Removed in #696.** The module, its re-export from `scripts/common.py`, its
+tests and its mention in `templates/verify.sh` are gone. A consumer that wants
+evidence proportional to risk owns that policy itself; the table below is kept
+so the removal loses no information, and can be lifted into a consumer's own
+`.aru/verify.sh` or runbook.
 
 ## The tier table, as the contract stated it
 

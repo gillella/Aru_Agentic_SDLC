@@ -10,7 +10,6 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from review_risk import review_risk_tier as review_risk_tier
 
 from touches import (
     TouchesError,

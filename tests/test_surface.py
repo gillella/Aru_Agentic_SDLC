@@ -77,7 +77,7 @@ def test_library_modules_do_not_count_as_supported_commands():
     helpers = {
         ROOT / "scripts" / "common.py",
         ROOT / "scripts" / "merge_state.py",
-        ROOT / "scripts" / "review_risk.py",
+        ROOT / "scripts" / "policy.py",
         ROOT / "scripts" / "touches.py",
     }
     assert all(helper.exists() for helper in helpers)

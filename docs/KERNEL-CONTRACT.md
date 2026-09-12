@@ -130,9 +130,8 @@ owns no lifecycle state. An existing consumer must add the approval rule to its
 default-branch ruleset before GitHub enforces it; until then only `merge_pr.py`
 does.
 
-Path-derived risk tiers are not Kernel gates. `scripts/review_risk.py` still
-derives a tier, but no Kernel gate reads it and the review rule does not vary by
-path. Consumers may use it to scale their own evidence; see
+The review rule does not vary by path. Aru declares no risk tiers; a consumer
+that wants evidence proportional to risk owns that policy itself. See
 `docs/decisions/0002-risk-tiers-are-not-kernel-gates.md`.
 
 ## Runner profiles and trust boundary

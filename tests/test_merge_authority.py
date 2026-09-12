@@ -8,7 +8,6 @@ import pytest
 import common
 import merge_pr
 import merge_state
-from review_risk import review_risk_tier
 from test_governed_merge import BASE, HEAD, approval, board_evidence, issue_record, ready_pr
 
 
@@ -128,22 +127,3 @@ def test_finalization_refuses_missing_board_before_mutation(monkeypatch):
     with pytest.raises(common.KernelError, match="Project card"):
         merge_pr.finalize_queued(10, HEAD)
     assert world["commands"] == []
-
-
-@pytest.mark.parametrize("path,tier", [
-    ("src/README.py", 1), ("src/CHANGELOG.sh", 1), ("src/LICENSE.js", 1),
-    ("README", 0), ("README.md", 0), ("CHANGELOG.rst", 0), ("LICENSE", 0),
-    ("README-unknown", 2), ("scripts/README.py", 2),
-])
-def test_documentation_names_do_not_hide_executable_code(path, tier):
-    assert review_risk_tier([path]) == tier
-
-
-def test_every_kernel_helper_requires_independent_review():
-    from pathlib import Path
-
-    scripts = Path(__file__).resolve().parents[1] / "scripts"
-    helpers = [path for path in scripts.rglob("*") if path.suffix in {".py", ".sh"}]
-    assert helpers
-    assert all(review_risk_tier([path.relative_to(scripts.parent).as_posix()]) >= 2
-               for path in helpers)
