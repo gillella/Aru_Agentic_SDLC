@@ -44,6 +44,8 @@ def test_operating_guidance_does_not_route_to_retired_surfaces():
         "--coding-reviewer-unavailable",
         "ARU_CODING_REVIEWERS",
         "review-policy:timeout",
+        # The removed promotion scope pin.
+        "ready:<digest>",
     )
     for path in OPERATING_GUIDANCE:
         content = text(path)
@@ -55,6 +57,19 @@ def test_review_is_one_approval_from_another_account():
         content = " ".join(text(path).split())
         assert "account other than the" in content, path
         assert "Tier 2-3" not in content, path
+
+
+def test_scope_is_judged_live_not_pinned_at_promotion():
+    """The agent rules and the contract must agree on WHEN scope is judged.
+
+    A pinned digest was removed from the kernel; guidance that still described a
+    promotion pin sent agents to a gate that no longer exists.
+    """
+    for path in (ROOT / "AGENTS.md", ROOT / "docs" / "KERNEL-CONTRACT.md"):
+        content = " ".join(text(path).split())
+        assert "live at merge time" in content, path
+        assert "not frozen at promotion" in content, path
+        assert "Promotion pins" not in content, path
 
 
 def test_version_and_layer_truth_are_explicit():
