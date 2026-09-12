@@ -31,10 +31,13 @@ product policy, respectively; neither is a second Kernel gate. Their boundary
 is defined once in `docs/KERNEL-CONTRACT.md`.
 
 For this repository, the live default-branch ruleset requires the
-`aru-governed-pr` context produced by the authenticated GitHub Actions App.
-Until the approval rule is added to that ruleset, only `merge_pr.py` enforces
-the approval.
-Without the merge-authority App, nothing server-side makes `merge_pr.py` the
-only merge path. With it, only a holder of that App's key can satisfy the
-pinned check, and a repository administrator can still edit the ruleset; that
-residual boundary remains consumer-owned.
+`aru-governed-pr` and `aru-merge-policy` contexts produced by the
+authenticated GitHub Actions App, and one approving review with stale
+approvals dismissed and the last push approved by another account. GitHub
+enforces the approval rule; `merge_pr.py` rereads the same evidence before
+submission.
+The merge-authority App gate is not enabled here: `aru-merge-authorized` is
+absent from the required contexts, so nothing server-side makes `merge_pr.py`
+the only merge path. With it enabled, only a holder of that App's key can
+satisfy the pinned check, and a repository administrator can still edit the
+ruleset; that residual boundary remains consumer-owned.

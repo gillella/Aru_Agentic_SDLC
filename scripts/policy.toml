@@ -1,0 +1,160 @@
+# Single source for the kernel's declared gates.
+#
+# docs/ENFORCEMENT-REGISTER.md is RENDERED from this file. Do not hand-edit the
+# register: edit here, then regenerate. tests/test_policy.py fails when the two
+# disagree and names the regeneration command.
+
+[register]
+title = "Enforcement Register"
+columns = ["Control", "Blocks or authorizes", "Mechanism"]
+notes = [
+"""
+Anything not listed here is guidance, not an authorization mechanism.
+External Driver timing and consumer risk policy are therefore coordination and
+product policy, respectively; neither is a second Kernel gate. Their boundary
+is defined once in `docs/KERNEL-CONTRACT.md`.""",
+"""
+For this repository, the live default-branch ruleset requires the
+`aru-governed-pr` and `aru-merge-policy` contexts produced by the
+authenticated GitHub Actions App, and one approving review with stale
+approvals dismissed and the last push approved by another account. GitHub
+enforces the approval rule; `merge_pr.py` rereads the same evidence before
+submission.
+The merge-authority App gate is not enabled here: `aru-merge-authorized` is
+absent from the required contexts, so nothing server-side makes `merge_pr.py`
+the only merge path. With it enabled, only a holder of that App's key can
+satisfy the pinned check, and a repository administrator can still edit the
+ruleset; that residual boundary remains consumer-owned.""",
+]
+
+[[gate]]
+id = "issue-contract"
+control = "issue contract"
+blocks = "Backlog -> Ready"
+mechanism = "`triage_backlog.py`"
+
+[[gate]]
+id = "five-statuses"
+control = "five statuses"
+blocks = "invariant-bearing lifecycle transitions"
+mechanism = "`triage_backlog.py`, `claim_issue.py`, `create_pr.py`, `merge_pr.py`"
+
+[[gate]]
+id = "exclusive-claim"
+control = "exclusive claim"
+blocks = "Ready -> In Progress"
+mechanism = "`claim_issue.py`"
+
+[[gate]]
+id = "path-budget"
+control = "path budget"
+blocks = "writes outside `touches:`"
+mechanism = "`hooks/enforce_touches.py`, `aru-governed-pr` actual-diff check"
+
+[[gate]]
+id = "path-budget-unrewritable"
+control = "path budget, unrewritable"
+blocks = "writes outside `touches:` when the pull request edits its own workflow"
+mechanism = "`aru-merge-policy` runs the base branch copy of itself on `pull_request_target`, never reads the head, and posts its verdict as a required status on the head"
+
+[[gate]]
+id = "default-branch-protection"
+control = "default-branch protection"
+blocks = "direct push to the resolved remote default branch"
+mechanism = "`hooks/pre-push`"
+
+[[gate]]
+id = "worktree-isolation"
+control = "worktree isolation"
+blocks = "first implementation edit"
+mechanism = "`create_branch.py`"
+
+[[gate]]
+id = "closure-link"
+control = "closure link"
+blocks = "PR creation"
+mechanism = "`create_pr.py`"
+
+[[gate]]
+id = "exact-head-consumer-verification"
+control = "exact-head consumer verification"
+blocks = "merge"
+mechanism = "`aru-governed-pr`, `.aru/verify.sh`, `check_ci.py`, `merge_pr.py`"
+
+[[gate]]
+id = "one-account-assigned-runner-profile"
+control = "one account-assigned runner profile"
+blocks = "required verification dispatch"
+mechanism = "`init_project.py` account policy, workflow `# aru-runner-profile:` marker, `.aru/verify.sh` marker/`runs-on:` agreement"
+
+[[gate]]
+id = "no-cross-profile-runner-fallback"
+control = "no cross-profile runner fallback"
+blocks = "required verification dispatch"
+mechanism = "`.aru/verify.sh` per-profile forbidden patterns: `self-hosted-mac` rejects hosted images, `github-hosted` rejects `self-hosted`"
+
+[[gate]]
+id = "current-board-and-dependencies"
+control = "current board and dependencies"
+blocks = "merge submission and direct-merge finalization"
+mechanism = "`merge_state.py` fresh Project/card/status-field identity, label agreement and closed dependencies"
+
+[[gate]]
+id = "configured-product-verification"
+control = "configured product verification"
+blocks = "consumer check success"
+mechanism = "`.aru/verify.sh` requires executable `.aru/verify-project.sh`; generated starter fails"
+
+[[gate]]
+id = "unresolved-findings"
+control = "unresolved findings"
+blocks = "merge"
+mechanism = "`fetch_pr_feedback.py`, `merge_pr.py`"
+
+[[gate]]
+id = "approval-by-an-authorized-reviewer"
+control = "approval by an authorized reviewer"
+blocks = "merge, under the `human` posture"
+mechanism = "`.aru/review.json` on the default branch names the accounts that may approve; `review_authority.py` refuses an unlisted account and refuses any GitHub App outright, and requires the approval to carry a written body. Applied by `merge_pr.py`, the only path that submits a merge; `aru-merge-policy` does not apply it, because the trigger that would re-evaluate after an approval runs the pull request's own copy of the workflow"
+
+[[gate]]
+id = "posture-resolution"
+control = "posture resolution"
+blocks = "merge, when the declaration is unusable"
+mechanism = "absent, malformed or unknown resolves to `human`, so a repository cannot lose the gate by omission; a repository that declared nothing authorizes its owner rather than nobody"
+
+[[gate]]
+id = "approval-by-another-account"
+control = "approval by another account"
+blocks = "merge"
+mechanism = "ruleset: one approval, stale approvals dismissed, last-push approval; `merge_pr.py` `approved_at_head` rereads the reviews before submission"
+
+[[gate]]
+id = "base-head-race"
+control = "base/head race"
+blocks = "merge"
+mechanism = "`merge_pr.py --expected-head`"
+
+[[gate]]
+id = "helper-only-merge-optional"
+control = "helper-only merge (optional)"
+blocks = "merge submission by any other path"
+mechanism = "`merge_pr.py` posts `aru-merge-authorized` as the configured merge-authority App; the ruleset requires it pinned by `integration_id`"
+
+[[gate]]
+id = "issue-done-and-cleanup"
+control = "issue Done and cleanup"
+blocks = "close-out"
+mechanism = "`merge_pr.py`, `cleanup_worktrees.py`"
+
+[[gate]]
+id = "reverse-gear"
+control = "reverse gear"
+blocks = "unsafe merged change"
+mechanism = "`revert_merge.py`"
+
+[[gate]]
+id = "anti-regrowth-budgets"
+control = "anti-regrowth budgets"
+blocks = "CI"
+mechanism = "`tests/test_surface.py`"
