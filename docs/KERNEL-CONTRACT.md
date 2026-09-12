@@ -144,10 +144,12 @@ compute is one **runner profile**, selected by the repository's account:
 | `self-hosted-mac` | `[self-hosted, macOS, ARM64, aru-ci]` | `gillella` personal repositories, including Aru itself |
 | `github-hosted` | `ubuntu-latest` | `Unum-Inc` repositories |
 
-The account table is exhaustive and has no default: an account outside it
-resolves to no profile, so bootstrap refuses to scaffold it and Driver admission
-stays blocked. A consumer may declare its profile explicitly, but only to confirm
-its account's assignment.
+Those assignments are declared in `scripts/policy.toml`, not compiled into the
+helpers, so adopting Aru under another account is a data change rather than a
+source patch. There is still no default: an account with no assignment must pass
+`--runner-profile` explicitly, and declaring nothing is refused. A declaration
+that contradicts an existing assignment is refused, and there is never a
+cross-profile fallback.
 
 The profile chooses compute only. Under either profile every required Kernel job
 keeps the `aru-governed-pr` check name, the exact-head checkout with

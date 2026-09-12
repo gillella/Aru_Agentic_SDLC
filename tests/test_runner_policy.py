@@ -35,8 +35,10 @@ def test_account_policy_resolves_one_profile(owner, declared, expected):
     [
         ("gillella", HOSTED, "assigned the self-hosted-mac runner profile"),
         ("Unum-Inc", MAC, "assigned the github-hosted runner profile"),
-        ("someone-else", None, "no runner profile is assigned to account"),
-        ("someone-else", MAC, "no runner profile is assigned to account"),
+        # An unassigned account declaring nothing is still refused: no default.
+        # It is no longer refused *by name* once it declares a profile -- see
+        # test_an_unassigned_account_may_adopt_by_declaring_its_profile (#698).
+        ("someone-else", None, "has no declared runner profile"),
         ("gillella", "ubuntu", "unknown runner profile"),
         (None, None, "must select a runner profile"),
     ],
@@ -151,3 +153,48 @@ def test_verification_refuses_a_workflow_that_contradicts_its_profile(tmp_path, 
     result = _verify(tmp_path, profile, lambda raw: raw.replace(old, new))
     assert result.returncode == 1
     assert message in result.stderr
+
+
+# --- account assignments are data, not a source patch (#698) ----------------
+
+def test_known_accounts_resolve_exactly_as_before():
+    assert init_project.resolve_runner_profile("gillella", None) == "self-hosted-mac"
+    assert init_project.resolve_runner_profile("Unum-Inc", None) == "github-hosted"
+    assert init_project.resolve_runner_profile("UNUM-INC", None) == "github-hosted"
+
+
+def test_assignments_come_from_the_policy_declaration():
+    import policy
+    assert init_project.ACCOUNT_RUNNER_PROFILES == policy.account_runner_profiles()
+    assert policy.account_runner_profiles()["gillella"] == "self-hosted-mac"
+
+
+def test_an_unassigned_account_may_adopt_by_declaring_its_profile():
+    # The portability fix: a third party is no longer refused by name.
+    assert init_project.resolve_runner_profile("newco", "github-hosted") == "github-hosted"
+    assert init_project.resolve_runner_profile("newco", "self-hosted-mac") == "self-hosted-mac"
+
+
+def test_an_unassigned_account_declaring_nothing_is_still_refused():
+    # There is no default; fail-closed is preserved.
+    with pytest.raises(init_project.BootstrapError, match="pass --runner-profile"):
+        init_project.resolve_runner_profile("newco", None)
+
+
+def test_a_declaration_contradicting_an_assignment_is_still_refused():
+    with pytest.raises(init_project.BootstrapError, match="is assigned the self-hosted-mac"):
+        init_project.resolve_runner_profile("gillella", "github-hosted")
+
+
+def test_an_unknown_profile_name_is_still_refused():
+    with pytest.raises(init_project.BootstrapError, match="unknown runner profile"):
+        init_project.resolve_runner_profile("newco", "some-other-profile")
+
+
+def test_a_malformed_assignment_table_refuses():
+    import policy
+    base = policy.load()
+    for table in ({}, {"gillella": 5}, {"gillella": ""}):
+        broken = {**base, "runner_profiles": {"accounts": table}}
+        with pytest.raises(policy.PolicyError):
+            policy.account_runner_profiles(broken)

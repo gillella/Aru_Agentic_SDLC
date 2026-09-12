@@ -189,3 +189,21 @@ def gates_enforced_by(helper: str, policy: dict[str, Any] | None = None) -> set[
         if helper in enforcers:
             found.add(gate["id"])
     return found
+
+
+def account_runner_profiles(policy: dict[str, Any] | None = None) -> dict[str, str]:
+    """Declared account -> runner profile assignments, keys case-folded.
+
+    Data, not kernel logic: an account outside this map is not refused by name,
+    it simply has no default and must declare its profile explicitly.
+    """
+    policy = policy or load()
+    table = (policy.get("runner_profiles") or {}).get("accounts")
+    if not isinstance(table, dict) or not table:
+        raise PolicyError("[runner_profiles.accounts] is missing or empty")
+    resolved = {}
+    for account, profile in table.items():
+        if not isinstance(account, str) or not isinstance(profile, str) or not profile.strip():
+            raise PolicyError("[runner_profiles.accounts] entries must be account = \"profile\"")
+        resolved[account.casefold()] = profile
+    return resolved

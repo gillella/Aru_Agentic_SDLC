@@ -62,12 +62,11 @@ RUNNER_PROFILES = {
     },
 }
 
-# Explicit account policy. An account absent from this table has no profile and
-# is refused; there is no default and no cross-account fallback.
-ACCOUNT_RUNNER_PROFILES = {
-    "gillella": "self-hosted-mac",
-    "unum-inc": "github-hosted",
-}
+# Account assignments are declared in scripts/policy.toml, not compiled in here,
+# so adopting Aru under a new account is a data change rather than a source patch.
+# An account absent from the table still has no default: it must pass
+# --runner-profile explicitly. There is no fallback and no cross-profile reroute.
+ACCOUNT_RUNNER_PROFILES = policy.account_runner_profiles()
 
 SCAFFOLD_TOKEN = re.compile(r"__ARU_[A-Z0-9_]+__")
 
@@ -82,11 +81,9 @@ def profile_spec(profile: object) -> dict[str, str]:
     return RUNNER_PROFILES[profile]
 
 
-def account_runner_profile(owner: str) -> str:
-    profile = ACCOUNT_RUNNER_PROFILES.get(owner.casefold())
-    if profile is None:
-        raise BootstrapError(f"no runner profile is assigned to account: {owner}")
-    return profile
+def account_runner_profile(owner: str) -> str | None:
+    """The account's declared profile, or None when it has no assignment."""
+    return ACCOUNT_RUNNER_PROFILES.get(owner.casefold())
 
 
 def resolve_runner_profile(owner: str | None, declared: str | None) -> str:
@@ -98,6 +95,14 @@ def resolve_runner_profile(owner: str | None, declared: str | None) -> str:
             raise BootstrapError("--owner or --runner-profile must select a runner profile")
         return declared
     assigned = account_runner_profile(owner)
+    if assigned is None:
+        # No assignment is not a refusal by name: the account declares its own
+        # profile. Declaring nothing is still refused, because there is no default.
+        if declared is None:
+            raise BootstrapError(
+                f"account {owner} has no declared runner profile; pass --runner-profile"
+            )
+        return declared
     if declared is not None and declared != assigned:
         raise BootstrapError(
             f"account {owner} is assigned the {assigned} runner profile, not {declared}"
@@ -407,7 +412,8 @@ def github_setup(
         )
     # The scaffolded workflow is already bound to one profile. Refuse the rest of
     # provisioning when the account it actually landed in is assigned another.
-    if account_runner_profile(created_owner) != runner_profile:
+    created_profile = account_runner_profile(created_owner)
+    if created_profile is not None and created_profile != runner_profile:
         raise BootstrapError(
             f"{slug} belongs to {created_owner}, which is not assigned the "
             f"{runner_profile} runner profile of the scaffolded workflow"

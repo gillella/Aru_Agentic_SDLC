@@ -155,11 +155,12 @@ python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
 ```
 
 `--owner` names the GitHub account that will own the repository and selects its
-runner profile: `gillella` scaffolds `self-hosted-mac`, `Unum-Inc` scaffolds
-`github-hosted`. There is no default, so an unassigned account is refused
-rather than pointed at another account's machines. Pass `--runner-profile`
-instead when the account is not in the table, or alongside `--owner` to assert
-the expected profile; a declaration that contradicts the account is refused.
+runner profile from the assignments declared in `scripts/policy.toml`:
+`gillella` scaffolds `self-hosted-mac`, `Unum-Inc` scaffolds `github-hosted`.
+Any other account simply has no assignment, so it passes `--runner-profile`
+explicitly. There is still no default: declaring nothing is refused rather than
+pointed at another account's machines, and a declaration that contradicts an
+existing assignment is refused.
 
 Add `--github --private` when you also want the helper to create a private
 GitHub repository, labels, linked Project Board, and a minimal ruleset with no

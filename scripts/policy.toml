@@ -227,3 +227,11 @@ steps = [
    and pending queue/auto-merge requests are unsupported and refused. Verify
    GitHub actually merged before Done and cleanup.""",
 ]
+
+[runner_profiles]
+# Account assignments for the runner profile a repository verifies on.
+# An account absent here has NO default: it must declare its profile explicitly
+# with --runner-profile. There is still no fallback and no cross-profile reroute.
+[runner_profiles.accounts]
+gillella = "self-hosted-mac"
+"unum-inc" = "github-hosted"
