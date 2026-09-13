@@ -557,3 +557,57 @@ def test_final_hook_issue_scope_reread(monkeypatch, mutation, refused):
     else:
         assert HOOK.check_pull_request(9, "a" * 40) == ([], 12, "a" * 40)
     assert events == ["pr", "files", "issue", "pr", "issue"]
+
+
+# --- a declaration that can never match is refused at the gate ---------------
+# path_allowed matches a rule exactly, or by '/**' prefix. A rule ending in a
+# bare separator therefore matches nothing: no file is named `docs/`. It used to
+# pass validation, reach Ready, and only fail in CI after the work was done --
+# seen on gillella/AruLifts #121.
+
+import pytest as _pytest  # noqa: E402
+
+from touches import TouchesError, parse_touches, path_allowed  # noqa: E402
+
+
+def _body(declaration: str) -> str:
+    return f"## Outcome\n\nx\n\n## Acceptance Criteria\n\n- [ ] x\n\ntouches: {declaration}\n"
+
+
+@_pytest.mark.parametrize("rule", ["docs/", "Sources/", "a/b/", "x/y/z/"])
+def test_a_trailing_separator_is_refused(rule):
+    with _pytest.raises(TouchesError, match="matches no file"):
+        parse_touches(_body(rule))
+
+
+def test_the_refusal_names_the_rule_and_gives_the_working_form():
+    with _pytest.raises(TouchesError) as caught:
+        parse_touches(_body("docs/"))
+    message = str(caught.value)
+    assert "'docs/'" in message, "the operator must see which rule was wrong"
+    assert "'docs/**'" in message, "and be told what to write instead"
+
+
+def test_it_is_refused_even_alongside_declarations_that_work():
+    with _pytest.raises(TouchesError, match="matches no file"):
+        parse_touches(_body("scripts/policy.py, docs/, tests/test_policy.py"))
+
+
+@_pytest.mark.parametrize("rule", [
+    "docs/**", "scripts/policy.py", "a/b/c.txt", "Sources/AruLiftsCore/**", ".gitignore",
+])
+def test_declarations_that_can_match_are_untouched(rule):
+    # Imported here, not at module scope: the behavioural tests above must be
+    # runnable against a validator that does not yet have this function, or
+    # they prove nothing about the defect.
+    from touches import unmatchable_reason
+
+    assert parse_touches(_body(rule)) == [rule]
+    assert unmatchable_reason(rule) is None
+
+
+def test_the_refused_rule_really_could_not_have_matched_anything():
+    # Guards the premise rather than the implementation: if `docs/` ever did
+    # match a path, refusing it would be wrong.
+    for candidate in ["docs", "docs/x.md", "docs/a/b.md", "docs/"]:
+        assert not path_allowed(candidate, ["docs/"])
