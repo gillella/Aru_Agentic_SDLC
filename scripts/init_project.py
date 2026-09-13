@@ -9,9 +9,11 @@ import re
 import tempfile
 from pathlib import Path
 
+from typing import Any
+
 import merge_authority
 import policy
-from common import PROJECT_AUTH, REPOSITORY_AUTH, KernelError, run
+from common import PROJECT_AUTH, REPOSITORY_AUTH, KernelError, checkout_repository, run
 
 STATUSES = ("Backlog", "Ready", "In Progress", "In Review", "Done")
 GITHUB_ACTIONS_APP_ID = 15368
@@ -190,6 +192,7 @@ def write(
     content: str,
     *,
     executable: bool = False,
+    replace: bool = False,
 ) -> None:
     path = safe_destination_path(destination, relative)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -197,8 +200,16 @@ def write(
     # hidden behind a missing parent during the first inspection.
     path = safe_destination_path(destination, relative)
     if path.exists():
-        if not path.is_file() or path.read_text(encoding="utf-8") != content:
+        # Anything that is not a regular file is refused even under replace: the
+        # point of the check is that a symlink or directory planted at this path
+        # must never be written through, and a sync is no more entitled to that
+        # than a bootstrap is.
+        if not path.is_file():
             raise BootstrapError(f"refusing to overwrite existing file: {path}")
+        if path.read_text(encoding="utf-8") != content:
+            if not replace:
+                raise BootstrapError(f"refusing to overwrite existing file: {path}")
+            path.write_text(content, encoding="utf-8")
     else:
         try:
             with path.open("x", encoding="utf-8") as handle:
@@ -235,59 +246,66 @@ def contained_git_hooks(destination: Path) -> Path:
     return configured
 
 
+# Files the consumer owns once bootstrap has run. A sync never rewrites these:
+# the reviewer list and the project's own verification are decisions the
+# repository made, not framework content to be replaced underneath it.
+CONSUMER_OWNED = (".aru/review.json", ".aru/verify-project.sh", ".gitignore")
+
+# Written with the executable bit; everything else is plain.
+EXECUTABLE = (".aru/verify.sh", ".aru/verify-project.sh",
+              ".aru/hooks/pre-push", ".aru/hooks/enforce_touches.py")
+
+# Both must exist before a directory is treated as governed, so a sync refuses
+# an unrelated repository instead of half-converting it.
+GOVERNED_MARKERS = (".aru/verify.sh", ".github/workflows/governed-pr.yml")
+
+RUNNER_PROFILE_MARKER = "# aru-runner-profile: "
+
+
+def framework_files(runner_profile: str, reviewers: list[str] | None = None) -> dict[str, str]:
+    """Every file bootstrap writes, as repository-relative path -> content.
+
+    Scaffold and sync both render from here on purpose. The moment one of them
+    renders a file the other does not, a consumer starts running a gate the
+    framework no longer ships -- which is the drift this function exists to make
+    impossible.
+    """
+    profile_spec(runner_profile)
+    framework = Path(__file__).resolve().parents[1]
+
+    def template(name: str) -> str:
+        return (framework / "templates" / name).read_text(encoding="utf-8")
+
+    files = {
+        "AGENTS.md": render_profile(template("AGENTS.md"), runner_profile),
+        ".github/ISSUE_TEMPLATE/governed-task.yml": template("issue.yml"),
+        ".github/PULL_REQUEST_TEMPLATE.md": template("pull_request.md"),
+        ".github/workflows/governed-pr.yml": render_profile(
+            template("governed-pr.yml"), runner_profile),
+        ".github/workflows/merge-policy.yml": render_profile(
+            template("merge-policy.yml"), runner_profile),
+        ".aru/review.json": review_declaration(reviewers),
+        ".aru/verify.sh": template("verify.sh"),
+        ".aru/verify-project.sh": template("verify-project.sh"),
+        ".aru/lib/touches.py": (framework / "scripts" / "touches.py").read_text(encoding="utf-8"),
+        ".gitignore": "__pycache__/\n*.py[cod]\n.venv/\n.env\n.worktrees/\n",
+    }
+    for hook in ("pre-push", "enforce_touches.py"):
+        files[f".aru/hooks/{hook}"] = (framework / "hooks" / hook).read_text(encoding="utf-8")
+    return files
+
+
 def scaffold(
     name: str, directory: Path, *, runner_profile: str,
     reviewers: list[str] | None = None,
 ) -> list[str]:
     safe_name(name)
-    profile_spec(runner_profile)
     destination = directory.expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
     framework = Path(__file__).resolve().parents[1]
-    outputs = {
-        "AGENTS.md": render_profile(
-            (framework / "templates" / "AGENTS.md").read_text(encoding="utf-8"),
-            runner_profile,
-        ),
-        ".github/ISSUE_TEMPLATE/governed-task.yml": (
-            framework / "templates" / "issue.yml"
-        ).read_text(encoding="utf-8"),
-        ".github/PULL_REQUEST_TEMPLATE.md": (
-            framework / "templates" / "pull_request.md"
-        ).read_text(encoding="utf-8"),
-        ".github/workflows/governed-pr.yml": render_profile(
-            (framework / "templates" / "governed-pr.yml").read_text(encoding="utf-8"),
-            runner_profile,
-        ),
-        ".github/workflows/merge-policy.yml": render_profile(
-            (framework / "templates" / "merge-policy.yml").read_text(encoding="utf-8"),
-            runner_profile,
-        ),
-        ".aru/review.json": review_declaration(reviewers),
-        ".aru/verify.sh": (framework / "templates" / "verify.sh").read_text(
-            encoding="utf-8"
-        ),
-        ".aru/verify-project.sh": (framework / "templates" / "verify-project.sh").read_text(
-            encoding="utf-8"
-        ),
-        ".aru/lib/touches.py": (framework / "scripts" / "touches.py").read_text(
-            encoding="utf-8"
-        ),
-        ".gitignore": "__pycache__/\n*.py[cod]\n.venv/\n.env\n.worktrees/\n",
-    }
     written: list[str] = []
-    for relative, content in outputs.items():
-        write(
-            destination,
-            relative,
-            content,
-            executable=relative in {".aru/verify.sh", ".aru/verify-project.sh"},
-        )
-        written.append(relative)
-    for name_in_repo in ("pre-push", "enforce_touches.py"):
-        source = framework / "hooks" / name_in_repo
-        relative = f".aru/hooks/{name_in_repo}"
-        write(destination, relative, source.read_text(encoding="utf-8"), executable=True)
+    for relative, content in framework_files(runner_profile, reviewers).items():
+        write(destination, relative, content, executable=relative in EXECUTABLE)
         written.append(relative)
     git_entry = safe_destination_path(destination, ".git")
     if not git_entry.exists():
@@ -295,6 +313,138 @@ def scaffold(
     contained_git_hooks(destination)
     command([str(framework / "scripts" / "install_hooks.sh")], cwd=destination)
     return written
+
+
+def detect_runner_profile(destination: Path) -> str:
+    """The profile this repository already declares, read from its own workflow.
+
+    Taken from the workflow marker rather than from the account policy: a sync
+    re-renders what this repository runs. Resolving the account again would
+    silently move a repository onto a different profile, which is a change of
+    where its code executes, not a refresh.
+    """
+    workflow = safe_destination_path(destination, ".github/workflows/governed-pr.yml")
+    declared = [
+        line[len(RUNNER_PROFILE_MARKER):].strip()
+        for line in workflow.read_text(encoding="utf-8").splitlines()
+        if line.startswith(RUNNER_PROFILE_MARKER)
+    ]
+    if len(declared) != 1:
+        raise BootstrapError(
+            "governed workflow must declare exactly one '# aru-runner-profile:' line"
+        )
+    profile_spec(declared[0])
+    return declared[0]
+
+
+def require_governed(directory: Path) -> Path:
+    destination = directory.expanduser().resolve()
+    for marker in GOVERNED_MARKERS:
+        if not safe_destination_path(destination, marker).is_file():
+            raise BootstrapError(
+                f"{destination} is not a governed repository ({marker} is absent); "
+                "scaffold it before syncing"
+            )
+    return destination
+
+
+def sync_report(directory: Path) -> dict[str, Any]:
+    """Compare a governed repository against the current framework. Reads only.
+
+    Consumer-owned files are reported as preserved rather than compared: they
+    are expected to differ, and flagging them would train the operator to ignore
+    the output.
+    """
+    destination = require_governed(directory)
+    profile = detect_runner_profile(destination)
+    current: list[str] = []
+    stale: list[str] = []
+    missing: list[str] = []
+    for relative, content in framework_files(profile).items():
+        if relative in CONSUMER_OWNED:
+            continue
+        path = safe_destination_path(destination, relative)
+        if not path.is_file():
+            missing.append(relative)
+        elif path.read_text(encoding="utf-8") != content:
+            stale.append(relative)
+        else:
+            current.append(relative)
+    return {
+        "directory": str(destination),
+        "runner_profile": profile,
+        "current": sorted(current),
+        "stale": sorted(stale),
+        "missing": sorted(missing),
+        "preserved": sorted(CONSUMER_OWNED),
+        "in_sync": not stale and not missing,
+    }
+
+
+def sync_apply(directory: Path) -> dict[str, Any]:
+    """Re-render every framework-owned file that diverged, and nothing else."""
+    report = sync_report(directory)
+    destination = Path(report["directory"])
+    rewritten = sorted([*report["stale"], *report["missing"]])
+    if rewritten:
+        # Re-rendered from the profile the repository declares, so a sync never
+        # relocates where its verification runs.
+        files = framework_files(report["runner_profile"])
+        for relative in rewritten:
+            write(destination, relative, files[relative],
+                  executable=relative in EXECUTABLE, replace=True)
+    return {**report, "rewritten": rewritten, "in_sync": True}
+
+
+def reprovision_ruleset(
+    slug: str, directory: Path, merge_app_id: int | None = None
+) -> dict[str, object] | str:
+    """Replace the repository's declared ruleset, or create it when absent.
+
+    `provision_ruleset()` POSTs, which on an already-governed repository would
+    leave two rulesets both enforcing and no way to tell which one refused a
+    merge. More than one match is refused rather than guessed at.
+    """
+    declared = policy.ruleset_parameters()
+    inventory = command(
+        ["gh", "api", f"repos/{slug}/rulesets"],
+        cwd=directory, json_output=True, auth=REPOSITORY_AUTH,
+    )
+    if not isinstance(inventory, list):
+        raise BootstrapError(f"{slug}: ruleset inventory is unreadable")
+    matches = [
+        entry for entry in inventory
+        if isinstance(entry, dict) and entry.get("name") == declared["name"]
+    ]
+    if not matches:
+        return provision_ruleset(slug, directory, merge_app_id)
+    if len(matches) > 1:
+        raise BootstrapError(
+            f"{slug} carries {len(matches)} rulesets named {declared['name']!r}; resolve by hand"
+        )
+    ruleset_id = matches[0].get("id")
+    if not isinstance(ruleset_id, int):
+        raise BootstrapError(f"{slug}: existing ruleset has no readable id")
+    return _ruleset_request("PUT", f"repos/{slug}/rulesets/{ruleset_id}", merge_app_id, directory)
+
+
+def _ruleset_request(
+    method: str, path: str, merge_app_id: int | None, directory: Path
+) -> dict[str, object] | str:
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", suffix=".json", delete=False
+        ) as handle:
+            json.dump(ruleset_payload(merge_app_id), handle, sort_keys=True)
+            temporary = Path(handle.name)
+        return command(
+            ["gh", "api", path, "--method", method, "--input", str(temporary)],
+            cwd=directory, json_output=True, auth=REPOSITORY_AUTH,
+        )
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def ruleset_payload(merge_app_id: int | None = None) -> dict[str, object]:
@@ -508,15 +658,55 @@ def github_setup(
     }
 
 
+def _run_sync(args: argparse.Namespace) -> int:
+    """Bring an already-governed repository up to the current framework."""
+    if args.name or args.github or args.owner or args.runner_profile:
+        raise BootstrapError("--sync takes --directory, and optionally --check or --ruleset")
+    report = sync_report(args.directory) if args.check else sync_apply(args.directory)
+    if args.ruleset and not args.check:
+        destination = Path(report["directory"])
+        report["ruleset"] = reprovision_ruleset(
+            checkout_repository(destination), destination, args.merge_app_id
+        )
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True, default=str))
+        return 0
+    changed = report.get("rewritten", [*report["stale"], *report["missing"]])
+    print(f"{report['directory']} ({report['runner_profile']})")
+    if not changed:
+        print(f"  in sync: {len(report['current'])} framework files current, nothing to do")
+    else:
+        verb = "would rewrite" if args.check else "rewrote"
+        for relative in changed:
+            print(f"  {verb}: {relative}")
+    print(f"  preserved (consumer-owned): {', '.join(report['preserved'])}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--name", required=True)
+    parser.add_argument("--name")
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--github", action="store_true")
     parser.add_argument("--private", action="store_true")
     parser.add_argument("--owner", help="GitHub account that will own the repository")
     parser.add_argument("--runner-profile", choices=sorted(RUNNER_PROFILES))
+    parser.add_argument("--sync", action="store_true",
+                        help="update an existing governed repository instead of creating one")
+    parser.add_argument("--check", action="store_true",
+                        help="with --sync, report divergence and write nothing")
+    parser.add_argument("--ruleset", action="store_true",
+                        help="with --sync, also re-provision the branch ruleset from the policy")
+    parser.add_argument("--merge-app-id", type=int)
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    if args.sync:
+        try:
+            return _run_sync(args)
+        except (BootstrapError, KernelError) as exc:
+            parser.error(str(exc))
+    if args.name is None:
+        parser.error("--name is required unless --sync is given")
     try:
         if args.github and args.owner is None:
             raise BootstrapError("--github requires --owner to name the account that owns the repository")
