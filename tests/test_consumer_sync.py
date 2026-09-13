@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+import consumer
 import init_project
 
 PROFILE = "self-hosted-mac"
@@ -34,7 +35,7 @@ def test_an_ungoverned_directory_is_refused_not_half_converted(tmp_path):
     (plain / "src").mkdir(parents=True)
     (plain / "src" / "main.py").write_text("print('hi')\n", encoding="utf-8")
     with pytest.raises(init_project.BootstrapError, match="not a governed repository"):
-        init_project.sync_report(plain)
+        consumer.sync_report(plain)
     # Nothing was created on the way to refusing.
     assert [p.name for p in plain.iterdir()] == ["src"]
 
@@ -43,13 +44,13 @@ def test_a_repository_missing_one_marker_is_still_refused(tmp_path):
     target = governed(tmp_path)
     (target / ".aru" / "verify.sh").unlink()
     with pytest.raises(init_project.BootstrapError, match="not a governed repository"):
-        init_project.sync_report(target)
+        consumer.sync_report(target)
 
 
 # --- reporting ----------------------------------------------------------------
 
 def test_a_freshly_scaffolded_repository_is_already_in_sync(tmp_path):
-    report = init_project.sync_report(governed(tmp_path))
+    report = consumer.sync_report(governed(tmp_path))
     assert report["in_sync"] is True
     assert report["stale"] == [] and report["missing"] == []
     assert report["current"], "a vacuous report would claim sync with nothing compared"
@@ -59,7 +60,7 @@ def test_a_freshly_scaffolded_repository_is_already_in_sync(tmp_path):
 def test_a_stale_copy_is_reported(tmp_path):
     target = governed(tmp_path)
     (target / ".aru" / "verify.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    report = init_project.sync_report(target)
+    report = consumer.sync_report(target)
     assert report["stale"] == [".aru/verify.sh"]
     assert report["in_sync"] is False
 
@@ -69,13 +70,13 @@ def test_a_diverged_touches_helper_is_reported(tmp_path):
     # compares, so it drifts silently for as long as the repository lives.
     target = governed(tmp_path)
     (target / ".aru" / "lib" / "touches.py").write_text("# gutted\n", encoding="utf-8")
-    assert ".aru/lib/touches.py" in init_project.sync_report(target)["stale"]
+    assert ".aru/lib/touches.py" in consumer.sync_report(target)["stale"]
 
 
 def test_a_deleted_framework_file_is_reported_missing(tmp_path):
     target = governed(tmp_path)
     (target / ".github" / "workflows" / "merge-policy.yml").unlink()
-    report = init_project.sync_report(target)
+    report = consumer.sync_report(target)
     assert report["missing"] == [".github/workflows/merge-policy.yml"]
 
 
@@ -83,7 +84,7 @@ def test_reporting_writes_nothing(tmp_path):
     target = governed(tmp_path)
     gutted = "#!/bin/sh\nexit 0\n"
     (target / ".aru" / "verify.sh").write_text(gutted, encoding="utf-8")
-    init_project.sync_report(target)
+    consumer.sync_report(target)
     assert read(target, ".aru/verify.sh") == gutted, "a report must not repair what it reports"
 
 
@@ -93,7 +94,7 @@ def test_sync_restores_a_stale_copy(tmp_path):
     target = governed(tmp_path)
     expected = read(target, ".aru/verify.sh")
     (target / ".aru" / "verify.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    result = init_project.sync_apply(target)
+    result = consumer.sync_apply(target)
     assert result["rewritten"] == [".aru/verify.sh"]
     assert read(target, ".aru/verify.sh") == expected
     assert result["in_sync"] is True
@@ -106,7 +107,7 @@ def test_sync_restores_a_missing_file_and_keeps_it_executable(tmp_path):
     # verify.sh is a governed marker, so recreate it first: the refusal is
     # deliberate and covered above.
     init_project.write(target, ".aru/verify.sh", "stale\n", executable=True)
-    result = init_project.sync_apply(target)
+    result = consumer.sync_apply(target)
     assert ".aru/hooks/pre-push" in result["rewritten"]
     import os
     assert os.access(target / ".aru" / "hooks" / "pre-push", os.X_OK)
@@ -115,7 +116,7 @@ def test_sync_restores_a_missing_file_and_keeps_it_executable(tmp_path):
 def test_syncing_an_already_current_repository_writes_nothing(tmp_path):
     target = governed(tmp_path)
     before = {p: p.stat().st_mtime_ns for p in target.rglob("*") if p.is_file()}
-    result = init_project.sync_apply(target)
+    result = consumer.sync_apply(target)
     assert result["rewritten"] == []
     after = {p: p.stat().st_mtime_ns for p in target.rglob("*") if p.is_file()}
     assert before == after, "a no-op sync must not rewrite identical content"
@@ -126,7 +127,7 @@ def test_consumer_owned_files_are_never_overwritten(tmp_path):
     mine = '{"authority": "human", "reviewers": ["someone-else"]}\n'
     (target / ".aru" / "review.json").write_text(mine, encoding="utf-8")
     (target / ".aru" / "verify-project.sh").write_text("#!/bin/sh\nmy tests\n", encoding="utf-8")
-    result = init_project.sync_apply(target)
+    result = consumer.sync_apply(target)
     assert read(target, ".aru/review.json") == mine
     assert "my tests" in read(target, ".aru/verify-project.sh")
     for owned in init_project.CONSUMER_OWNED:
@@ -140,7 +141,7 @@ def test_sync_keeps_the_profile_the_repository_declares(tmp_path):
     target = tmp_path / "hosted"
     init_project.scaffold("hosted", target, runner_profile="github-hosted")
     (target / ".aru" / "verify.sh").write_text("stale\n", encoding="utf-8")
-    result = init_project.sync_apply(target)
+    result = consumer.sync_apply(target)
     assert result["runner_profile"] == "github-hosted"
     assert "ubuntu-latest" in read(target, ".github/workflows/governed-pr.yml")
     assert "self-hosted" not in read(target, ".github/workflows/governed-pr.yml")
@@ -150,9 +151,9 @@ def test_an_unreadable_profile_marker_refuses(tmp_path):
     target = governed(tmp_path)
     workflow = target / ".github" / "workflows" / "governed-pr.yml"
     workflow.write_text(workflow.read_text(encoding="utf-8").replace(
-        init_project.RUNNER_PROFILE_MARKER, "# nothing: "), encoding="utf-8")
+        consumer.RUNNER_PROFILE_MARKER, "# nothing: "), encoding="utf-8")
     with pytest.raises(init_project.BootstrapError, match="exactly one"):
-        init_project.sync_report(target)
+        consumer.sync_report(target)
 
 
 # --- the render path is shared -------------------------------------------------
@@ -170,11 +171,11 @@ def test_scaffold_and_sync_render_from_the_same_source(tmp_path):
 
 def test_every_framework_file_is_owned_by_exactly_one_side(tmp_path):
     rendered = set(init_project.framework_files(PROFILE))
-    consumer = set(init_project.CONSUMER_OWNED)
-    assert consumer <= rendered, f"consumer-owned names not rendered: {consumer - rendered}"
-    report = init_project.sync_report(governed(tmp_path))
+    owned = set(init_project.CONSUMER_OWNED)
+    assert owned <= rendered, f"consumer-owned names not rendered: {owned - rendered}"
+    report = consumer.sync_report(governed(tmp_path))
     compared = set(report["current"]) | set(report["stale"]) | set(report["missing"])
-    assert compared == rendered - consumer, "every rendered file is compared or preserved, none dropped"
+    assert compared == rendered - owned, "every rendered file is compared or preserved, none dropped"
 
 
 # --- the overwrite guard still holds ------------------------------------------
@@ -219,7 +220,7 @@ def test_sync_refuses_a_symlinked_framework_file(tmp_path):
     hook.unlink()
     hook.symlink_to(outside)
     with pytest.raises(init_project.BootstrapError):
-        init_project.sync_apply(target)
+        consumer.sync_apply(target)
     assert outside.read_text(encoding="utf-8") == "untouched\n"
 
 
