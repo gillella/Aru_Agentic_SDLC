@@ -225,48 +225,113 @@ def test_sync_refuses_a_symlinked_framework_file(tmp_path):
 
 # --- ruleset ------------------------------------------------------------------
 
-def test_reprovision_replaces_the_existing_ruleset_rather_than_adding_one(monkeypatch, tmp_path):
-    calls = []
+def ruleset_api(monkeypatch, rulesets):
+    """Model GitHub's two-step ruleset API and record every call.
+
+    The list endpoint returns no rules at all, so identifying a ruleset by what
+    it requires costs one fetch each. A stub that served rules from the list
+    would let the code pass while doing something GitHub does not support.
+
+    rulesets: [(id, name, [required contexts])]
+    """
+    calls: list[list[str]] = []
 
     def fake_command(argv, **kw):
         calls.append(argv)
-        if argv[:3] == ["gh", "api", "repos/o/r/rulesets"] and "--method" not in argv:
-            return [{"name": init_project.policy.ruleset_parameters()["name"], "id": 42},
-                    {"name": "unrelated", "id": 7}]
-        return {"id": 42}
+        if "--method" in argv:
+            return {"id": 999}
+        path = argv[2]
+        if path.endswith("/rulesets"):
+            return [{"id": i, "name": n, "target": "branch"} for i, n, _ in rulesets]
+        wanted = int(path.rsplit("/", 1)[1])
+        contexts = next(c for i, _, c in rulesets if i == wanted)
+        return {"rules": [
+            {"type": "pull_request", "parameters": {}},
+            {"type": "required_status_checks",
+             "parameters": {"required_status_checks": [{"context": c} for c in contexts]}},
+        ]}
 
     monkeypatch.setattr(init_project, "command", fake_command)
+    return calls
+
+
+def writes(calls):
+    return [a for a in calls if "--method" in a]
+
+
+def method_of(argv):
+    return argv[argv.index("--method") + 1]
+
+
+def test_the_matching_context_is_one_the_policy_actually_declares():
+    assert init_project.GOVERNED_CONTEXT in init_project.policy.GOVERNED_CHECKS
+
+
+def test_a_ruleset_from_an_earlier_declared_name_is_updated_not_duplicated(monkeypatch, tmp_path):
+    # The v2.2.0 defect, reproduced from gillella/aru-golden-path-demo: scaffolded
+    # 2026-09-10 under the old name, requiring only the one context. Matching on
+    # the declared name found nothing and the create path added a second ruleset
+    # enforcing beside the first.
+    calls = ruleset_api(monkeypatch, [(22611728, "aru-protect-default", ["aru-governed-pr"])])
     init_project.reprovision_ruleset("o/r", tmp_path)
-    methods = [a for a in calls if "--method" in a]
-    assert len(methods) == 1
-    assert methods[0][methods[0].index("--method") + 1] == "PUT"
-    assert "repos/o/r/rulesets/42" in methods[0]
+    assert len(writes(calls)) == 1, "a second ruleset must never be created"
+    assert method_of(writes(calls)[0]) == "PUT"
+    assert "repos/o/r/rulesets/22611728" in writes(calls)[0]
+
+
+def test_the_current_ruleset_is_still_matched(monkeypatch, tmp_path):
+    calls = ruleset_api(monkeypatch, [
+        (42, "aru-protect-main", ["aru-governed-pr", "aru-merge-policy", "aru-merge-authorized"]),
+    ])
+    init_project.reprovision_ruleset("o/r", tmp_path)
+    assert method_of(writes(calls)[0]) == "PUT"
+    assert "repos/o/r/rulesets/42" in writes(calls)[0]
+
+
+def test_an_unrelated_ruleset_is_never_touched(monkeypatch, tmp_path):
+    calls = ruleset_api(monkeypatch, [(7, "release-protection", ["build", "lint"])])
+    init_project.reprovision_ruleset("o/r", tmp_path)
+    assert method_of(writes(calls)[0]) == "POST", "ours is absent, so it is created"
+    assert not any("rulesets/7" in a for a in writes(calls)), "someone else's rule stays untouched"
 
 
 def test_reprovision_creates_one_when_the_repository_has_none(monkeypatch, tmp_path):
-    calls = []
-
-    def fake_command(argv, **kw):
-        calls.append(argv)
-        if argv[:3] == ["gh", "api", "repos/o/r/rulesets"] and "--method" not in argv:
-            return []
-        return {"id": 1}
-
-    monkeypatch.setattr(init_project, "command", fake_command)
+    calls = ruleset_api(monkeypatch, [])
     init_project.reprovision_ruleset("o/r", tmp_path)
-    methods = [a for a in calls if "--method" in a]
-    assert methods and methods[0][methods[0].index("--method") + 1] == "POST"
+    assert writes(calls) and method_of(writes(calls)[0]) == "POST"
 
 
-def test_duplicate_rulesets_are_refused_rather_than_guessed(monkeypatch, tmp_path):
-    name = init_project.policy.ruleset_parameters()["name"]
-    monkeypatch.setattr(init_project, "command",
-                        lambda argv, **kw: [{"name": name, "id": 1}, {"name": name, "id": 2}])
+def test_two_governed_rulesets_are_refused_rather_than_guessed(monkeypatch, tmp_path):
+    ruleset_api(monkeypatch, [(1, "aru-protect-default", ["aru-governed-pr"]),
+                              (2, "aru-protect-main", ["aru-governed-pr"])])
     with pytest.raises(init_project.BootstrapError, match="resolve by hand"):
         init_project.reprovision_ruleset("o/r", tmp_path)
+
+
+def test_a_tag_ruleset_is_not_mistaken_for_the_branch_boundary(monkeypatch, tmp_path):
+    def fake_command(argv, **kw):
+        if "--method" in argv:
+            return {"id": 999}
+        if argv[2].endswith("/rulesets"):
+            return [{"id": 5, "name": "tags", "target": "tag"}]
+        raise AssertionError("a tag ruleset must not be fetched")
+
+    monkeypatch.setattr(init_project, "command", fake_command)
+    assert init_project.governed_ruleset_id("o/r", tmp_path) is None
 
 
 def test_an_unreadable_inventory_refuses(monkeypatch, tmp_path):
     monkeypatch.setattr(init_project, "command", lambda argv, **kw: {"unexpected": True})
     with pytest.raises(init_project.BootstrapError, match="inventory is unreadable"):
+        init_project.reprovision_ruleset("o/r", tmp_path)
+
+
+def test_an_unreadable_ruleset_refuses(monkeypatch, tmp_path):
+    def fake_command(argv, **kw):
+        if argv[2].endswith("/rulesets"):
+            return [{"id": 3, "name": "x", "target": "branch"}]
+        return {"no": "rules"}
+
+    monkeypatch.setattr(init_project, "command", fake_command)
+    with pytest.raises(init_project.BootstrapError, match="is unreadable"):
         init_project.reprovision_ruleset("o/r", tmp_path)

@@ -261,6 +261,12 @@ GOVERNED_MARKERS = (".aru/verify.sh", ".github/workflows/governed-pr.yml")
 
 RUNNER_PROFILE_MARKER = "# aru-runner-profile: "
 
+# The exact-head verification context. Every generation of the kernel has
+# required it, which is what makes it a durable way to recognise the kernel's
+# own ruleset after the declared name has changed. A test holds it to the
+# policy's own list.
+GOVERNED_CONTEXT = "aru-governed-pr"
+
 
 def framework_files(runner_profile: str, reviewers: list[str] | None = None) -> dict[str, str]:
     """Every file bootstrap writes, as repository-relative path -> content.
@@ -396,35 +402,69 @@ def sync_apply(directory: Path) -> dict[str, Any]:
     return {**report, "rewritten": rewritten, "in_sync": True}
 
 
-def reprovision_ruleset(
-    slug: str, directory: Path, merge_app_id: int | None = None
-) -> dict[str, object] | str:
-    """Replace the repository's declared ruleset, or create it when absent.
+def ruleset_contexts(slug: str, ruleset_id: int, directory: Path) -> set[str]:
+    """The status contexts one ruleset requires. The list endpoint omits rules."""
+    detail = command(
+        ["gh", "api", f"repos/{slug}/rulesets/{ruleset_id}"],
+        cwd=directory, json_output=True, auth=REPOSITORY_AUTH,
+    )
+    if not isinstance(detail, dict) or not isinstance(detail.get("rules"), list):
+        raise BootstrapError(f"{slug}: ruleset {ruleset_id} is unreadable")
+    contexts: set[str] = set()
+    for rule in detail["rules"]:
+        if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
+            continue
+        for check in (rule.get("parameters") or {}).get("required_status_checks") or []:
+            if isinstance(check, dict) and isinstance(check.get("context"), str):
+                contexts.add(check["context"])
+    return contexts
 
-    `provision_ruleset()` POSTs, which on an already-governed repository would
-    leave two rulesets both enforcing and no way to tell which one refused a
-    merge. More than one match is refused rather than guessed at.
+
+def governed_ruleset_id(slug: str, directory: Path) -> int | None:
+    """The id of the kernel's own ruleset on this repository, or None.
+
+    Identified by the exact-head verification context it requires rather than by
+    its declared name. Matching on the name missed every repository scaffolded
+    before that name last changed, and the create path then added a second
+    ruleset enforcing alongside the first, with no way to tell which one refused
+    a merge. A name can be renamed; the context this kernel posts cannot be
+    anything else.
     """
-    declared = policy.ruleset_parameters()
     inventory = command(
         ["gh", "api", f"repos/{slug}/rulesets"],
         cwd=directory, json_output=True, auth=REPOSITORY_AUTH,
     )
     if not isinstance(inventory, list):
         raise BootstrapError(f"{slug}: ruleset inventory is unreadable")
-    matches = [
-        entry for entry in inventory
-        if isinstance(entry, dict) and entry.get("name") == declared["name"]
-    ]
-    if not matches:
-        return provision_ruleset(slug, directory, merge_app_id)
-    if len(matches) > 1:
+    owned: list[int] = []
+    for entry in inventory:
+        if not isinstance(entry, dict) or entry.get("target") not in (None, "branch"):
+            continue
+        ruleset_id = entry.get("id")
+        if not isinstance(ruleset_id, int):
+            raise BootstrapError(f"{slug}: a ruleset has no readable id")
+        if GOVERNED_CONTEXT in ruleset_contexts(slug, ruleset_id, directory):
+            owned.append(ruleset_id)
+    if len(owned) > 1:
         raise BootstrapError(
-            f"{slug} carries {len(matches)} rulesets named {declared['name']!r}; resolve by hand"
+            f"{slug} carries {len(owned)} rulesets requiring {GOVERNED_CONTEXT!r} "
+            f"(ids {sorted(owned)}); resolve by hand"
         )
-    ruleset_id = matches[0].get("id")
-    if not isinstance(ruleset_id, int):
-        raise BootstrapError(f"{slug}: existing ruleset has no readable id")
+    return owned[0] if owned else None
+
+
+def reprovision_ruleset(
+    slug: str, directory: Path, merge_app_id: int | None = None
+) -> dict[str, object] | str:
+    """Replace the kernel's ruleset on this repository, or create it when absent.
+
+    A plain re-POST would leave two rulesets both enforcing, so an existing one
+    is updated in place. Updating also renames it, which is how a repository
+    scaffolded under an earlier declared name catches up.
+    """
+    ruleset_id = governed_ruleset_id(slug, directory)
+    if ruleset_id is None:
+        return provision_ruleset(slug, directory, merge_app_id)
     return _ruleset_request("PUT", f"repos/{slug}/rulesets/{ruleset_id}", merge_app_id, directory)
 
 
