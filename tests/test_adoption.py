@@ -101,6 +101,7 @@ def test_github_readiness_reports_whether_rules_enforce_the_approval_rule(tmp_pa
 # files the framework writes, and its .gitignore carries toolchain entries that
 # must survive. Nothing existing is discarded.
 
+import argparse  # noqa: E402
 import subprocess  # noqa: E402
 
 import pytest  # noqa: E402
@@ -220,3 +221,130 @@ def test_provisioning_is_shared_with_bootstrap_not_duplicated(monkeypatch, tmp_p
     created = [a for a in calls if a[:3] == ["gh", "label", "create"]]
     assert len(created) == len(init_project.LABELS), "every board label is created"
     assert any("project" in a and "link" in a for a in calls), "the board is linked to the repo"
+
+
+# --- the adoption commit reaches the default branch first ---------------------
+# aru-merge-policy runs the base branch's copy of a workflow that adoption is
+# itself installing. Provisioning a ruleset before that commit lands seals the
+# repository against the very change that would govern it -- observed on
+# gillella/AruLifts, which needed the ruleset disabled and a --no-verify push
+# to recover.
+
+def git(repo, *args):
+    return subprocess.run(["git", *args], cwd=repo, check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def with_remote(tmp_path):
+    """An ungoverned repository with history and a real bare origin."""
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    repo = ungoverned(tmp_path)
+    for key, value in (("user.email", "t@example.com"), ("user.name", "T"),
+                       ("commit.gpgsign", "false")):
+        git(repo, "config", key, value)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "existing work")
+    git(repo, "remote", "add", "origin", str(bare))
+    git(repo, "push", "-q", "origin", "HEAD:main")
+    return repo, bare
+
+
+def test_adoption_commits_what_it_wrote(tmp_path):
+    repo, _ = with_remote(tmp_path)
+    result = consumer.adopt(repo, PROFILE)
+    assert result["commit"], "adoption must not leave the tree dirty"
+    assert git(repo, "status", "--porcelain") == "", "nothing may be left uncommitted"
+    committed = git(repo, "show", "--name-only", "--format=", "HEAD").split()
+    assert ".aru/verify.sh" in committed
+    assert ".github/workflows/merge-policy.yml" in committed
+
+
+def test_only_the_adopted_paths_are_committed(tmp_path):
+    # The repository may have unrelated work in progress. Sweeping it into the
+    # governance commit would be a surprising thing to do to someone's tree.
+    repo, _ = with_remote(tmp_path)
+    (repo / "src" / "wip.swift").write_text("// mine, not yours\n", encoding="utf-8")
+    consumer.adopt(repo, PROFILE)
+    committed = git(repo, "show", "--name-only", "--format=", "HEAD").split()
+    # Both halves matter: without the first this passes against code that never
+    # commits at all, which is the defect being fixed.
+    assert ".aru/verify.sh" in committed, "the adoption files must be in this commit"
+    assert "src/wip.swift" not in committed
+    assert "src/wip.swift" in git(repo, "status", "--porcelain")
+
+
+def test_nothing_to_write_means_nothing_to_commit(tmp_path):
+    repo, _ = with_remote(tmp_path)
+    consumer.adopt(repo, PROFILE)
+    before = git(repo, "rev-parse", "HEAD")
+    # Adoption refuses a second time, but the underlying commit step must be a
+    # no-op rather than an empty commit.
+    plan = {"write": [], "preserve_existing_as": []}
+    assert consumer.commit_adoption(repo, plan) is None
+    assert git(repo, "rev-parse", "HEAD") == before
+
+
+def test_the_freshly_installed_hook_does_not_refuse_the_adoption_push(tmp_path):
+    # adopt() installs a pre-push hook that refuses direct pushes to the default
+    # branch. This is the commit that installs it, so it must still get through.
+    repo, bare = with_remote(tmp_path)
+    consumer.adopt(repo, PROFILE)
+    consumer.push_adoption(repo)
+    remote_head = subprocess.run(["git", "rev-parse", "refs/heads/main"], cwd=bare,
+                                 capture_output=True, text=True).stdout.strip()
+    assert remote_head == git(repo, "rev-parse", "HEAD")
+    assert ".aru/hooks/pre-push" in git(repo, "show", "--name-only", "--format=", "HEAD")
+
+
+def test_without_github_the_commit_is_left_unpushed_for_inspection(tmp_path):
+    repo, bare = with_remote(tmp_path)
+    before = subprocess.run(["git", "rev-parse", "refs/heads/main"], cwd=bare,
+                            capture_output=True, text=True).stdout.strip()
+    consumer.adopt(repo, PROFILE)
+    after = subprocess.run(["git", "rev-parse", "refs/heads/main"], cwd=bare,
+                           capture_output=True, text=True).stdout.strip()
+    assert after == before, "adopt() alone must not push"
+    assert git(repo, "status", "--porcelain") == "", "but it must still commit"
+
+
+def test_the_push_happens_before_provisioning(monkeypatch, tmp_path):
+    # The defect was ordering, so the test is about ordering.
+    repo, _ = with_remote(tmp_path)
+    order = []
+    monkeypatch.setattr(consumer, "adopt",
+                        lambda d, p: {"directory": str(repo), "runner_profile": p,
+                                      "write": [], "preserve_existing_as": [],
+                                      "keep_untouched": [], "commit": "abc1234"})
+    monkeypatch.setattr(consumer, "push_adoption",
+                        lambda d: (order.append("push"), "main")[1])
+    monkeypatch.setattr(consumer, "provision_github",
+                        lambda *a, **k: (order.append("provision"), {"repository": "o/r"})[1])
+    monkeypatch.setattr(consumer, "checkout_repository", lambda d: "o/r")
+    monkeypatch.setattr(consumer.merge_authority, "configured", lambda: None)
+    args = argparse.Namespace(name=None, sync=False, owner=None, runner_profile=PROFILE,
+                              directory=repo, check=False, github=True, json=False,
+                              ruleset=False, merge_app_id=None)
+    consumer.run_adopt(args)
+    assert order == ["push", "provision"], f"provisioning must come second, got {order}"
+
+
+def test_a_provisioning_failure_names_the_recovery(monkeypatch, tmp_path):
+    repo, _ = with_remote(tmp_path)
+    monkeypatch.setattr(consumer, "adopt",
+                        lambda d, p: {"directory": str(repo), "runner_profile": p,
+                                      "write": [], "preserve_existing_as": [],
+                                      "keep_untouched": [], "commit": "abc1234"})
+    monkeypatch.setattr(consumer, "push_adoption", lambda d: "main")
+    monkeypatch.setattr(consumer, "checkout_repository", lambda d: "o/r")
+    monkeypatch.setattr(consumer.merge_authority, "configured", lambda: None)
+
+    def boom(*a, **k):
+        raise init_project.BootstrapError("403 not accessible")
+
+    monkeypatch.setattr(consumer, "provision_github", boom)
+    args = argparse.Namespace(name=None, sync=False, owner=None, runner_profile=PROFILE,
+                              directory=repo, check=False, github=True, json=False,
+                              ruleset=False, merge_app_id=None)
+    with pytest.raises(init_project.BootstrapError, match=r"--sync --ruleset"):
+        consumer.run_adopt(args)

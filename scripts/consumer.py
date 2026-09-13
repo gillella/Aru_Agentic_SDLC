@@ -179,7 +179,54 @@ def adopt(directory: Path, runner_profile: str) -> dict[str, Any]:
     contained_git_hooks(destination)
     command([str(Path(__file__).resolve().parents[1] / "scripts" / "install_hooks.sh")],
             cwd=destination)
-    return {**plan, "adopted": True}
+    return {**plan, "adopted": True, "commit": commit_adoption(destination, plan)}
+
+
+ADOPTION_MESSAGE = """chore(governance): adopt the Aru kernel
+
+Brings the repository under the minimal issue-to-safe-merge kernel: the governed
+pull request and merge policy workflows, the consumer verifier, the touches
+helper, the review declaration, and the agent contract.
+
+From here every change needs a Ready issue, an exclusive claim, an isolated
+worktree, a pull request carrying its closing directive, an exact-head
+verification check, one approval from an account other than the author, and a
+merge performed only by the kernel's merge helper.
+"""
+
+
+def commit_adoption(destination: Path, plan: dict[str, Any]) -> str | None:
+    """Commit exactly what adoption wrote. None when there was nothing to write.
+
+    Only the adopted paths are staged, never `--all`: the repository being
+    adopted may have unrelated work in progress, and sweeping it into the
+    governance commit would be a surprising thing to do to someone's tree.
+    """
+    written = [*plan["write"], *plan["preserve_existing_as"]]
+    if not written:
+        return None
+    staged = [*written, *(f"{r}{PRE_ADOPTION_SUFFIX}" for r in plan["preserve_existing_as"])]
+    command(["git", "add", "--", *staged], cwd=destination)
+    command(["git", "commit", "-m", ADOPTION_MESSAGE], cwd=destination)
+    return command(["git", "rev-parse", "HEAD"], cwd=destination)
+
+
+def push_adoption(destination: Path) -> str:
+    """Put the adoption commit on the default branch, before anything enforces.
+
+    Ordering is the whole point. `aru-merge-policy` runs the *base branch's*
+    copy of a workflow that adoption is itself installing, so a ruleset
+    provisioned first leaves the repository unable to accept the very commit
+    that would govern it -- including a pull request that would fix it.
+
+    `--no-verify` is deliberate and specific to this one commit: adoption has
+    just installed the pre-push hook that refuses direct pushes to the default
+    branch, and this is the commit installing it. Every later change goes
+    through a pull request, where that hook is not in the way.
+    """
+    branch = command(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=destination)
+    command(["git", "push", "--no-verify", "origin", f"HEAD:{branch}"], cwd=destination)
+    return branch
 
 
 def run_sync(args: argparse.Namespace) -> int:
@@ -220,9 +267,23 @@ def run_adopt(args: argparse.Namespace) -> int:
         except KernelError as exc:
             raise BootstrapError(str(exc)) from exc
         slug = checkout_repository(destination)
-        report["github"] = provision_github(
-            slug, destination.name, destination, runner_profile=profile, merge_app=merge_app,
-        )
+        # The commit goes first. Provisioning a ruleset before the governing
+        # workflows are on the default branch seals the repository against the
+        # very commit that would govern it.
+        report["pushed_to"] = push_adoption(destination)
+        try:
+            report["github"] = provision_github(
+                slug, destination.name, destination, runner_profile=profile, merge_app=merge_app,
+            )
+        except (BootstrapError, KernelError) as exc:
+            # The adoption commit is already on the default branch, so --adopt
+            # will now refuse this repository as governed. Name the command that
+            # does finish the job rather than leaving it to be worked out.
+            raise BootstrapError(
+                f"{exc}\n\nThe adoption commit reached {slug}; only provisioning failed. "
+                f"The repository is governed but has no ruleset. Finish with:\n"
+                f"    init_project.py --sync --ruleset --directory {destination}"
+            ) from exc
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
         return 0
@@ -233,6 +294,12 @@ def run_adopt(args: argparse.Namespace) -> int:
     for relative in report["preserve_existing_as"]:
         print(f"  {verb}: {relative}  (yours kept as {relative}{PRE_ADOPTION_SUFFIX} -- merge it)")
     print(f"  left untouched: {len(report['keep_untouched'])} file(s) the repository already owns")
+    if report.get("commit"):
+        print(f"  committed: {report['commit'][:7]}")
+    elif not args.check:
+        print("  committed: nothing to commit; the framework files were already present")
+    if report.get("pushed_to"):
+        print(f"  pushed to: {report['pushed_to']}")
     if report.get("github"):
         print(f"  provisioned: {report['github']['repository']}")
     return 0
