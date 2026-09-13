@@ -62,6 +62,6 @@ jobs:
           ARU_PR_NUMBER: ${{ github.event.pull_request.number }}
           ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: >-
-          python3 hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
+          python3 .aru/hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
           --expected-head "$ARU_EXPECTED_HEAD"
 
