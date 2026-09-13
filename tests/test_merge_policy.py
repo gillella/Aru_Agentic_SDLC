@@ -97,10 +97,49 @@ def test_merge_policy_refuses_events_it_cannot_trust(source):
     assert "exit 1" in guard
 
 
+# Aru keeps its own hooks at `hooks/`; a consumer receives them at `.aru/hooks/`.
+# The live workflow and the scaffolded one therefore differ in exactly this path
+# and nowhere else. Conflating the two is what let `templates/merge-policy.yml`
+# execute a path the scaffold never wrote, which wedged gillella/AruLifts.
+CONSUMER_HOOKS = ".aru/hooks/"
+OWN_HOOKS = "hooks/"
+
+
+def _normalise_hook_paths(text: str) -> str:
+    """Rewrite consumer hook paths to this repository's own layout."""
+    return text.replace(CONSUMER_HOOKS, OWN_HOOKS)
+
+
 def test_merge_policy_has_no_profile_drift():
-    """The self-hosted rendering must still reproduce Aru's own live workflow."""
+    """The self-hosted rendering must still reproduce Aru's own live workflow.
+
+    Compared after normalising the hook directory, which is a real and intended
+    difference rather than drift. Everything else -- triggers, the trust guard,
+    permissions, runner target, timeouts -- must still match exactly.
+    """
     workflows = policy_workflows()
-    assert yaml.safe_load(workflows["self-hosted-mac"]) == yaml.safe_load(workflows["live"])
+    rendered = yaml.safe_load(_normalise_hook_paths(workflows["self-hosted-mac"]))
+    assert rendered == yaml.safe_load(workflows["live"])
+
+
+def test_the_hook_directory_is_the_only_difference():
+    """Guard the normalisation above: it must not be hiding anything else.
+
+    Without this, widening `_normalise_hook_paths` would silently let real drift
+    through the test that exists to catch drift.
+    """
+    def executable_lines(text: str) -> set[str]:
+        # Comment prose legitimately differs between the live workflow and the
+        # template; what must not differ is anything the runner executes.
+        return {line for line in text.splitlines() if not line.strip().startswith("#")}
+
+    workflows = policy_workflows()
+    differences = (executable_lines(workflows["self-hosted-mac"])
+                   ^ executable_lines(workflows["live"]))
+    assert differences, "if these are identical, the normalisation is now pointless"
+    assert all("enforce_touches.py" in line for line in differences), (
+        f"the renderings differ beyond the hook path: {sorted(differences)}"
+    )
 
 
 def test_both_required_checks_are_declared_for_consumers():
