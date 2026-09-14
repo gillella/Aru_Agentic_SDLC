@@ -3,9 +3,11 @@
 > A small, fail-closed rules-and-guidelines kernel that moves one approved
 > GitHub issue to one safely merged pull request.
 
-**Project status: v2.0.0 is the current released version
-(released 2026-09-09).** Future kernel improvements should originate in evidence
-from real governed consumer projects.
+**Project status: v2.2.1 is the current released version (released 2026-09-13).**
+The version is declared once, in `scripts/policy.toml`; this line, the newest
+released heading in `CHANGELOG.md` and the newest `v*` tag restate it, and
+`tests/test_release_truth.py` fails when they disagree. Future kernel improvements
+should originate in evidence from real governed consumer projects.
 
 Aru helps a developer or coding agent answer four questions before changing a
 software project:
@@ -93,7 +95,7 @@ install reviewers or review services, publish an initial default branch, or
 merge conflicting files into an existing repository.
 Those are deliberate operator-owned setup steps.
 
-> **Important:** v2.0.0 installs only the six skills listed below. It has no
+> **Important:** the current release installs only the six skills listed below. It has no
 > command router or in-kernel loop; persistent continuation belongs to an
 > external Driver.
 
@@ -269,7 +271,7 @@ The Kernel never waits or polls for review. `fetch_next_work.py` reports a PR
 with a green check and no such approval as `review` work, which the author
 cannot do; an operator or external Driver arranges a reviewer on another account.
 
-Merge queues and pending auto-merge requests are unsupported in the v2.0.0 release: the helper refuses them before submission. The workflow verifies
+Merge queues and pending auto-merge requests have been unsupported since v2.0.0: the helper refuses them before submission. The workflow verifies
 same-repository PR heads only. `--finalize` recovers a confirmed direct merge;
 historical queue work is refused because a PR-head check does not prove the
 combined queue revision. Keep the issue In Review until merge and close-out

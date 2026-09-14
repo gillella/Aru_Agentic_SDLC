@@ -1,8 +1,61 @@
 # Changelog
 
-## Unreleased - The contract states rules, not history
+## Unreleased
 
-- `docs/KERNEL-CONTRACT.md` drops from 334 to 210 lines. Every remaining paragraph
+- The release version is declared once, as `[release]` in `scripts/policy.toml`.
+  `policy.release()` and `policy.version()` read it; README's project-status line,
+  the newest released heading in this file and the newest `v*` tag are asserted
+  against it by `tests/test_release_truth.py`, and `docs/OPERATIONS.md` §18 records
+  the release procedure. This history was reconstructed on 2026-09-14 from git:
+  README and this file had said v2.0.0 while `v2.2.1` was the newest tag, the
+  thirteen sections now under `v2.1.0` were written as separate `## Unreleased`
+  sections and first shipped in that tag, and the work since `v2.2.1` is listed
+  here for the first time (#725).
+- `init_project.py --adopt` brings an existing, ungoverned repository under the
+  kernel: it plans, writes, commits and pushes the framework files, then provisions
+  labels, Project and ruleset, naming `--sync --ruleset` as the recovery when
+  provisioning fails after the push (#714, #716).
+- The scaffolded `merge-policy.yml` runs the hook path the scaffold actually writes
+  (#718).
+- A `touches:` rule that can match no file, such as a bare `docs/`, is refused when
+  the contract is validated instead of after the work is done (#719).
+- A review summary carrying an unresolved P0/P1 finding blocks merge, and editing
+  that summary invalidates a clearance given before the edit (#723).
+
+## v2.2.1 - Ruleset matched by its contexts - 2026-09-13
+
+- `init_project.py --sync --ruleset` finds the governed ruleset by the contexts it
+  requires rather than by its name, so a renamed ruleset is updated instead of
+  duplicated (#712). Sync consumers from this tag, not from v2.2.0.
+
+## v2.2.0 - Consumer sync - 2026-09-13
+
+- `init_project.py --sync [--check] [--ruleset]` brings an already governed
+  repository up to the current framework files and boundary while preserving the
+  consumer-owned `.aru/review.json`, `.aru/verify-project.sh` and `.gitignore`
+  (#710). Reprovisioning under this tag could create a duplicate ruleset, fixed in
+  v2.2.1.
+
+## v2.1.0 - Policy source, one-approval review, merge authority - 2026-09-12
+
+The sections below were written as separate `## Unreleased` sections and first
+shipped in this tag; they are preserved as written. Also in this tag and not
+recorded at the time: `1678326` declares the kernel gates once in
+`scripts/policy.toml` and renders `docs/ENFORCEMENT-REGISTER.md` from it;
+`e9392d6` renders the `AGENTS.md` kernel path and the bootstrap ruleset from the
+same file; `923b7d1` adds the read-only delivery report and `f5529b9` makes it read
+check runs from the head commit (#704); `4619acd` exposes the kernel commands as
+typed MCP tools and `9b9fb64` validates their arguments (#703); `0069d5b`
+attributes every merge refusal to a declared gate; `1e57c92` removes the risk-tier
+surface no gate read; `22d9b35` resolves the runner profile from declared data;
+`415ef43` makes the merge boundary unweakenable by a policy edit (#705). The
+one-approval review rule below is a breaking change that shipped in this minor
+tag without a major-version bump.
+
+### The contract states rules, not history
+
+- `docs/KERNEL-CONTRACT.md` dropped from 334 to 210 lines in this change (243 after
+  later amendments). Every remaining paragraph
   states a rule that blocks or authorizes a transition; rationale, implementation
   detail and one consumer's incident runbook moved to `docs/decisions/`.
 - New records: `0001-scope-is-judged-live` (why the promotion digest pin went),
@@ -17,7 +70,8 @@
   replaced the path-tiered, provider-routed review of v2, retiring the `review:*`,
   `reviewer*`, `review-policy:*`, `author:*`, `author-family:*` and
   `needs-reviewer` label contracts and the reviewer options of `create_pr.py`.
-  That removal is a major-version change (v3, not yet released). The v2.0.0
+  That removal is a breaking change and shipped in v2.1.0 without a major-version
+  bump; this history records that rather than promising a separate v3. The v2.0.0
   migration withdrew merge-queue support; the workflow verifies same-repository PR
   heads only and cannot prove a combined queue revision, so the helper refuses
   configured queues and pending queue or auto-merge requests before submission,
@@ -25,7 +79,7 @@
 - No rule was dropped: every load-bearing identifier in the previous contract was
   checked to survive in the contract, a decision record, or this file.
 
-## Unreleased - Reducing the CLI token
+### Reducing the CLI token
 
 - The operations guide records the scopes the kernel requires (`repo`, `project`,
   `read:org`), that `gh auth refresh` only adds scopes so reducing them means
@@ -36,7 +90,7 @@
   than the control that closes the workflow-rewrite route.
 
 
-## Unreleased - Runner isolation runbook
+### Runner isolation runbook
 
 - The operations guide now states what pull-request code can reach on a self-hosted runner,
   and gives ordered steps for moving the runners onto an unprivileged account: create it,
@@ -48,7 +102,7 @@
   does not sandbox it.
 
 
-## Unreleased - Less machinery around the review gate
+### Less machinery around the review gate
 
 - `review_authority.py` no longer carries a command-line entry point. It existed for the
   base-branch workflow step that was removed when that workflow stopped applying the
@@ -61,7 +115,7 @@
   triggers on `pull_request_target` alone.
 
 
-## Unreleased - An approval says something
+### An approval says something
 
 - Under the `human` posture an approval must carry a written body of at least twelve
   characters, and the refusal names the missing judgement rather than reporting a generic
@@ -75,7 +129,7 @@
   workflow. `merge_pr.py` is the only path that applies it.
 
 
-## Unreleased - The scope contract is judged live
+### The scope contract is judged live
 
 - Promotion no longer stamps a `ready:<digest>` scope pin, and the merge gate no longer
   refuses an issue whose body changed after promotion. Correcting a `touches:` declaration
@@ -91,7 +145,7 @@
 - Stale `ready:*` labels on issues promoted before this change are inert.
 
 
-## Unreleased - Authorized reviewers
+### Authorized reviewers
 
 - A repository declares who may approve in `.aru/review.json` on its default branch.
   `human` requires the approving account to be listed and refuses any GitHub App, `any`
@@ -113,7 +167,7 @@
   account is indistinguishable from its owner at every API, and that residual is covered
   by credential hygiene rather than by this gate.
 
-## Unreleased - Safer local cleanup
+### Safer local cleanup
 
 - `cleanup_worktrees.py` retains worktrees that git reports locked (a worker
   holds them) in both dry-run and real runs, and retains worktrees whose ignored
@@ -126,7 +180,7 @@
 - The operations guide documents verified checkpoints, worktree locks and
   host-local cleanup.
 
-## Unreleased - Agent-independent Aru
+### Agent-independent Aru
 
 - Removed the Hermes Project Driver (`integrations/hermes`), its Hermes plugin
   (`integrations/chopin`) and the Driver-only persona routing
@@ -138,7 +192,7 @@
   path no longer reference the removed integrations.
 - Installed Hermes runtimes are unaffected and are retired separately.
 
-## Unreleased - One approval from another account (v3)
+### One approval from another account (v3)
 
 - Review is one rule for every PR: an approval of the exact head from a GitHub
   account other than the author. The bootstrap ruleset requires one approval,
@@ -156,7 +210,7 @@
 - Breaking: existing consumers add the approval rule to their ruleset, and
   agents authoring under one GitHub account need a reviewer under another.
 
-## Unreleased - Scope pinning and reviewer gaps
+### Scope pinning and reviewer gaps
 
 - Drop the 6,500-line Kernel production ceiling; it was full and blocked every fix.
   The 800-line per-file cap and the Hermes Driver's own limit remain.
@@ -177,7 +231,7 @@
 - Tests fail if they reach live GitHub; one existing test had been reading the
   real repository.
 
-## Unreleased - Merge authority
+### Merge authority
 
 - Add an optional merge-authority App. With `ARU_MERGE_APP_RUNNER` and
   `ARU_MERGE_APP_ID` set, `merge_pr.py` posts `aru-merge-authorized` at the exact
@@ -192,7 +246,7 @@
   labels, and the scaffolded secret scan matches any `*API_SECRET*` assignment
   instead of naming one client's variable.
 
-## Unreleased - Manual audit corrections
+### Manual audit corrections
 
 - Revalidate linked Project card and current dependency authorization before merge.
 - Protect Kernel helper paths and executable README-like files with appropriate review tiers.

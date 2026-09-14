@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import init_project
+import policy
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -78,7 +79,11 @@ def test_version_and_layer_truth_are_explicit():
     contract = text(ROOT / "docs" / "KERNEL-CONTRACT.md")
     enforcement = text(ROOT / "docs" / "ENFORCEMENT-REGISTER.md")
 
-    assert "**Project status: v2.0.0 is the current released version" in readme
+    release = policy.release()
+    assert (
+        f"**Project status: v{release['version']} is the current released version "
+        f"(released {release['released']}).**"
+    ) in readme
     assert "## v1.0.0 - Governed, Risk-Proportional Delivery" in changelog
     assert "v2 public API" in contract
     assert "Upgrade from v0.2.8" in changelog
