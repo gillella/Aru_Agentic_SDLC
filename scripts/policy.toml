@@ -129,8 +129,8 @@ mechanism = "`.aru/verify.sh` requires executable `.aru/verify-project.sh`; gene
 id = "unresolved-findings"
 enforcers = ["fetch_pr_feedback.py", "merge_pr.py"]
 control = "unresolved findings"
-blocks = "merge"
-mechanism = "`fetch_pr_feedback.py`, `merge_pr.py`"
+blocks = "author feedback routing, merge, final revalidation and close-out"
+mechanism = "`fetch_pr_feedback.py` reads submitted P0/P1-labelled summaries and unresolved threads, including outdated ones; `fetch_next_work.py` routes feedback to the author; `merge_pr.py` refuses until resolved. Summary clearance needs explicit original-reviewer evidence on the current head; approval alone is insufficient."
 
 [[gate]]
 id = "approval-by-an-authorized-reviewer"

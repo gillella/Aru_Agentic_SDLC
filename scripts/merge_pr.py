@@ -175,7 +175,7 @@ def require_ci_review(pr: dict, number: int, head: str, *, context: str = "", fi
         refuse("exact-head-consumer-verification", "exact-current-head required GitHub checks are not successful")
     feedback = fetch_feedback(number)
     if feedback:
-        refuse("unresolved-findings", f"{len(feedback)} unresolved {context}review thread(s)")
+        refuse("unresolved-findings", f"{len(feedback)} unresolved {context}review thread(s) or blocking summary finding(s)")
     if pr.get("reviewDecision") == "CHANGES_REQUESTED":
         refuse("approval-by-another-account", f"a submitted {context}review still requests changes")
     reviews = pull_reviews(number)
@@ -194,7 +194,7 @@ def revalidate_review(pr: dict[str, Any], number: int) -> None:
         refuse("approval-by-another-account", "approval of the exact head was withdrawn before merge submission")
     feedback = fetch_feedback(number)
     if feedback:
-        refuse("unresolved-findings", f"{len(feedback)} unresolved review thread(s) before merge submission")
+        refuse("unresolved-findings", f"{len(feedback)} unresolved review thread(s) or blocking summary finding(s) before merge submission")
 
 
 def merge(number: int, expected_head: str, *, dry_run: bool = False) -> dict[str, object]:

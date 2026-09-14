@@ -74,7 +74,6 @@ def test_authored_pr_precedes_ready_and_conflicts_precede_ci(monkeypatch, state,
     monkeypatch.setattr(fetch_next_work, "authored_prs", lambda _agent: [
         {"number": 500, "mergeStateStatus": merge_state, "labels": []},
     ])
-    monkeypatch.setattr(fetch_next_work, "has_review_comments", lambda _number: bool(feedback))
     monkeypatch.setattr(fetch_next_work, "fetch_feedback", lambda _number: feedback)
     monkeypatch.setattr(fetch_next_work, "ci_verdict", lambda _number: verification)
     monkeypatch.setattr(fetch_next_work, "evaluate", lambda _number, _head: None)
@@ -99,7 +98,7 @@ def test_live_merge_state_is_fail_closed(monkeypatch):
 
 
 def test_unapproved_pr_routes_review_by_another_account(monkeypatch):
-    monkeypatch.setattr(fetch_next_work, "has_review_comments", lambda _number: False)
+    monkeypatch.setattr(fetch_next_work, "fetch_feedback", lambda _number: [])
     monkeypatch.setattr(
         fetch_next_work,
         "ci_verdict",
@@ -138,7 +137,7 @@ def test_blocked_pr_routes_review_work_through_the_real_merge_gate(monkeypatch, 
     reviews = [] if review_state is None else [
         {"id": 1, "user": {"login": "reviewer"}, "commit_id": head, "state": review_state}]
     ci = {"head": head, "state": "success", "checks": ["aru-governed-pr"]}
-    monkeypatch.setattr(fetch_next_work, "has_review_comments", lambda _n: False)
+    monkeypatch.setattr(fetch_next_work, "fetch_feedback", lambda _n: [])
     monkeypatch.setattr(fetch_next_work, "ci_verdict", lambda _n: ci)
     monkeypatch.setattr(merge_pr, "pull_request", lambda _n: dict(live))
     monkeypatch.setattr(merge_pr, "merge_queue_snapshot",
@@ -342,7 +341,7 @@ def test_cli_is_single_lane_and_read_only(monkeypatch, capsys):
 def test_uncertain_ci_returns_an_explicit_state_and_never_merges(monkeypatch, ci_state):
     head = "a" * 40
     pr = {"number": 9, "headRefOid": head, "mergeStateStatus": "CLEAN", "labels": []}
-    monkeypatch.setattr(fetch_next_work, "has_review_comments", lambda _n: False)
+    monkeypatch.setattr(fetch_next_work, "fetch_feedback", lambda _n: [])
     def ci(_n):
         if ci_state == "error":
             raise common.KernelError("CI inventory incomplete")
