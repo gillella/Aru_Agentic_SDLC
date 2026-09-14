@@ -270,3 +270,24 @@ def release(policy: dict[str, Any] | None = None) -> dict[str, str]:
 
 def version(policy: dict[str, Any] | None = None) -> str:
     return release(policy)["version"]
+
+
+GENERIC_RUNNER_GUIDANCE = (
+    "Each repository must use its declared runner profile and trust boundary. "
+    "Read its local AGENTS.md and .aru/verify.sh; global guidance does not "
+    "select or change a repository's runner profile.\n"
+)
+_SCAFFOLD_PARAGRAPH = re.compile(
+    r"This repository is scaffolded.*?whose declared profile and `runs-on:` disagree\.\s*", re.S
+)
+
+
+def genericized_agent_guidance(template: str | None = None) -> str:
+    """templates/AGENTS.md with its repository-specific runner paragraph replaced by the
+    profile-neutral sentence; refuses unless the substitution applied exactly once and
+    no `__ARU_*` placeholder survives."""
+    text = template if template is not None else (SCRIPTS.parent / "templates" / "AGENTS.md").read_text(encoding="utf-8")
+    text, count = _SCAFFOLD_PARAGRAPH.subn(GENERIC_RUNNER_GUIDANCE, text)
+    if count != 1 or "__ARU_" in text:
+        raise PolicyError("global runner guidance could not be rendered")
+    return text
