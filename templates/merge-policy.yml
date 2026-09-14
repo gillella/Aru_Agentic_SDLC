@@ -15,8 +15,9 @@ name: Aru merge policy
 # The safety rule that makes `pull_request_target` acceptable: nothing here checks out,
 # installs, or executes pull-request code. The base branch is checked out, and the write
 # boundary is recomputed from the GitHub API by the trusted copy of the enforcement
-# script. Do not add a step that reads the head ref, runs the branch's tests, or installs
-# its dependencies.
+# script. The managed-file step reads head file bytes through the contents API and hashes
+# them; it never checks them out or runs them. Do not add a step that reads the head ref,
+# runs the branch's tests, or installs its dependencies.
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -63,5 +64,14 @@ jobs:
           ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: >-
           python3 .aru/hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
+          --expected-head "$ARU_EXPECTED_HEAD"
+
+      - name: Verify Factory-managed files at the head against the base branch's manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARU_PR_NUMBER: ${{ github.event.pull_request.number }}
+          ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: >-
+          python3 .aru/hooks/check_manifest.py --pr "$ARU_PR_NUMBER"
           --expected-head "$ARU_EXPECTED_HEAD"
 

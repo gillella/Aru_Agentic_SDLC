@@ -46,3 +46,28 @@ def default_review_posture(monkeypatch):
     import review_authority
 
     monkeypatch.setattr(review_authority, "read_policy_text", lambda **_: '{"authority": "any"}')
+
+
+@pytest.fixture
+def rehash_manifest():
+    """Recompute every hash in a scaffold's `.aru/manifest.json` from what is on disk.
+
+    `.aru/verify.sh` verifies managed files first and unconditionally, so a test that
+    mutates a managed file to reach a later section would otherwise stop at the first
+    one. Rehashing models the documented residual -- an author who edits a managed file
+    and regenerates the manifest passes the head's own integrity check -- and keeps each
+    of those tests asserting the section it was written for.
+    """
+    import hashlib
+    import json
+
+    def apply(root: Path) -> None:
+        path = root / ".aru/manifest.json"
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["files"] = {
+            relative: hashlib.sha256((root / relative).read_bytes()).hexdigest()
+            for relative in document["files"]
+        }
+        path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    return apply

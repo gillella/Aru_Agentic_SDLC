@@ -10,7 +10,9 @@
 # Written for bash 3.2 so it runs unmodified on the operator-owned
 # [self-hosted, macOS, ARM64, aru-ci] runners and on GitHub-hosted runners.
 # The governed workflow declares which runner profile this repository uses; the
-# governance section below refuses any workflow that contradicts it.
+# governance section below refuses any workflow that contradicts it. The first
+# section runs before anything else and regardless of what changed: it verifies
+# every Factory-managed file against `.aru/manifest.json`.
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
@@ -18,6 +20,77 @@ cd "${repo_root}"
 
 section() { printf '\n=== %s ===\n' "$1"; }
 fail() { printf '::error::%s\n' "$1" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Always, first: Factory-managed files match the committed manifest
+# ---------------------------------------------------------------------------
+section "Managed file integrity"
+[ -f .aru/manifest.json ] \
+  || fail ".aru/manifest.json is missing; regenerate it with init_project.py --sync from the Factory checkout, never by hand"
+integrity_status=0
+python3 - <<'PY' || integrity_status=$?
+import hashlib, json, os, stat, sys
+from pathlib import Path
+
+SCHEMA = "aru.managed-files/v1"
+LIMIT = 2 * 1024 * 1024
+MALFORMED, MISMATCH = 2, 3
+
+def refuse(code, message):
+    print(message, file=sys.stderr)
+    raise SystemExit(code)
+
+def read(relative):
+    path = Path(relative)
+    if any(p.is_symlink() for p in (path, *path.parents) if str(p) not in ("", ".")):
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as handle:
+        meta = os.fstat(handle.fileno())
+        if not stat.S_ISREG(meta.st_mode) or meta.st_size > LIMIT:
+            return None
+        data = handle.read(LIMIT + 1)
+        return data if len(data) <= LIMIT else None
+
+try:
+    manifest = json.loads(Path(".aru/manifest.json").read_text(encoding="utf-8"))
+except (OSError, ValueError) as exc:
+    refuse(MALFORMED, f"manifest is unreadable or not JSON: {exc}")
+files = manifest.get("files") if isinstance(manifest, dict) else None
+if (not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA
+        or not isinstance(files, dict) or not files
+        or not isinstance(manifest.get("factory_version"), str)
+        or not isinstance(manifest.get("runner_profile"), str)):
+    refuse(MALFORMED, "manifest is malformed")
+findings = []
+for relative in sorted(files):
+    expected = files[relative]
+    if (not isinstance(relative, str) or not isinstance(expected, str) or len(expected) != 64
+            or any(c not in "0123456789abcdef" for c in expected)):
+        refuse(MALFORMED, f"manifest entry for {relative!r} is malformed")
+    if relative == ".aru/manifest.json" or relative.startswith(("/", "../")) or "/../" in relative:
+        refuse(MALFORMED, f"manifest names a path it may not: {relative!r}")
+    data = read(relative)
+    if data is None:
+        findings.append(f"{relative}: missing, unreadable, not a regular file, or oversized")
+    elif hashlib.sha256(data).hexdigest() != expected:
+        findings.append(f"{relative}: content differs from the manifest")
+for finding in findings:
+    print(finding, file=sys.stderr)
+if findings:
+    raise SystemExit(MISMATCH)
+print(f"{len(files)} managed files match .aru/manifest.json "
+      f"(factory {manifest['factory_version']}, profile {manifest['runner_profile']})")
+PY
+case "${integrity_status}" in
+  0) ;;
+  2) fail ".aru/manifest.json is malformed; regenerate it with init_project.py --sync from the Factory checkout, never by hand" ;;
+  3) fail "Factory-managed files diverge from .aru/manifest.json (listed above). Regenerate both with init_project.py --sync from the Factory checkout; a hand-edited manifest is a failing check, not a customization. This detects drift and accidental edits; it cannot stop a head that rewrites .aru/verify.sh itself, which aru-merge-policy and the Factory's merge_pr.py judge separately" ;;
+  *) fail "managed file integrity check did not complete (exit ${integrity_status})" ;;
+esac
 
 # ---------------------------------------------------------------------------
 # Scope: what actually changed on this head

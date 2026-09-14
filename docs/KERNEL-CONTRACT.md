@@ -199,6 +199,19 @@ checkout, every job rejects a cross-repository fork PR and proves Python 3.11+,
 pip and `gh` are present. Evidence that is missing, unreadable or malformed
 leaves capacity unknown and blocks admission.
 
+Every scaffolded repository carries `.aru/manifest.json`, the sha256 of each
+Factory-managed file for its runner profile, and `.aru/factory-version`, the Factory
+release those files came from; both are copies of the Factory's committed
+`templates/manifests/<profile>.json` and declared version, regenerated only by
+`init_project.py --sync`. `.aru/verify.sh` verifies every managed file against the
+manifest first and unconditionally on the exact head, and `aru-merge-policy` verifies
+the head's managed files, read through the API and never executed, against the base
+branch's manifest; a head that changes `.aru/factory-version` is judged against its own
+manifest. A hand-edited manifest is a failing check, not a customization. The residual
+boundary is unchanged: an administrator who rewrites `.aru/verify.sh` together with the
+manifest, or edits the workflow or the ruleset, is outside what a repository-owned file
+can refuse.
+
 New scaffolds require an executable `.aru/verify-project.sh` for consumer product
 checks; its generated starter fails until replaced, and the framework verifier
 runs those checks before reporting success.

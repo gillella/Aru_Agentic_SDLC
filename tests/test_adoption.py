@@ -32,7 +32,9 @@ def test_inspection_reports_custom_checks_without_running_them(tmp_path):
     (repo / "AGENTS.md").write_text("Consumer custom policy\n")
     report = check.inspect(repo, "Unum-Inc")
     assert report["status"] == "attention"
-    assert report["files"][0]["status"] == "differs-review-customizations"
+    # Looked up by path: the managed set is sorted now, so position is not stable.
+    entry = next(item for item in report["files"] if item["path"] == "AGENTS.md")
+    assert entry["status"] == "differs-review-customizations"
 
 
 def test_inspection_refuses_symlinked_verifier(tmp_path):
@@ -121,6 +123,12 @@ def ungoverned(tmp_path, *, files=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     subprocess.run(["git", "init", "-b", "main", "-q"], cwd=repo, check=True)
+    # Adoption commits, and `git commit` refuses without an identity. Every other git
+    # fixture in this suite sets one; this one inherited whatever the machine had, so
+    # these tests passed on a developer's Mac and failed on an `aru-ci` runner whose
+    # account has no ~/.gitconfig.
+    for setting, value in (("user.name", "Test"), ("user.email", "test@example.com")):
+        subprocess.run(["git", "config", setting, value], cwd=repo, check=True)
     return repo
 
 

@@ -110,16 +110,46 @@ def _normalise_hook_paths(text: str) -> str:
     return text.replace(CONSUMER_HOOKS, OWN_HOOKS)
 
 
+# Aru is the Factory, not a scaffolded consumer: it carries no `.aru/manifest.json`,
+# so the managed-file step exists only in the rendering a consumer receives. That is
+# the second intended difference, and it is compared separately rather than ignored.
+MANAGED_FILE_STEP = "check_manifest.py"
+
+
+def _without_managed_file_step(document: dict) -> dict:
+    steps = document["jobs"]["merge-policy"]["steps"]
+    document["jobs"]["merge-policy"]["steps"] = [
+        step for step in steps if MANAGED_FILE_STEP not in str(step.get("run", ""))
+    ]
+    return document
+
+
+@pytest.mark.parametrize("source", ["self-hosted-mac", "github-hosted"])
+def test_only_the_consumer_rendering_verifies_managed_files(source):
+    """A consumer's copy runs the manifest check; the Factory's own copy has nothing
+    to check, and must not execute a path it never wrote."""
+    def steps(text):
+        return yaml.safe_load(text)["jobs"]["merge-policy"]["steps"]
+
+    workflows = policy_workflows()
+    consumer = [s for s in steps(workflows[source]) if MANAGED_FILE_STEP in str(s.get("run", ""))]
+    assert len(consumer) == 1
+    assert ".aru/hooks/check_manifest.py" in consumer[0]["run"]
+    assert "--expected-head" in consumer[0]["run"]
+    assert not [s for s in steps(workflows["live"]) if MANAGED_FILE_STEP in str(s.get("run", ""))]
+
+
 def test_merge_policy_has_no_profile_drift():
     """The self-hosted rendering must still reproduce Aru's own live workflow.
 
-    Compared after normalising the hook directory, which is a real and intended
-    difference rather than drift. Everything else -- triggers, the trust guard,
-    permissions, runner target, timeouts -- must still match exactly.
+    Compared after normalising the hook directory and removing the managed-file step,
+    which are real and intended differences rather than drift; each is asserted on its
+    own above. Everything else -- triggers, the trust guard, permissions, runner
+    target, timeouts -- must still match exactly.
     """
     workflows = policy_workflows()
     rendered = yaml.safe_load(_normalise_hook_paths(workflows["self-hosted-mac"]))
-    assert rendered == yaml.safe_load(workflows["live"])
+    assert _without_managed_file_step(rendered) == yaml.safe_load(workflows["live"])
 
 
 def test_the_hook_directory_is_the_only_difference():
@@ -137,8 +167,9 @@ def test_the_hook_directory_is_the_only_difference():
     differences = (executable_lines(workflows["self-hosted-mac"])
                    ^ executable_lines(workflows["live"]))
     assert differences, "if these are identical, the normalisation is now pointless"
-    assert all("enforce_touches.py" in line for line in differences), (
-        f"the renderings differ beyond the hook path: {sorted(differences)}"
+    assert all("enforce_touches.py" in line or "manifest" in line for line in differences), (
+        f"the renderings differ beyond the hook path and the managed-file step: "
+        f"{sorted(differences)}"
     )
 
 

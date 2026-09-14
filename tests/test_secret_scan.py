@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -45,6 +47,16 @@ def scan(repo, env=None):
     consumer.parent.mkdir(exist_ok=True)
     consumer.write_text("#!/usr/bin/env bash\nexit 0\n")
     consumer.chmod(0o755)
+    # The managed-file section runs first and unconditionally, so these bare
+    # fixtures carry the smallest honest manifest: one real managed file, hashed.
+    version = repo / ".aru/factory-version"
+    version.write_bytes(b"0.0.0\n")
+    (repo / ".aru/manifest.json").write_text(json.dumps({
+        "schema": "aru.managed-files/v1",
+        "factory_version": "0.0.0",
+        "runner_profile": "self-hosted-mac",
+        "files": {".aru/factory-version": hashlib.sha256(b"0.0.0\n").hexdigest()},
+    }, indent=2, sort_keys=True) + "\n")
     return subprocess.run(
         ["bash", str(VERIFY)], cwd=repo, env=env,
         capture_output=True, text=True, check=False,

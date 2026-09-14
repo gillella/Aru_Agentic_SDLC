@@ -7,6 +7,7 @@
 | exclusive claim | Ready -> In Progress | `claim_issue.py` |
 | path budget | writes outside `touches:` | `hooks/enforce_touches.py`, `aru-governed-pr` actual-diff check |
 | path budget, unrewritable | writes outside `touches:` when the pull request edits its own workflow | `aru-merge-policy` runs the base branch copy of itself on `pull_request_target`, never reads the head, and posts its verdict as a required status on the head |
+| managed file integrity | merging a head whose Factory-managed files differ from `.aru/manifest.json` | `.aru/verify.sh` first section on the exact head; `aru-merge-policy` base-branch step `.aru/hooks/check_manifest.py` comparing head file hashes read through the API to the base branch's manifest |
 | default-branch protection | direct push to the resolved remote default branch | `hooks/pre-push` |
 | worktree isolation | first implementation edit | `create_branch.py` |
 | closure link | PR creation | `create_pr.py` |
@@ -48,3 +49,9 @@ it is declared false rather than silently removed. Stale-approval dismissal
 stays on, so a new push still voids every approval.
 A repository administrator can still edit the ruleset; that residual boundary
 remains consumer-owned.
+
+Managed-file integrity detects drift in the head and, from the base branch, refuses a
+head whose Factory-managed files diverge from the merged manifest. An upgrade head that
+changes `.aru/factory-version` is judged against its own manifest, whose authenticity
+only the Factory's `merge_pr.py` can establish (issue I3); an administrator can still
+rewrite `.aru/verify.sh` together with the manifest, or edit the workflow or ruleset.

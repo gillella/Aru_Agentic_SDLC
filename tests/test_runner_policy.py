@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -106,21 +107,38 @@ def test_github_bootstrap_requires_an_owner(monkeypatch, tmp_path, capsys):
     assert "--github requires --owner" in capsys.readouterr().err
 
 
-def _verify(tmp_path, profile, mutate=None):
-    """Scaffold one profile, optionally corrupt the workflow, then verify."""
+def _scaffold(tmp_path, profile):
     def git(*args):
         subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True)
     git("init", "-b", "main")
     git("config", "user.name", "Test")
     git("config", "user.email", "test@example.com")
     init_project.scaffold("consumer", tmp_path, runner_profile=profile)
-    workflow = tmp_path / ".github/workflows/governed-pr.yml"
     (tmp_path / ".aru/verify-project.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    return git
+
+
+def _run_verify(tmp_path):
+    return subprocess.run(["bash", ".aru/verify.sh"], cwd=tmp_path,
+                          capture_output=True, text=True, check=False)
+
+
+def _verify(tmp_path, profile, mutate=None, rehash=None):
+    """Scaffold one profile, optionally corrupt the workflow, then verify.
+
+    The managed-file integrity section runs first and unconditionally, so a mutated
+    workflow fails there unless its hash is updated. `rehash` does that, which is the
+    documented residual and keeps the governance assertions below testing governance.
+    """
+    git = _scaffold(tmp_path, profile)
+    workflow = tmp_path / ".github/workflows/governed-pr.yml"
     if mutate is not None:
         workflow.write_text(mutate(workflow.read_text(encoding="utf-8")), encoding="utf-8")
+        if rehash is not None:
+            rehash(tmp_path)
     git("add", ".")
     git("commit", "-m", "init")
-    return subprocess.run(["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False)
+    return _run_verify(tmp_path)
 
 
 @pytest.mark.parametrize("profile", [MAC, HOSTED])
@@ -149,10 +167,107 @@ def test_verification_accepts_the_workflow_of_its_declared_profile(tmp_path, pro
         (HOSTED, MARKER_HOSTED, MARKER_HOSTED + "\n" + MARKER_HOSTED, "exactly one '# aru-runner-profile:' line"),
     ],
 )
-def test_verification_refuses_a_workflow_that_contradicts_its_profile(tmp_path, profile, old, new, message):
-    result = _verify(tmp_path, profile, lambda raw: raw.replace(old, new))
+def test_verification_refuses_a_workflow_that_contradicts_its_profile(
+    tmp_path, profile, old, new, message, rehash_manifest,
+):
+    result = _verify(tmp_path, profile, lambda raw: raw.replace(old, new), rehash_manifest)
     assert result.returncode == 1
     assert message in result.stderr
+
+
+# --- managed-file integrity: the first section, and the only unconditional one ---
+
+MANIFEST = ".aru/manifest.json"
+
+
+@pytest.mark.parametrize("profile", [MAC, HOSTED])
+def test_integrity_passes_on_an_untouched_scaffold(tmp_path, profile):
+    result = _verify(tmp_path, profile)
+    assert result.returncode == 0, result.stderr
+    assert "managed files match .aru/manifest.json" in result.stdout
+    assert f"profile {profile}" in result.stdout
+
+
+def _managed_paths(tmp_path):
+    return sorted(json.loads((tmp_path / MANIFEST).read_text(encoding="utf-8"))["files"])
+
+
+@pytest.mark.parametrize("profile", [MAC, HOSTED])
+def test_integrity_refuses_each_tampered_managed_file(tmp_path, profile):
+    git = _scaffold(tmp_path, profile)
+    git("add", ".")
+    git("commit", "-m", "init")
+    managed = _managed_paths(tmp_path)
+    assert managed, "the scaffold must write a manifest that lists files"
+    for relative in managed:
+        original = (tmp_path / relative).read_bytes()
+        (tmp_path / relative).write_bytes(original + b"\n# tampered\n")
+        result = _run_verify(tmp_path)
+        (tmp_path / relative).write_bytes(original)
+        assert result.returncode == 1, relative
+        assert f"{relative}: content differs from the manifest" in result.stderr
+        assert "init_project.py --sync" in result.stderr
+        assert "cannot stop a head that rewrites .aru/verify.sh" in result.stderr
+
+
+def test_integrity_refuses_a_missing_managed_file(tmp_path):
+    git = _scaffold(tmp_path, MAC)
+    git("add", ".")
+    git("commit", "-m", "init")
+    (tmp_path / ".aru/lib/touches.py").unlink()
+    result = _run_verify(tmp_path)
+    assert result.returncode == 1
+    assert ".aru/lib/touches.py: missing, unreadable" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [("{}\n", "malformed"), ("not json\n", "malformed"), (None, "is missing")],
+)
+def test_integrity_refuses_a_malformed_or_missing_manifest(tmp_path, document, message):
+    git = _scaffold(tmp_path, MAC)
+    git("add", ".")
+    git("commit", "-m", "init")
+    if document is None:
+        (tmp_path / MANIFEST).unlink()
+    else:
+        (tmp_path / MANIFEST).write_text(document, encoding="utf-8")
+    result = _run_verify(tmp_path)
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert "init_project.py --sync" in result.stderr
+
+
+def test_integrity_runs_without_a_governance_change_in_scope(tmp_path):
+    """The point of running first: the section that catches tampering is not itself
+    gated on the pull request having touched a governance path."""
+    git = _scaffold(tmp_path, MAC)
+    (tmp_path / ".aru/lib/touches.py").write_text("# tampered\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "init")
+    git("update-ref", "refs/remotes/origin/main", "HEAD")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/app.py").write_text("value = 1\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "product change only")
+    result = _run_verify(tmp_path)
+    assert result.returncode == 1
+    assert ".aru/lib/touches.py: content differs from the manifest" in result.stderr
+
+
+def test_a_rehashed_manifest_is_the_documented_residual(tmp_path, rehash_manifest):
+    """Stated in the contract, the register and the failure message: this section
+    detects drift. It cannot stop an author who edits a managed file and regenerates
+    the manifest in the same head; `aru-merge-policy` judges that from the base branch.
+    """
+    git = _scaffold(tmp_path, MAC)
+    (tmp_path / ".aru/lib/touches.py").write_text("# tampered\n", encoding="utf-8")
+    rehash_manifest(tmp_path)
+    git("add", ".")
+    git("commit", "-m", "init")
+    result = _run_verify(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "managed files match .aru/manifest.json" in result.stdout
 
 
 # --- account assignments are data, not a source patch (#698) ----------------
