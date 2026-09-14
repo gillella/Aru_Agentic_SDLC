@@ -116,6 +116,22 @@ flowchart TD
 
 ### 1. Install the canonical agent skills once
 
+Choose the install path for your client:
+
+- **Claude Code**: Add the catalog and install the plugin:
+  ```bash
+  /plugin marketplace add gillella/Aru_Agentic_SDLC
+  /plugin install aru-codefactory
+  ```
+- **Copilot CLI**: Add the marketplace catalog:
+  ```bash
+  copilot plugin marketplace add gillella/Aru_Agentic_SDLC
+  ```
+- **Codex**: Install via the plugin marketplace command (`/plugin marketplace add gillella/Aru_Agentic_SDLC`) or run the local installer below.
+- **Cursor**: Use the local installer below until its marketplace accepts a private repository.
+
+#### Local installer (Codex, Cursor, and non-plugin environments)
+
 From this repository:
 
 ```bash
@@ -137,10 +153,12 @@ The installer exposes exactly six skills to supported local coding agents:
 - `remediate-ci-failure`
 - `address-pr-feedback`
 
-It also maintains the delimited Aru block in `~/.codex/AGENTS.md`. Existing
-non-Aru instructions are preserved. A recognized legacy all-Aru file is backed
-up before replacement so stale skill and command routes do not survive an
-upgrade.
+It also maintains the delimited Aru block in `~/.codex/AGENTS.md`. When the
+`aru-codefactory` plugin is installed in Claude Code, the installer skips
+`~/.claude/skills` and `~/.claude/CLAUDE.md` to avoid duplicating skills or
+guidance. Existing non-Aru instructions are preserved. A recognized legacy
+all-Aru file is backed up before replacement so stale skill and command routes
+do not survive an upgrade.
 
 ### 2. Bootstrap a new local project
 

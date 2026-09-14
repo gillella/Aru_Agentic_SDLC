@@ -231,6 +231,14 @@ and needs only Checks write permission. It does not stop whoever holds the App's
 key, or an administrator editing the ruleset; that residual boundary is
 consumer-owned. A profile is a verification decision, never a deployment one.
 
+## Distribution
+
+The plugin package (root manifest, Claude Code adapter, subagent personas,
+advisory hooks, and the installed copy of `scripts/`) is a distribution artifact
+of the knowledge layer, not a Kernel component and not an authorization
+mechanism. It adds no merge gate, GitHub Actions never loads it, and authority
+resolves independently of it.
+
 ## Supported surface and non-goals
 
 Supported lifecycle commands are `init_project.py`, `triage_backlog.py`,

@@ -26,6 +26,13 @@
   is unauthenticated until the Factory verifies it, and an administrator can still
   rewrite `.aru/verify.sh` with the manifest or edit the workflow or ruleset (#727).
 
+- `aru-codefactory` plugin package conforming to Agent Plugins 1.0 (`plugin.json`)
+  with a Claude Code adapter (`.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`),
+  three subagent personas (`aru-implementer`, `aru-reviewer`, `aru-triager`),
+  and advisory `SessionStart` and `PreToolUse` hooks under `plugin/` that never block.
+  `install_agent_integration.sh` detects the plugin and skips redundant Claude Code
+  symlinks and guidance splices, and skill files standardize on `python3 "$ARU_SDLC_HOME/scripts/<cmd>.py"`
+  (#729).
 - The release version is declared once, as `[release]` in `scripts/policy.toml`.
   `policy.release()` and `policy.version()` read it; README's project-status line,
   the newest released heading in this file and the newest `v*` tag are asserted
