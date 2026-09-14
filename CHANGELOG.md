@@ -1,6 +1,30 @@
 # Changelog
 
-## Unreleased
+## v2.3.0 - Managed-file manifest - 2026-09-14
+
+- Every scaffolded repository now carries `.aru/manifest.json`, the sha256 of each
+  Factory-managed file for its runner profile, and `.aru/factory-version`, the release
+  those files came from. Both are copies of the Factory's committed
+  `templates/manifests/<profile>.json` and declared version; `init_project.py` writes
+  them on scaffold and rewrites them on `--sync` (#727).
+- `.aru/verify.sh` verifies every managed file against that manifest in its first
+  section, unconditionally: the check no longer depends on the pull request having
+  touched a governance path (#727).
+- `aru-merge-policy` runs `.aru/hooks/check_manifest.py` from the base branch. It reads
+  each managed file at the exact head through the GitHub contents API, hashing but never
+  executing it, and compares it to the base branch's manifest. A head that changes both
+  the manifest and `.aru/factory-version` is reported as an upgrade and judged against
+  its own manifest; changing one without the other is refused (#727).
+- `templates/manifests/self-hosted-mac.json` and `github-hosted.json` are committed and
+  rendered, with tests that fail on drift, name the regeneration command, and require a
+  `[release]` bump whenever a manifest's hashes change since the newest tag (#727).
+- `scripts/manifest.py` is the one library that defines the managed set;
+  `integrations/adoption/check.py` keeps no file list of its own any more, so its report
+  no longer omitted `merge-policy.yml`, and gained a `manifest` field (#727).
+- New gate `managed-file-integrity` in `scripts/policy.toml` and the register, and the
+  rule in `docs/KERNEL-CONTRACT.md`. The stated residuals: an upgrade head's new manifest
+  is unauthenticated until the Factory verifies it, and an administrator can still
+  rewrite `.aru/verify.sh` with the manifest or edit the workflow or ruleset (#727).
 
 - The release version is declared once, as `[release]` in `scripts/policy.toml`.
   `policy.release()` and `policy.version()` read it; README's project-status line,

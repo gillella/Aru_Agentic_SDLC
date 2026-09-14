@@ -9,6 +9,7 @@ import re
 import tempfile
 from pathlib import Path
 
+import manifest
 import merge_authority
 import policy
 from common import PROJECT_AUTH, REPOSITORY_AUTH, KernelError, run
@@ -251,7 +252,8 @@ CONSUMER_OWNED = (".aru/review.json", ".aru/verify-project.sh", ".gitignore")
 
 # Written with the executable bit; everything else is plain.
 EXECUTABLE = (".aru/verify.sh", ".aru/verify-project.sh",
-              ".aru/hooks/pre-push", ".aru/hooks/enforce_touches.py")
+              ".aru/hooks/pre-push", ".aru/hooks/enforce_touches.py",
+              ".aru/hooks/check_manifest.py")
 
 # Both must exist before a directory is treated as governed, so a sync refuses
 # an unrelated repository instead of half-converting it.
@@ -266,13 +268,21 @@ GOVERNED_CONTEXT = "aru-governed-pr"
 # replaces it. Adoption never discards work: the operator merges and deletes.
 
 
-def framework_files(runner_profile: str, reviewers: list[str] | None = None) -> dict[str, str]:
+def framework_files(
+    runner_profile: str, reviewers: list[str] | None = None, *, canonical: bool = True,
+) -> dict[str, str]:
     """Every file bootstrap writes, as repository-relative path -> content.
 
     Scaffold and sync both render from here on purpose. The moment one of them
     renders a file the other does not, a consumer starts running a gate the
     framework no longer ships -- which is the drift this function exists to make
     impossible.
+
+    `.aru/manifest.json` is COPIED from the Factory's committed
+    `templates/manifests/<profile>.json`, never computed here, so a consumer's
+    manifest is byte-identical to the one a test pins against these same files.
+    `canonical=False` omits it, which is how the renderer hashes the other files
+    without reading the manifest it is about to produce.
     """
     profile_spec(runner_profile)
     framework = Path(__file__).resolve().parents[1]
@@ -294,8 +304,12 @@ def framework_files(runner_profile: str, reviewers: list[str] | None = None) -> 
         ".aru/lib/touches.py": (framework / "scripts" / "touches.py").read_text(encoding="utf-8"),
         ".gitignore": "__pycache__/\n*.py[cod]\n.venv/\n.env\n.worktrees/\n",
     }
-    for hook in ("pre-push", "enforce_touches.py"):
+    for hook in ("pre-push", "enforce_touches.py", "check_manifest.py"):
         files[f".aru/hooks/{hook}"] = (framework / "hooks" / hook).read_text(encoding="utf-8")
+    files[manifest.VERSION_PATH] = policy.version() + "\n"
+    if canonical:
+        files[manifest.MANIFEST_PATH] = manifest.canonical_path(runner_profile).read_text(
+            encoding="utf-8")
     return files
 
 

@@ -1,0 +1,18 @@
+{
+  "factory_version": "2.3.0",
+  "files": {
+    ".aru/factory-version": "a42caf4a54bbbe27aa45b6efbc6356c5e299b19763e728b6cdb7201b02ebbe36",
+    ".aru/hooks/check_manifest.py": "eacd3b3f03b4a51ed48071b8f6b49aab2fc432c6be788f5c927efad2bff98252",
+    ".aru/hooks/enforce_touches.py": "24be4daabf1945ffd6a1afe164404dfcf170c7540d34f8b003cacda9dad95156",
+    ".aru/hooks/pre-push": "fcd52fb9e5d275fc066ca4ce59a7e2092f046566eb550b95c40fc6f49db78efb",
+    ".aru/lib/touches.py": "dae88eccfc8b1e7de9d7500234c6f0b8074bfe6374a8abd9c9dd23336658a02c",
+    ".aru/verify.sh": "b780a75f9390489d0fe1e6af056a7ed42e5830997a4c1895c314d24d1fc9f4bf",
+    ".github/ISSUE_TEMPLATE/governed-task.yml": "505f4ad8cb620cce2563a91224f2b48d6ac101d6d9c9ffad7b51d1cd975b4d7d",
+    ".github/PULL_REQUEST_TEMPLATE.md": "5c19b240fa53146e55174c9a84e455f641983ba40e01f769df4cf8d392ec6fd5",
+    ".github/workflows/governed-pr.yml": "dfb8ef2a5aed11032a66f047a322004f21fbce551d0f8461a14d9d16b8368183",
+    ".github/workflows/merge-policy.yml": "5e64bd2ad560611621da90d8eaa2a9ad34daaa1135e6a4c7fd20ff3e725daafc",
+    "AGENTS.md": "88f034b04af00f72b05ee0a5c859320be77abf9d16bd2e1b7539403fe436209b"
+  },
+  "runner_profile": "self-hosted-mac",
+  "schema": "aru.managed-files/v1"
+}

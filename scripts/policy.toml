@@ -10,8 +10,8 @@
 # through the release procedure in docs/OPERATIONS.md, never to describe work
 # that has not been tagged.
 [release]
-version = "2.2.1"
-released = "2026-09-13"
+version = "2.3.0"
+released = "2026-09-14"
 
 [register]
 title = "Enforcement Register"
@@ -41,6 +41,12 @@ it is declared false rather than silently removed. Stale-approval dismissal
 stays on, so a new push still voids every approval.
 A repository administrator can still edit the ruleset; that residual boundary
 remains consumer-owned.""",
+"""
+Managed-file integrity detects drift in the head and, from the base branch, refuses a
+head whose Factory-managed files diverge from the merged manifest. An upgrade head that
+changes `.aru/factory-version` is judged against its own manifest, whose authenticity
+only the Factory's `merge_pr.py` can establish (issue I3); an administrator can still
+rewrite `.aru/verify.sh` together with the manifest, or edit the workflow or ruleset.""",
 ]
 
 [[gate]]
@@ -77,6 +83,13 @@ enforcers = ["aru-merge-policy"]
 control = "path budget, unrewritable"
 blocks = "writes outside `touches:` when the pull request edits its own workflow"
 mechanism = "`aru-merge-policy` runs the base branch copy of itself on `pull_request_target`, never reads the head, and posts its verdict as a required status on the head"
+
+[[gate]]
+id = "managed-file-integrity"
+enforcers = ["aru-governed-pr", "aru-merge-policy"]
+control = "managed file integrity"
+blocks = "merging a head whose Factory-managed files differ from `.aru/manifest.json`"
+mechanism = "`.aru/verify.sh` first section on the exact head; `aru-merge-policy` base-branch step `.aru/hooks/check_manifest.py` comparing head file hashes read through the API to the base branch's manifest"
 
 [[gate]]
 id = "default-branch-protection"

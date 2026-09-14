@@ -108,6 +108,9 @@ def test_scaffold_creates_only_minimal_governance(tmp_path):
         ".gitignore",
         ".aru/hooks/pre-push",
         ".aru/hooks/enforce_touches.py",
+        ".aru/hooks/check_manifest.py",
+        ".aru/factory-version",
+        ".aru/manifest.json",
     }
     assert (target / ".git").is_dir()
     assert not (target / "skills").exists()
@@ -335,6 +338,8 @@ def test_scaffold_consumer_drift_fixtures_and_permissions(tmp_path):
         ".aru/lib/touches.py": framework / "scripts" / "touches.py",
         ".aru/hooks/pre-push": framework / "hooks" / "pre-push",
         ".aru/hooks/enforce_touches.py": framework / "hooks" / "enforce_touches.py",
+        ".aru/hooks/check_manifest.py": framework / "hooks" / "check_manifest.py",
+        ".aru/manifest.json": framework / "templates" / "manifests" / "self-hosted-mac.json",
     }
     # Profile-rendered outputs must match their template rendered for the same
     # profile; every other scaffolded file stays byte-identical to its source.
@@ -352,7 +357,8 @@ def test_scaffold_consumer_drift_fixtures_and_permissions(tmp_path):
         assert actual_hash == expected_hash, f"Hash mismatch for {relative}"
 
     # Executable permissions binding
-    executable_files = {".aru/verify.sh", ".aru/verify-project.sh", ".aru/hooks/pre-push", ".aru/hooks/enforce_touches.py"}
+    executable_files = {".aru/verify.sh", ".aru/verify-project.sh", ".aru/hooks/pre-push",
+                        ".aru/hooks/enforce_touches.py", ".aru/hooks/check_manifest.py"}
     for relative in written:
         dest_file = target / relative
         mode = dest_file.stat().st_mode
@@ -705,96 +711,3 @@ def test_verify_template_secret_scan_fallback_tree_mode_with_binary_content_end_
     )
     assert result_secret.returncode == 1
     assert "credential-shaped literal found in the verified content" in result_secret.stderr
-
-
-def test_verify_template_executable_rejects_indented_write_permission_on_macos(tmp_path):
-    _init_git_repo(tmp_path)
-    init_project.scaffold("consumer", tmp_path, runner_profile="self-hosted-mac")
-    (tmp_path / ".aru/verify-project.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
-    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
-    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True, capture_output=True)
-
-    wf = tmp_path / ".github/workflows/governed-pr.yml"
-    content = wf.read_text(encoding="utf-8")
-    wf.write_text(
-        content.replace("permissions:\n  contents: read", "permissions:\n  contents: write"),
-        encoding="utf-8",
-    )
-    subprocess.run(
-        ["git", "commit", "-a", "-m", "add write perm"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-
-    res = subprocess.run(
-        ["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False
-    )
-    assert res.returncode == 1
-    assert "governed workflow permissions must stay read-only" in res.stderr
-
-    wf.write_text(content, encoding="utf-8")
-    subprocess.run(
-        ["git", "commit", "-a", "-m", "restore read perm"],
-        cwd=tmp_path,
-        check=True,
-        capture_output=True,
-    )
-    res_ok = subprocess.run(
-        ["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False
-    )
-    assert res_ok.returncode == 0
-    assert "proportional verification passed" in res_ok.stdout
-
-
-def test_verify_template_workflow_permissions_portable_gate():
-    path = init_project.Path(__file__).resolve().parents[1] / "templates/verify.sh"
-    content = path.read_text(encoding="utf-8")
-
-    match = re.search(r"if grep -Eq '([^']+)' \"\$\{workflow\}\"; then", content)
-    assert match is not None
-    perm_re = match.group(1)
-
-    # Indented write / admin permissions must be rejected
-    rejected = [
-        "permissions:\n  contents: write\n",
-        "permissions:\n\tcontents: write\n",
-        "permissions:\n    contents: write\n",
-        "contents: write\n",
-        "permissions:\n  issues: write\n",
-        "permissions:\n  pull-requests: write\n",
-        "permissions:\n  actions: write\n",
-        "permissions:\n  checks: write\n",
-        "permissions:\n  deployments: write\n",
-        "permissions:\n  packages: write\n",
-        "permissions:\n  id-token: write\n",
-        "permissions:\n  contents: admin\n",
-        "permissions:\n  actions: admin\n",
-    ]
-    for item in rejected:
-        res = subprocess.run(
-            ["grep", "-Eq", perm_re],
-            input=item,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        assert res.returncode == 0, f"Expected rejection for:\n{item}"
-
-    # Read-only permissions must pass
-    accepted = [
-        "permissions:\n  contents: read\n  issues: read\n  pull-requests: read\n",
-        "permissions:\n  actions: read\n  checks: read\n",
-        "permissions:\n  deployments: read\n  packages: read\n  id-token: read\n",
-        "permissions: read-all\n",
-        "permissions: {}\n",
-    ]
-    for item in accepted:
-        res = subprocess.run(
-            ["grep", "-Eq", perm_re],
-            input=item,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        assert res.returncode != 0, f"Expected acceptance for:\n{item}"

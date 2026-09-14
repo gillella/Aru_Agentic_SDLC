@@ -18,8 +18,10 @@ pilot for that evidence.
 
 The JSON report includes canonical and consumer revisions, whether canonical
 source is dirty, hashes and comparison status for managed files, the assigned
-runner profile, and whether `.aru/verify-project.sh` still contains the generated
-failing starter. Configured means inspected, not executed or proven sufficient.
+runner profile, a `manifest` field reporting whether the consumer's
+`.aru/manifest.json` is `current`, `stale`, `malformed` or `missing` against the
+Factory's committed manifest for that profile, and whether
+`.aru/verify-project.sh` still contains the generated failing starter. Configured means inspected, not executed or proven sufficient.
 Differences may be intentional stricter consumer policy; reconcile them manually.
 Missing/unreadable/symlinked paths, special files, and files above 2 MiB require inspection. No source content or
 credentials are printed. Exit 0 means local files match and a configured executable

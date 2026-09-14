@@ -32,7 +32,9 @@ def test_inspection_reports_custom_checks_without_running_them(tmp_path):
     (repo / "AGENTS.md").write_text("Consumer custom policy\n")
     report = check.inspect(repo, "Unum-Inc")
     assert report["status"] == "attention"
-    assert report["files"][0]["status"] == "differs-review-customizations"
+    # Looked up by path: the managed set is sorted now, so position is not stable.
+    entry = next(item for item in report["files"] if item["path"] == "AGENTS.md")
+    assert entry["status"] == "differs-review-customizations"
 
 
 def test_inspection_refuses_symlinked_verifier(tmp_path):

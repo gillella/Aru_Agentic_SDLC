@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,6 +14,7 @@ from urllib.parse import quote
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import init_project  # noqa: E402
+import manifest  # noqa: E402
 
 
 def command(argv: list[str], cwd: Path) -> str | None:
@@ -45,24 +45,12 @@ def read_file(repo: Path, relative: str) -> bytes | None:
 
 
 def expected_files(profile: str) -> dict[str, bytes]:
-    templates = {
-        "AGENTS.md": "AGENTS.md",
-        ".github/ISSUE_TEMPLATE/governed-task.yml": "issue.yml",
-        ".github/PULL_REQUEST_TEMPLATE.md": "pull_request.md",
-        ".github/workflows/governed-pr.yml": "governed-pr.yml",
-        ".aru/verify.sh": "verify.sh",
-    }
-    result = {}
-    for target, name in templates.items():
-        content = (ROOT / "templates" / name).read_text()
-        result[target] = init_project.render_profile(content, profile).encode()
-    for target, source in {
-        ".aru/lib/touches.py": "scripts/touches.py",
-        ".aru/hooks/pre-push": "hooks/pre-push",
-        ".aru/hooks/enforce_touches.py": "hooks/enforce_touches.py",
-    }.items():
-        result[target] = (ROOT / source).read_bytes()
-    return result
+    """The Factory-managed set, from the one library that defines it.
+
+    This tool used to keep its own list, which omitted `merge-policy.yml` and
+    silently reported a consumer as matching while a governance workflow drifted.
+    """
+    return manifest.managed_files(profile)
 
 
 def compare(repo: Path, profile: str) -> list[dict]:
@@ -72,8 +60,8 @@ def compare(repo: Path, profile: str) -> list[dict]:
         status = "missing-or-unreadable" if actual is None else (
             "matches" if actual == expected else "differs-review-customizations")
         result.append({"path": relative, "status": status,
-                       "expected_sha256": hashlib.sha256(expected).hexdigest(),
-                       "actual_sha256": hashlib.sha256(actual).hexdigest() if actual else None})
+                       "expected_sha256": manifest.digest(expected),
+                       "actual_sha256": manifest.digest(actual) if actual else None})
     return result
 
 
@@ -132,6 +120,27 @@ def approval_rule(repo: Path, name: str, branch: object) -> str:
     return "not-enforced"
 
 
+def manifest_status(repo: Path, profile: str) -> dict:
+    """Whether the consumer's `.aru/manifest.json` is the Factory's current one.
+
+    `stale` is the ordinary state of a consumer that has not been synced since the
+    last release; `malformed` means the file cannot be trusted at all, which the
+    consumer's own `.aru/verify.sh` also refuses.
+    """
+    relative = manifest.MANIFEST_PATH
+    raw = read_file(repo, relative)
+    if raw is None:
+        return {"path": relative, "status": "missing", "factory_version": None}
+    try:
+        document = manifest.parse(raw.decode("utf-8"))
+    except (UnicodeDecodeError, manifest.ManifestError) as exc:
+        return {"path": relative, "status": "malformed", "reason": str(exc),
+                "factory_version": None}
+    current = raw.decode("utf-8") == manifest.render(manifest.rendered(profile))
+    return {"path": relative, "status": "current" if current else "stale",
+            "factory_version": document["factory_version"]}
+
+
 def inspect(repo: Path, owner: str, online: bool = False) -> dict:
     repo = repo.expanduser().resolve(strict=True)
     git_root = command(["git", "-c", "core.fsmonitor=false", "rev-parse", "--show-toplevel"], repo)
@@ -140,8 +149,10 @@ def inspect(repo: Path, owner: str, online: bool = False) -> dict:
     profile = init_project.resolve_runner_profile(owner, None)
     files = compare(repo, profile)
     checks = verification(repo)
+    consumer_manifest = manifest_status(repo, profile)
     attention = any(item["status"] != "matches" for item in files)
     attention |= checks["status"] != "configured-not-executed"
+    attention |= consumer_manifest["status"] != "current"
     canonical_status = command(["git", "-c", "core.fsmonitor=false", "status",
                                 "--porcelain", "--untracked-files=all"], ROOT)
     return {"schema": "aru.consumer-inspection/v1", "read_only": True,
@@ -150,6 +161,7 @@ def inspect(repo: Path, owner: str, online: bool = False) -> dict:
             "canonical_dirty": None if canonical_status is None else bool(canonical_status),
             "consumer_revision": command(["git", "rev-parse", "HEAD"], repo),
             "runner_profile": profile, "files": files, "verification": checks,
+            "manifest": consumer_manifest,
             "github": github_readiness(repo, owner) if online else {"status": "not-requested"},
             "adoption_proven": False,
             "next_action": "Review differences in a staging scaffold; preserve consumer policy and checks."}
