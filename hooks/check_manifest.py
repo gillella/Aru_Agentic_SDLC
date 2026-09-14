@@ -6,8 +6,9 @@ This runs in `aru-merge-policy`, which checks out the BASE branch and never the 
 Every managed file is read at the exact head through the GitHub contents API and
 hashed here; nothing from the pull request is checked out, installed or executed.
 
-What it proves: at that head, no Factory-managed file differs from `.aru/manifest.json`
-on the base branch. What it does not prove: the authenticity of an upgrade head's new
+What it proves: at that head, no Factory-managed file, and no managed block (the
+governance markers of `AGENTS.md` and what lies between them), differs from
+`.aru/manifest.json` on the base branch. What it does not prove: the authenticity of an upgrade head's new
 manifest -- a head that bumps `.aru/factory-version` is judged against its own manifest,
 which only the Factory's `merge_pr.py` can authenticate -- and nothing about a
 repository administrator rewriting this workflow or the ruleset.
@@ -96,9 +97,41 @@ def validate(text: str, origin: str) -> dict:
     for path, value in files.items():
         if not isinstance(path, str) or not isinstance(value, str) or not _HEX64.match(value):
             raise Refusal(f"{origin} manifest entry for {path!r} is malformed")
-        if path in EXCLUDED or path.startswith(("/", "../")) or "/../" in path or "\\" in path:
-            raise Refusal(f"{origin} manifest names a path it may not: {path!r}")
+        forbid(path, origin)
+    validate_blocks(manifest.get("blocks", {}), files, origin)
     return manifest
+
+
+def validate_blocks(blocks, files: dict, origin: str) -> None:
+    if not isinstance(blocks, dict):
+        raise Refusal(f"{origin} manifest blocks is not an object")
+    for path, entry in blocks.items():
+        if (not isinstance(path, str) or not isinstance(entry, dict)
+                or set(entry) != {"begin", "end", "sha256"}
+                or not all(isinstance(entry[k], str) and entry[k].strip() for k in ("begin", "end"))
+                or not isinstance(entry["sha256"], str) or not _HEX64.match(entry["sha256"])):
+            raise Refusal(f"{origin} manifest block entry for {path!r} is malformed")
+        if entry["begin"] == entry["end"]:
+            raise Refusal(f"{origin} manifest block for {path!r} has identical markers")
+        forbid(path, origin)
+        if path in files:
+            raise Refusal(f"{origin} manifest lists {path!r} as both a file and a block")
+
+
+def forbid(path: str, origin: str) -> None:
+    if path in EXCLUDED or path.startswith(("/", "../")) or "/../" in path or "\\" in path:
+        raise Refusal(f"{origin} manifest names a path it may not: {path!r}")
+
+
+def extract_block(text: str, begin: str, end: str) -> str | None:
+    """The same rules as scripts/manifest.py::extract_block: one begin line, one end
+    line, begin first; both lines included; one trailing newline."""
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if line == begin]
+    ends = [i for i, line in enumerate(lines) if line == end]
+    if len(starts) != 1 or len(ends) != 1 or ends[0] < starts[0]:
+        return None
+    return "\n".join(lines[starts[0]:ends[0] + 1]) + "\n"
 
 
 def fetch(slug: str, path: str, head: str) -> bytes:
@@ -181,6 +214,14 @@ def check(number: int, expected_head: str) -> str:
     for relative, expected in sorted(manifest["files"].items()):
         if hashlib.sha256(fetch(slug, relative, head)).hexdigest() != expected:
             findings.append(f"{relative}: content at the head differs from the manifest")
+    blocks = manifest.get("blocks", {})
+    for relative, entry in sorted(blocks.items()):
+        text = fetch(slug, relative, head).decode("utf-8", "replace")
+        block = extract_block(text, entry["begin"], entry["end"])
+        if block is None:
+            findings.append(f"{relative}: managed block markers are missing or duplicated at the head")
+        elif hashlib.sha256(block.encode("utf-8")).hexdigest() != entry["sha256"]:
+            findings.append(f"{relative}: managed block at the head differs from the manifest")
     if findings:
         raise Refusal(
             "Factory-managed files at the head diverge from the "
@@ -190,7 +231,8 @@ def check(number: int, expected_head: str) -> str:
     if str(refreshed["headRefOid"]).lower() != head.lower():
         raise Refusal("pull request head changed during verification")
     return (
-        f"{len(manifest['files'])} managed files at {head[:7]} match the {origin} manifest "
+        f"{len(manifest['files'])} managed files and {len(blocks)} managed blocks at "
+        f"{head[:7]} match the {origin} manifest "
         f"(factory {manifest['factory_version']}, profile {manifest['runner_profile']})"
     )
 

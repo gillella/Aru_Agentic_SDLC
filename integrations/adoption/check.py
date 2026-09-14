@@ -57,6 +57,13 @@ def compare(repo: Path, profile: str) -> list[dict]:
     result = []
     for relative, expected in expected_files(profile).items():
         actual = read_file(repo, relative)
+        if actual is not None and relative in manifest.BLOCKS:
+            # Only the marked block is Factory-managed; compare that, not the file.
+            block = manifest.extract_block(
+                actual.decode("utf-8", "replace"), *manifest.BLOCKS[relative])
+            # A readable file without exactly one marked block is a customization to
+            # review, not a missing file.
+            actual = b"" if block is None else block.encode("utf-8")
         status = "missing-or-unreadable" if actual is None else (
             "matches" if actual == expected else "differs-review-customizations")
         result.append({"path": relative, "status": status,

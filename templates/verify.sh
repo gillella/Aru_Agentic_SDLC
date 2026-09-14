@@ -65,24 +65,61 @@ if (not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA
         or not isinstance(manifest.get("factory_version"), str)
         or not isinstance(manifest.get("runner_profile"), str)):
     refuse(MALFORMED, "manifest is malformed")
+def is_hash(value):
+    return (isinstance(value, str) and len(value) == 64
+            and all(c in "0123456789abcdef" for c in value))
+
+def forbid(relative):
+    if (not isinstance(relative, str) or relative == ".aru/manifest.json"
+            or relative.startswith(("/", "../")) or "/../" in relative):
+        refuse(MALFORMED, f"manifest names a path it may not: {relative!r}")
+
+def extract_block(text, begin, end):
+    # Same rules as scripts/manifest.py::extract_block: exactly one begin line and
+    # one end line, begin first; both lines included; one trailing newline.
+    lines = text.splitlines()
+    starts = [i for i, line in enumerate(lines) if line == begin]
+    ends = [i for i, line in enumerate(lines) if line == end]
+    if len(starts) != 1 or len(ends) != 1 or ends[0] < starts[0]:
+        return None
+    return "\n".join(lines[starts[0]:ends[0] + 1]) + "\n"
+
 findings = []
 for relative in sorted(files):
     expected = files[relative]
-    if (not isinstance(relative, str) or not isinstance(expected, str) or len(expected) != 64
-            or any(c not in "0123456789abcdef" for c in expected)):
+    if not isinstance(relative, str) or not is_hash(expected):
         refuse(MALFORMED, f"manifest entry for {relative!r} is malformed")
-    if relative == ".aru/manifest.json" or relative.startswith(("/", "../")) or "/../" in relative:
-        refuse(MALFORMED, f"manifest names a path it may not: {relative!r}")
+    forbid(relative)
     data = read(relative)
     if data is None:
         findings.append(f"{relative}: missing, unreadable, not a regular file, or oversized")
     elif hashlib.sha256(data).hexdigest() != expected:
         findings.append(f"{relative}: content differs from the manifest")
+blocks = manifest.get("blocks", {})
+if not isinstance(blocks, dict):
+    refuse(MALFORMED, "manifest blocks is malformed")
+for relative in sorted(blocks):
+    entry = blocks[relative]
+    if (not isinstance(relative, str) or not isinstance(entry, dict)
+            or set(entry) != {"begin", "end", "sha256"} or not is_hash(entry["sha256"])
+            or not all(isinstance(entry[k], str) and entry[k].strip() for k in ("begin", "end"))
+            or entry["begin"] == entry["end"] or relative in files):
+        refuse(MALFORMED, f"manifest block entry for {relative!r} is malformed")
+    forbid(relative)
+    data = read(relative)
+    if data is None:
+        findings.append(f"{relative}: missing, unreadable, not a regular file, or oversized")
+        continue
+    block = extract_block(data.decode("utf-8", "replace"), entry["begin"], entry["end"])
+    if block is None:
+        findings.append(f"{relative}: managed block markers are missing or duplicated")
+    elif hashlib.sha256(block.encode("utf-8")).hexdigest() != entry["sha256"]:
+        findings.append(f"{relative}: managed block differs from the manifest")
 for finding in findings:
     print(finding, file=sys.stderr)
 if findings:
     raise SystemExit(MISMATCH)
-print(f"{len(files)} managed files match .aru/manifest.json "
+print(f"{len(files)} managed files and {len(blocks)} managed blocks match .aru/manifest.json "
       f"(factory {manifest['factory_version']}, profile {manifest['runner_profile']})")
 PY
 case "${integrity_status}" in
