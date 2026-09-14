@@ -4,6 +4,15 @@
 # register: edit here, then regenerate. tests/test_policy.py fails when the two
 # disagree and names the regeneration command.
 
+# The one declared release. README's project-status line, the newest released
+# heading in CHANGELOG.md and the newest `v*` tag restate it, and
+# tests/test_release_truth.py fails when any of them disagrees. Change it only
+# through the release procedure in docs/OPERATIONS.md, never to describe work
+# that has not been tagged.
+[release]
+version = "2.2.1"
+released = "2026-09-13"
+
 [register]
 title = "Enforcement Register"
 columns = ["Control", "Blocks or authorizes", "Mechanism"]

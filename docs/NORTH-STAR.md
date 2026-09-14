@@ -103,7 +103,10 @@ origin/main on 2026-09-12:
   branch's copy so a pull request cannot rewrite its own gate.
 - **Closed** — docs versus external-first reviewer: that reviewer model no
   longer exists. One approval from another account, enforced by the ruleset.
-- **Closed** — stale version line: README states v2.0.0 and tag `v2.0.0` exists.
+- **Closed (2026-09-14)** — stale version line. It had reopened: README still said
+  v2.0.0 while `v2.2.1` was the newest tag. The version is now declared once in
+  `scripts/policy.toml`, and README, the newest released `CHANGELOG.md` heading and
+  the newest `v*` tag are tested against it.
 - **Closed (2026-09-12)** — UI merge. Ruleset 20802441 now requires
   `aru-merge-authorized` pinned to `integration_id` 4921120, a merge-authority
   App distinct from the App agents use for ordinary commands and holding only

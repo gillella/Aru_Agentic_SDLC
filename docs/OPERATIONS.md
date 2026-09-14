@@ -23,6 +23,7 @@ agents using Aru to guide another software project.
 15. [Troubleshooting](#15-troubleshooting)
 16. [Operating boundaries](#16-operating-boundaries)
 17. [Adoption checklist](#17-adoption-checklist)
+18. [Release the Factory](#18-release-the-factory)
 
 ## 1. What Aru is
 
@@ -1402,6 +1403,34 @@ true.
 Once this checklist passes, the project is ready for routine issue-to-safe-merge
 development. Aru still does not authorize deployment or production activity;
 the consumer project's own controls remain mandatory.
+
+## 18. Release the Factory
+
+The version is declared once, as `[release]` in `scripts/policy.toml`. README's
+project-status line, the newest released heading in `CHANGELOG.md` and the newest
+`v*` tag restate it, and `tests/test_release_truth.py` fails when any restatement
+disagrees. A release is therefore an ordinary governed change plus one tag:
+
+1. File an issue for the release. In its worktree set `[release] version` and
+   `released`, rewrite the README status line to match, and in `CHANGELOG.md`
+   rename the `## Unreleased` section to `## vX.Y.Z - <title> - <released>`.
+   Add a new `## Unreleased` above it only when unreleased work remains.
+2. Run `.venv/bin/python -m pytest tests/test_release_truth.py
+   tests/test_documentation_contract.py -q`. It fails while the newest tag is
+   ahead of the declaration or while README and the changelog disagree with it.
+3. Open the PR through `create_pr.py`, obtain the approval, and merge through
+   `merge_pr.py --expected-head`.
+4. Tag the merge commit with exactly the declared string:
+   `git tag -a vX.Y.Z <merge-sha> -m "vX.Y.Z"` then `git push origin vX.Y.Z`, and
+   publish the GitHub release from that tag. Until the tag exists the declaration
+   is ahead of the newest tag, which the test tolerates; a tag ahead of the
+   declaration is refused.
+5. Bring consumers up with `init_project.py --sync --directory <consumer>`.
+
+Never tag a commit whose declared version differs from the tag, and never describe
+untagged work as released. Tags `v2.1.0`, `v2.2.0` and `v2.2.1` were cut before this
+procedure existed; `CHANGELOG.md` reconstructs what each of them shipped from git
+history.
 
 ## Consumer compatibility and deployment evidence
 

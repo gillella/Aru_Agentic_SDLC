@@ -1,4 +1,5 @@
-"""Single source for the kernel's declared gates, and the register renderer.
+"""Single source for the kernel's declared gates, the register renderer, and the
+one declared release version.
 
 `docs/ENFORCEMENT-REGISTER.md` is generated from `scripts/policy.toml`; the two
 used to be maintained by hand and drifted. `tests/test_policy.py` fails when
@@ -13,6 +14,8 @@ Reads TOML with the standard library, so the kernel gains no runtime dependency.
 
 from __future__ import annotations
 
+import datetime
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -50,6 +53,9 @@ RULESET_KEYS = ("name", "bypass_actors", "required_checks", "merge_authority_che
 # check is named separately: a consumer scaffolded without an App cannot pin it
 # by integration_id, so it is appended by init_project.py only when one exists.
 GOVERNED_CHECKS = ("aru-governed-pr", "aru-merge-policy")
+
+# MAJOR.MINOR.PATCH with no prefix: the `v` belongs to the tag, not the declaration.
+RELEASE_VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 
 
 class PolicyError(ValueError):
@@ -236,3 +242,31 @@ def account_runner_profiles(policy: dict[str, Any] | None = None) -> dict[str, s
             raise PolicyError("[runner_profiles.accounts] entries must be account = \"profile\"")
         resolved[account.casefold()] = profile
     return resolved
+
+
+def release(policy: dict[str, Any] | None = None) -> dict[str, str]:
+    """The one declared release: ``{"version": "X.Y.Z", "released": "YYYY-MM-DD"}``.
+
+    README, CHANGELOG and the git tag restate it and are tested against it, so a
+    missing or malformed declaration refuses rather than letting one of the
+    restatements quietly become the source.
+    """
+    policy = policy or load()
+    table = policy.get("release")
+    if not isinstance(table, dict):
+        raise PolicyError("policy is missing a [release] table")
+    declared = table.get("version")
+    if not isinstance(declared, str) or not RELEASE_VERSION.match(declared):
+        raise PolicyError("[release] version must be a MAJOR.MINOR.PATCH string without a prefix")
+    released = table.get("released")
+    try:
+        if not isinstance(released, str):
+            raise ValueError
+        datetime.date.fromisoformat(released)
+    except ValueError:
+        raise PolicyError("[release] released must be a YYYY-MM-DD date") from None
+    return {"version": declared, "released": released}
+
+
+def version(policy: dict[str, Any] | None = None) -> str:
+    return release(policy)["version"]
