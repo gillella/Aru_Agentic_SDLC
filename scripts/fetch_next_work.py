@@ -205,13 +205,6 @@ def dependency_states(records: list[dict]) -> dict[int, str]:
     return states
 
 
-def has_review_comments(number: int) -> bool:
-    records = gh_json(["api", f"repos/{repo_slug()}/pulls/{number}/comments?per_page=1"])
-    if not isinstance(records, list):
-        raise KernelError("GitHub returned malformed review comments")
-    return bool(records)
-
-
 def _pr_live_merge_state(number: int, head: str) -> str:
     record = gh_json(
         ["pr", "view", str(number), "--json", "number,headRefOid,state,mergeStateStatus"]
@@ -229,10 +222,9 @@ def _pr_live_merge_state(number: int, head: str) -> str:
 
 def _open_pr_work(pr: dict) -> dict[str, object]:
     number = int(pr["number"])
-    if has_review_comments(number):
-        feedback = fetch_feedback(number)
-        if feedback:
-            return {"type": "feedback", "pr": number, "items": feedback}
+    feedback = fetch_feedback(number)
+    if feedback:
+        return {"type": "feedback", "pr": number, "items": feedback}
 
     try:
         verification = ci_verdict(number)

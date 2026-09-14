@@ -26,16 +26,20 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
    Every PR also waits for one approval of its exact head from a GitHub account
    other than yours; `fetch_next_work.py` reports that as `review` work, which
    the author cannot do. Do not poll for reviews.
-10. If feedback exists, use the feedback skill. If the server check fails, use
-    the CI remediation skill.
+10. Always read `fetch_pr_feedback.py --pr <N>` before merge, even with an
+    approval and no inline comments. If feedback exists, use the feedback skill.
+    If the server check fails, use the CI remediation skill.
 
 A coding agent may review another agent's code when it works under a different
 GitHub account. Never approve your own PR. A review must read the issue and
 acceptance criteria, inspect the exact diff and surrounding code, run focused
 verification, and submit a GitHub `APPROVE` or `REQUEST_CHANGES` review of the
 current head with severity, concrete consequence, evidence and `file:line`
-findings. The writer owns remediation; a reviewer who pushes a fix cannot also
-approve it. Use the feedback skill's fix, evidence-backed disagreement,
+findings. Put each blocking defect in an inline review thread; summary findings
+must use explicit `[P0]`/`[P1]` labels when applicable. A COMMENT review may still
+contain blocking findings and must never be treated as clearance because a
+separate review approves the PR. The writer owns remediation; a reviewer who
+pushes a fix cannot also approve it. Use the feedback skill's fix, evidence-backed disagreement,
 advisory-only and accepted-follow-up dispositions. Inspect existing relevant
 regression coverage before requesting new tests. One approval of the current
 head is sufficient; no extra brands or ceremonial approval rounds are required.

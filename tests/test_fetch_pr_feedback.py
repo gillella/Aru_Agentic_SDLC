@@ -60,7 +60,7 @@ def test_feedback_uses_repository_authority_and_returns_latest_unresolved(monkey
         ),
     )
 
-    assert fetch_pr_feedback.fetch_feedback(17) == [
+    assert fetch_pr_feedback.fetch_threads(17) == [
         {
             "path": "src/app.py",
             "line": 12,
@@ -68,7 +68,7 @@ def test_feedback_uses_repository_authority_and_returns_latest_unresolved(monkey
             "body": "Fix this",
             "url": "https://example.test/review/1",
         }
-    ]
+    ] * 2
     assert calls[0][1] == common.REPOSITORY_AUTH
 
 
@@ -87,7 +87,7 @@ def test_feedback_paginates_all_threads(monkeypatch):
         lambda args, **_kwargs: calls.append(args) or next(pages),
     )
 
-    assert len(fetch_pr_feedback.fetch_feedback(17)) == 1
+    assert len(fetch_pr_feedback.fetch_threads(17)) == 1
     assert "after=next" in calls[1]
 
 
@@ -119,4 +119,4 @@ def test_feedback_fails_closed_on_incomplete_evidence(monkeypatch, payload, mess
     monkeypatch.setattr(fetch_pr_feedback, "gh_json", lambda *_args, **_kwargs: payload)
 
     with pytest.raises(common.KernelError, match=message):
-        fetch_pr_feedback.fetch_feedback(17)
+        fetch_pr_feedback.fetch_threads(17)

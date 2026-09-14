@@ -7,7 +7,7 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
 
 1. Run `fetch_pr_feedback.py --pr <n>`. Read the original finding and its thread,
    not only the latest bot reply. Handle every still-applicable finding,
-   including late results from any reviewer. An outdated marker does not prove
+   including late results from any reviewer and summary-only P0/P1 findings. An outdated marker does not prove
    that a defect is fixed.
 2. Identify the concrete consequence and evidence. Use one truthful disposition:
 
@@ -21,6 +21,19 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
    Security/correctness defects remain blocking regardless of a low/info label.
    Do not suppress findings, fabricate agreement, or resolve a thread without
    handling its substance. Evidence-backed disposition is not a blanket waiver.
+
+   A blocking review summary is cleared only by its original reviewer, distinct
+   from the PR author. After the writer posts fixes and regression evidence,
+   that reviewer submits a new COMMENT or APPROVE review on the exact current
+   head with a standalone `Resolves review: <review_id>` line and written
+   verification/disposition evidence. Use the numeric ID returned by the feedback
+   helper or the GitHub review URL. This confirms every finding in that summary;
+   do not resolve it while one defect remains. Use a separate line for each
+   summary, with no code fences or new P0/P1 finding labels in the confirmation.
+   An approval alone, an author acknowledgement, a new commit or an outdated
+   marker cannot clear findings. A new push needs current-head confirmation again.
+   Do not erase the original summary to remove a blocker. If its reviewer is
+   unavailable, leave the PR blocked and report why through GitHub.
 3. The writer owns remediation in the existing claimed worktree. The reviewer
    stays independent and does not commit the fix; a reviewer who pushes to the
    PR becomes its last pusher, and GitHub then needs an approval from someone

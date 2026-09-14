@@ -205,9 +205,9 @@ def test_feedback_requires_complete_unresolved_threads(monkeypatch, truncated):
     monkeypatch.setattr(fetch_pr_feedback, "gh_json", snapshot)
     if truncated:
         with pytest.raises(fetch_pr_feedback.KernelError, match="truncated"):
-            fetch_pr_feedback.fetch_feedback(9)
+            fetch_pr_feedback.fetch_threads(9)
     else:
-        feedback = fetch_pr_feedback.fetch_feedback(9)
+        feedback = fetch_pr_feedback.fetch_threads(9)
         assert feedback[0]["path"] == "a.py" and feedback[0]["author"] == "reviewer"
 
 

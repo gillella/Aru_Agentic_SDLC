@@ -111,7 +111,7 @@ approved by someone other than its pusher. `merge_pr.py` reads the same evidence
 and refuses unless some account other than the author (a GitHub App author
 `app/<slug>` and its `<slug>[bot]` login are one account) has, as its latest
 decisive review (`APPROVED`, `CHANGES_REQUESTED` or `DISMISSED`), approved the
-exact head. Comments change nothing, and an
+exact head. Comments do not supply approval, and an
 approval of an earlier commit does not carry forward. A `CHANGES_REQUESTED`
 decision or any unresolved thread still blocks. Agents sharing one GitHub account
 cannot approve each other's pull requests.
@@ -121,6 +121,37 @@ so someone else must approve. Every applicable finding needs a disposition from
 the feedback skill, and a real security/correctness defect remains blocking
 regardless of severity wording; a follow-up issue cannot waive it. Resolving a
 thread must reflect its substance.
+
+`fetch_pr_feedback.py` reads all submitted review summaries, in addition to inline
+threads. An explicit `[P0]`, `[P1]`, `P0:` or `P1:` finding label (including
+Markdown emphasis/headings and `P0 Badge`/`P1 Badge` image labels) blocks merge,
+final revalidation and close-out. The author picker returns these summaries as
+feedback before CI or merge, even when the PR has no inline comments. Earlier
+commits and dismissed reviews remain evidence; an outdated inline thread remains
+blocking until resolved. Reviewers should put each defect in an inline thread
+and use explicit severity labels when also reporting it in a review summary.
+
+For a summary finding, the writer posts fixes and regression evidence on GitHub.
+The original reviewer then submits a later COMMENT or APPROVE review on the exact
+current head containing a standalone `Resolves review: <numeric-review-id>` line
+and written verification/disposition evidence outside that line. The numeric ID
+comes from the finding's `review_id` or its GitHub `pullrequestreview-<id>` URL.
+Each line resolves the entire named summary, so every finding in that summary
+must be addressed; multiple summaries require separate reference lines. The
+confirmation must be by the original reviewer, distinct from the PR author,
+and contain no new P0/P1 labels. Do not place the reference in quoted or fenced
+example text. A general approval, an author reply, a dismissed review, or a
+confirmation on an earlier head does not resolve the finding. A subsequent push
+requires fresh confirmation for that head as well as the usual approval.
+
+This is GitHub-native evidence, not a second lifecycle store or another required
+approver. It cannot infer severity from arbitrary prose or verify the truth of
+a reviewer's explanation; unlabelled defects still need unresolved inline
+threads. Identity is the authenticated GitHub account, not an agent name in the
+body; agents sharing credentials cannot be distinguished. If the original
+reviewer is unavailable, a summary stays blocked rather than inventing a waiver.
+All review pages must be readable and complete. As with the other merge evidence,
+separate GitHub reads and merge submission are not atomic.
 
 The Kernel does not wait or poll for review. `fetch_next_work.py` reports an open
 pull request with a successful check and no qualifying approval as `review` work
