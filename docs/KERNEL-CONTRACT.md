@@ -141,7 +141,8 @@ must be addressed; multiple summaries require separate reference lines. The
 confirmation must be by the original reviewer, distinct from the PR author,
 and contain no new P0/P1 labels. Do not place the reference in quoted or fenced
 example text. A general approval, an author reply, a dismissed review, or a
-confirmation on an earlier head does not resolve the finding. A subsequent push
+confirmation on an earlier head does not resolve the finding. Editing the
+original summary invalidates any confirmation submitted before that edit. A subsequent push
 requires fresh confirmation for that head as well as the usual approval.
 
 This is GitHub-native evidence, not a second lifecycle store or another required

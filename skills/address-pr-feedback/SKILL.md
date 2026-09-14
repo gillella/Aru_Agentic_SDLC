@@ -31,7 +31,8 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
    do not resolve it while one defect remains. Use a separate line for each
    summary, with no code fences or new P0/P1 finding labels in the confirmation.
    An approval alone, an author acknowledgement, a new commit or an outdated
-   marker cannot clear findings. A new push needs current-head confirmation again.
+   marker cannot clear findings. A new push needs current-head confirmation again;
+   editing the original summary also requires a confirmation after that edit.
    Do not erase the original summary to remove a blocker. If its reviewer is
    unavailable, leave the PR blocked and report why through GitHub.
 3. The writer owns remediation in the existing claimed worktree. The reviewer

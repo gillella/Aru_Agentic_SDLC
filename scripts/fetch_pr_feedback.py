@@ -92,7 +92,7 @@ query($owner:String!,$name:String!,$number:Int!,$after:String){
     pullRequest(number:$number){
       headRefOid author{login}
       reviews(first:100,after:$after){
-        nodes{databaseId author{login} state body url submittedAt commit{oid}}
+        nodes{databaseId author{login} state body url submittedAt lastEditedAt commit{oid}}
         pageInfo{hasNextPage endCursor}
       }
     }
@@ -132,7 +132,17 @@ def _submitted_review(review: object) -> dict | None:
             raise ValueError("missing timezone")
     except (AttributeError, TypeError, ValueError) as exc:
         raise KernelError("review summary submission time is malformed") from exc
-    return {**review, "reviewer": _identity(review.get("author")), "submitted": submitted}
+    if "lastEditedAt" not in review:
+        raise KernelError("review summary edit time is missing")
+    edited = review["lastEditedAt"]
+    try:
+        updated = datetime.fromisoformat(edited.replace("Z", "+00:00")) if edited is not None else submitted
+        if updated.tzinfo is None or (edited is not None and not isinstance(edited, str)):
+            raise ValueError("invalid edit time")
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise KernelError("review summary edit time is malformed") from exc
+    return {**review, "reviewer": _identity(review.get("author")), "submitted": submitted,
+            "updated": max(submitted, updated)}
 
 
 def _summary_page(number: int, cursor: str | None) -> tuple[dict, dict]:
@@ -199,7 +209,7 @@ def _resolves(candidate: dict, finding: dict, head: str, author: str) -> bool:
         and candidate["commit"]["oid"] == head
         and candidate["reviewer"] == finding["reviewer"]
         and candidate["reviewer"] != author
-        and candidate["submitted"] > finding["submitted"]
+        and candidate["submitted"] > finding["updated"]
         and str(finding["databaseId"]) in RESOLUTION.findall(body)
         and bool(RESOLUTION.sub("", body).strip())
         and not BLOCKING_LABEL.search(body)

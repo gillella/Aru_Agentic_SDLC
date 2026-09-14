@@ -14,7 +14,7 @@ def review(number=1, body='1. **[P1] Refuse unavailable weights.**', *,
            actor='reviewer', head=OLD, state='COMMENTED', stamp='2026-09-14T10:00:00Z'):
     return dict(databaseId=number, author={'login': actor}, commit={'oid': head}, state=state,
                 body=body, url=f'https://github.com/owner/repo/pull/165#pullrequestreview-{number}',
-                submittedAt=stamp)
+                submittedAt=stamp, lastEditedAt=None)
 
 
 def resolution(**kwargs):
@@ -118,7 +118,7 @@ def test_reads_all_review_pages_and_keeps_later_page_finding(monkeypatch):
 @pytest.mark.parametrize('change', [
     'errors', 'missing-reviews', 'invalid-node', 'missing-body', 'missing-author', 'bad-id',
     'bad-state', 'bad-commit', 'bad-time', 'bad-head', 'missing-pagination', 'missing-cursor',
-    'duplicate', 'head-race', 'author-race', 'repeated-cursor',
+    'duplicate', 'head-race', 'author-race', 'repeated-cursor', 'missing-edit-time', 'bad-edit-time',
 ])
 def test_incomplete_review_evidence_never_becomes_no_feedback(monkeypatch, change):
     payload = page([review()])
@@ -141,6 +141,10 @@ def test_incomplete_review_evidence_never_becomes_no_feedback(monkeypatch, chang
         node['state'] = 'UNKNOWN'
     elif change == 'bad-commit':
         node['commit'] = None
+    elif change == 'missing-edit-time':
+        del node['lastEditedAt']
+    elif change == 'bad-edit-time':
+        node['lastEditedAt'] = 'yesterday'
     elif change == 'bad-time':
         node['submittedAt'] = 'yesterday'
     elif change == 'bad-head':
@@ -160,3 +164,10 @@ def test_incomplete_review_evidence_never_becomes_no_feedback(monkeypatch, chang
     install(monkeypatch, pages)
     with pytest.raises(common.KernelError):
         feedback.fetch_feedback(165)
+
+
+def test_editing_a_resolved_summary_requires_new_reviewer_confirmation(monkeypatch):
+    original = review()
+    original['lastEditedAt'] = '2026-09-14T12:00:00Z'
+    install(monkeypatch, [page([original, resolution()])])
+    assert [item['review_id'] for item in feedback.fetch_feedback(165)] == [1]
