@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import manifest
 import merge_authority
 from common import KernelError, checkout_repository
 from init_project import (
@@ -97,6 +98,13 @@ def sync_report(directory: Path) -> dict[str, Any]:
         path = safe_destination_path(destination, relative)
         if not path.is_file():
             missing.append(relative)
+        elif relative in manifest.BLOCKS:
+            # Only the marked block is the Factory's; the consumer's own text around
+            # it never makes the file stale.
+            if managed_block(path.read_text(encoding="utf-8"), relative) != content:
+                stale.append(relative)
+            else:
+                current.append(relative)
         elif path.read_text(encoding="utf-8") != content:
             stale.append(relative)
         else:
@@ -112,8 +120,23 @@ def sync_report(directory: Path) -> dict[str, Any]:
     }
 
 
+def managed_block(text: str, relative: str) -> str:
+    """The Factory-managed block of a consumer file, or a refusal when the markers do
+    not delimit exactly one block: guessing which lines the Factory owns would be how
+    a sync deletes a consumer's own instructions."""
+    begin, end = manifest.BLOCKS[relative]
+    block = manifest.extract_block(text, begin, end)
+    if block is None:
+        raise BootstrapError(
+            f"{relative} must carry exactly one managed block between '{begin}' and "
+            f"'{end}'; restore the markers before syncing"
+        )
+    return block
+
+
 def sync_apply(directory: Path) -> dict[str, Any]:
-    """Re-render every framework-owned file that diverged, and nothing else."""
+    """Re-render every framework-owned file that diverged, and nothing else. A block
+    path is rewritten in place: the consumer's text outside the markers stays."""
     report = sync_report(directory)
     destination = Path(report["directory"])
     rewritten = sorted([*report["stale"], *report["missing"]])
@@ -122,7 +145,16 @@ def sync_apply(directory: Path) -> dict[str, Any]:
         # relocates where its verification runs.
         files = framework_files(report["runner_profile"])
         for relative in rewritten:
-            write(destination, relative, files[relative],
+            content = files[relative]
+            if relative in manifest.BLOCKS and relative in report["stale"]:
+                path = safe_destination_path(destination, relative)
+                begin, end = manifest.BLOCKS[relative]
+                replaced = manifest.replace_block(
+                    path.read_text(encoding="utf-8"), begin, end, content)
+                if replaced is None:  # sync_report already refused this; fail closed anyway
+                    raise BootstrapError(f"{relative} lost its managed block markers")
+                content = replaced
+            write(destination, relative, content,
                   executable=relative in EXECUTABLE, replace=True)
     return {**report, "rewritten": rewritten, "in_sync": True}
 

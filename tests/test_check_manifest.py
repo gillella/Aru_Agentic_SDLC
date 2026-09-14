@@ -103,7 +103,7 @@ def test_matching_head_passes_and_reports_what_it_verified(tmp_path, monkeypatch
     head = {**MANAGED, ".aru/manifest.json": document.encode()}
     code, out, _ = invoke(monkeypatch, capsys, Fake(head))
     assert code == 0
-    assert "3 managed files at aaaaaaa match the base manifest" in out
+    assert "3 managed files and 0 managed blocks at aaaaaaa match the base manifest" in out
     assert "factory 2.3.0, profile self-hosted-mac" in out
 
 
@@ -218,3 +218,72 @@ def test_a_malformed_expected_head_refuses(tmp_path, monkeypatch, capsys):
     code, _, err = invoke(monkeypatch, capsys, Fake(dict(MANAGED)), expected_head="short")
     assert code == 2
     assert "expected head is malformed" in err
+
+
+# --- managed blocks: AGENTS.md is compared between its markers, not whole ---
+
+BEGIN, END = "<!-- BEGIN ARU_SDLC_GOVERNANCE -->", "<!-- END ARU_SDLC_GOVERNANCE -->"
+BLOCK = BEGIN + "\n# Governance\nRequire a Ready issue.\n" + END + "\n"
+FILES_ONLY = {".aru/verify.sh": b"verify\n", ".aru/factory-version": b"2.3.1\n"}
+
+
+def block_document(files: dict[str, bytes], block: str = BLOCK, version: str = "2.3.1") -> str:
+    return json.dumps(
+        {
+            "schema": HOOK.SCHEMA, "factory_version": version, "runner_profile": "self-hosted-mac",
+            "files": {path: hashlib.sha256(body).hexdigest() for path, body in sorted(files.items())},
+            "blocks": {"AGENTS.md": {"begin": BEGIN, "end": END,
+                                     "sha256": hashlib.sha256(block.encode()).hexdigest()}},
+        },
+        indent=2, sort_keys=True,
+    ) + "\n"
+
+
+def test_consumer_text_around_the_block_passes(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    document = block_document(FILES_ONLY)
+    scaffold_base(tmp_path, document, "2.3.1\n")
+    head = {**FILES_ONLY, "AGENTS.md": (BLOCK + "\n## Ours\nkeep this\n").encode(),
+            ".aru/manifest.json": document.encode()}
+    code, out, _ = invoke(monkeypatch, capsys, Fake(head))
+    assert code == 0
+    assert "2 managed files and 1 managed blocks at aaaaaaa match the base manifest" in out
+
+
+@pytest.mark.parametrize(
+    ("agents", "message"),
+    [
+        (BLOCK.replace("Require", "Skip"), "AGENTS.md: managed block at the head differs"),
+        (BLOCK.replace(END + "\n", ""), "AGENTS.md: managed block markers are missing or duplicated"),
+        (BLOCK + BLOCK, "AGENTS.md: managed block markers are missing or duplicated"),
+    ],
+)
+def test_a_tampered_or_unmarked_block_refuses(tmp_path, monkeypatch, capsys, agents, message):
+    monkeypatch.chdir(tmp_path)
+    document = block_document(FILES_ONLY)
+    scaffold_base(tmp_path, document, "2.3.1\n")
+    head = {**FILES_ONLY, "AGENTS.md": agents.encode(), ".aru/manifest.json": document.encode()}
+    code, _, err = invoke(monkeypatch, capsys, Fake(head))
+    assert code == 2
+    assert "::error::" in err and message in err
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        {"AGENTS.md": {"begin": BEGIN, "end": END}},
+        {"AGENTS.md": {"begin": BEGIN, "end": BEGIN, "sha256": "0" * 64}},
+        {".aru/verify.sh": {"begin": BEGIN, "end": END, "sha256": "0" * 64}},
+        {"../x": {"begin": BEGIN, "end": END, "sha256": "0" * 64}},
+        [],
+    ],
+)
+def test_a_malformed_block_entry_refuses(tmp_path, monkeypatch, capsys, blocks):
+    monkeypatch.chdir(tmp_path)
+    document = json.loads(block_document(FILES_ONLY))
+    document["blocks"] = blocks
+    text = json.dumps(document, indent=2, sort_keys=True) + "\n"
+    scaffold_base(tmp_path, text, "2.3.1\n")
+    head = {**FILES_ONLY, "AGENTS.md": BLOCK.encode(), ".aru/manifest.json": text.encode()}
+    code, _, err = invoke(monkeypatch, capsys, Fake(head))
+    assert code == 2 and "::error::" in err and "manifest" in err

@@ -68,6 +68,12 @@ def rehash_manifest():
             relative: hashlib.sha256((root / relative).read_bytes()).hexdigest()
             for relative in document["files"]
         }
+        for relative, entry in document.get("blocks", {}).items():
+            lines = (root / relative).read_text(encoding="utf-8").splitlines()
+            start = lines.index(entry["begin"])
+            stop = lines.index(entry["end"])
+            block = "\n".join(lines[start:stop + 1]) + "\n"
+            entry["sha256"] = hashlib.sha256(block.encode("utf-8")).hexdigest()
         path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     return apply

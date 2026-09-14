@@ -1,5 +1,21 @@
 # Changelog
 
+## v2.3.1 - Managed block for AGENTS.md - 2026-09-14
+
+- `AGENTS.md` is managed as a block, not a file. The manifest records the sha256 of the
+  text between `<!-- BEGIN ARU_SDLC_GOVERNANCE -->` and `<!-- END ARU_SDLC_GOVERNANCE -->`
+  (both lines included) under a new `blocks` key and no longer lists `AGENTS.md` under
+  `files`; `.aru/verify.sh`, `.aru/hooks/check_manifest.py`, `manifest.compare` and the
+  adoption inspector extract that block and compare it, so a consumer's own instructions
+  after the END marker pass integrity. Missing or duplicated markers are refused (#733).
+- `init_project.py --sync` rewrites only the block of `AGENTS.md` and preserves the text
+  outside it byte for byte; it refuses a file whose markers are missing or duplicated
+  instead of guessing. The v2.3.0 sync rewrote the whole file and deleted agent-fleet's
+  consumer policy, which is what surfaced this (#733).
+- The schema string stays `aru.managed-files/v1` with `blocks` as an additional key, so a
+  base branch still running v2.3.0's `check_manifest.py` validates a v2.3.1 upgrade head's
+  manifest; the canonical manifests are regenerated (#733).
+
 ## v2.3.0 - Managed-file manifest - 2026-09-14
 
 - Every scaffolded repository now carries `.aru/manifest.json`, the sha256 of each

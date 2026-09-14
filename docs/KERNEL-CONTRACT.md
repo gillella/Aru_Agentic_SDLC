@@ -203,8 +203,11 @@ Every scaffolded repository carries `.aru/manifest.json`, the sha256 of each
 Factory-managed file for its runner profile, and `.aru/factory-version`, the Factory
 release those files came from; both are copies of the Factory's committed
 `templates/manifests/<profile>.json` and declared version, regenerated only by
-`init_project.py --sync`. `.aru/verify.sh` verifies every managed file against the
-manifest first and unconditionally on the exact head, and `aru-merge-policy` verifies
+`init_project.py --sync`. `AGENTS.md` is managed as a block: only the text between the
+`ARU_SDLC_GOVERNANCE` markers is hashed and rewritten, and a consumer's own instructions
+outside the markers are preserved by verification and by `--sync`; missing or duplicated
+markers are a failing check. `.aru/verify.sh` verifies every managed file and block
+against the manifest first and unconditionally on the exact head, and `aru-merge-policy` verifies
 the head's managed files, read through the API and never executed, against the base
 branch's manifest; a head that changes `.aru/factory-version` is judged against its own
 manifest. A hand-edited manifest is a failing check, not a customization. The residual

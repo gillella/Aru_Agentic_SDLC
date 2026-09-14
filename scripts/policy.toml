@@ -10,7 +10,7 @@
 # through the release procedure in docs/OPERATIONS.md, never to describe work
 # that has not been tagged.
 [release]
-version = "2.3.0"
+version = "2.3.1"
 released = "2026-09-14"
 
 [register]

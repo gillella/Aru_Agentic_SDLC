@@ -184,7 +184,7 @@ MANIFEST = ".aru/manifest.json"
 def test_integrity_passes_on_an_untouched_scaffold(tmp_path, profile):
     result = _verify(tmp_path, profile)
     assert result.returncode == 0, result.stderr
-    assert "managed files match .aru/manifest.json" in result.stdout
+    assert "managed files and 1 managed blocks match .aru/manifest.json" in result.stdout
     assert f"profile {profile}" in result.stdout
 
 
@@ -267,7 +267,7 @@ def test_a_rehashed_manifest_is_the_documented_residual(tmp_path, rehash_manifes
     git("commit", "-m", "init")
     result = _run_verify(tmp_path)
     assert result.returncode == 0, result.stderr
-    assert "managed files match .aru/manifest.json" in result.stdout
+    assert "managed files and 1 managed blocks match .aru/manifest.json" in result.stdout
 
 
 # --- account assignments are data, not a source patch (#698) ----------------
@@ -313,3 +313,42 @@ def test_a_malformed_assignment_table_refuses():
         broken = {**base, "runner_profiles": {"accounts": table}}
         with pytest.raises(policy.PolicyError):
             policy.account_runner_profiles(broken)
+
+
+# --- managed block: AGENTS.md is verified between its markers, not whole ---
+
+AGENTS_END = "<!-- END ARU_SDLC_GOVERNANCE -->"
+
+
+def test_integrity_keeps_consumer_text_after_the_end_marker(tmp_path):
+    git = _scaffold(tmp_path, MAC)
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text(agents.read_text(encoding="utf-8") + "\n## Ours\nkeep this\n",
+                      encoding="utf-8")
+    git("add", ".")
+    git("commit", "-m", "init")
+    result = _run_verify(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert "1 managed blocks match" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("edit", "message"),
+    [
+        (lambda text: text.replace("Require a valid Ready issue", "Skip it"),
+         "AGENTS.md: managed block differs from the manifest"),
+        (lambda text: text.replace(AGENTS_END + "\n", ""),
+         "AGENTS.md: managed block markers are missing or duplicated"),
+        (lambda text: text + text, "AGENTS.md: managed block markers are missing or duplicated"),
+    ],
+)
+def test_integrity_refuses_a_tampered_or_unmarked_block(tmp_path, edit, message):
+    git = _scaffold(tmp_path, MAC)
+    git("add", ".")
+    git("commit", "-m", "init")
+    agents = tmp_path / "AGENTS.md"
+    agents.write_text(edit(agents.read_text(encoding="utf-8")), encoding="utf-8")
+    result = _run_verify(tmp_path)
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert "init_project.py --sync" in result.stderr

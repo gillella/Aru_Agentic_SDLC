@@ -29,6 +29,10 @@ def test_manifest_is_a_library_not_a_command():
 def test_managed_set_is_every_framework_file_but_consumer_owned(profile):
     managed = set(manifest.managed_files(profile))
     assert managed == set(init_project.framework_files(profile)) - set(manifest.EXCLUDED)
+    # AGENTS.md is in the managed set as a block: hashed between its markers, not whole.
+    document = manifest.parse(manifest.canonical_path(profile).read_text(encoding="utf-8"))
+    assert set(document["blocks"]) == set(manifest.BLOCKS) == {"AGENTS.md"}
+    assert "AGENTS.md" not in document["files"]
     # The three paths this issue added, and the omission that made the old
     # adoption inspector report a drifting governance workflow as matching.
     for required in (".github/workflows/merge-policy.yml", ".aru/factory-version",
@@ -165,3 +169,105 @@ def test_the_schema_string_is_the_same_in_all_three_implementations():
     literal = f'"{manifest.SCHEMA}"'
     assert literal in (ROOT / "hooks" / "check_manifest.py").read_text(encoding="utf-8")
     assert literal in (ROOT / "templates" / "verify.sh").read_text(encoding="utf-8")
+
+
+# --- AGENTS.md is a managed block: consumer text outside the markers survives ---
+
+BEGIN, END = manifest.BLOCKS["AGENTS.md"]
+TRAILING = "\n## Consumer policy\n\nWorkers run on the Mini. Keep credentials out of Git.\n"
+
+
+def _read(root, relative):
+    return (root / relative).read_bytes()
+
+
+def test_consumer_text_after_the_end_marker_passes_compare(tmp_path):
+    target = tmp_path / "consumer"
+    init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
+    agents = target / "AGENTS.md"
+    agents.write_text(agents.read_text(encoding="utf-8") + TRAILING, encoding="utf-8")
+    document = manifest.parse((target / manifest.MANIFEST_PATH).read_text(encoding="utf-8"))
+    assert manifest.compare(target, document, _read) == []
+
+
+def test_a_tampered_block_and_broken_markers_are_findings(tmp_path):
+    target = tmp_path / "consumer"
+    init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
+    document = manifest.parse((target / manifest.MANIFEST_PATH).read_text(encoding="utf-8"))
+    agents = target / "AGENTS.md"
+    original = agents.read_text(encoding="utf-8")
+    agents.write_text(original.replace("Require a valid Ready issue", "Skip the Ready issue"),
+                      encoding="utf-8")
+    assert manifest.compare(target, document, _read) == [
+        "AGENTS.md: managed block differs from the manifest"]
+    for broken in (original.replace(END + "\n", ""), original + BEGIN + "\n" + END + "\n"):
+        agents.write_text(broken, encoding="utf-8")
+        assert manifest.compare(target, document, _read) == [
+            "AGENTS.md: managed block markers are missing or duplicated"]
+
+
+def test_sync_rewrites_the_block_and_keeps_the_consumer_text(tmp_path):
+    target = tmp_path / "consumer"
+    init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
+    agents = target / "AGENTS.md"
+    rendered = agents.read_text(encoding="utf-8")
+    stale = rendered.replace("Require a valid Ready issue", "Skip the Ready issue")
+    agents.write_text(stale + TRAILING, encoding="utf-8")
+
+    report = consumer.sync_report(target)
+    assert report["stale"] == ["AGENTS.md"]
+    applied = consumer.sync_apply(target)
+    assert applied["rewritten"] == ["AGENTS.md"]
+    assert agents.read_text(encoding="utf-8") == rendered + TRAILING
+    assert consumer.sync_report(target)["in_sync"]
+
+
+def test_sync_refuses_agents_without_exactly_one_block(tmp_path):
+    target = tmp_path / "consumer"
+    init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
+    agents = target / "AGENTS.md"
+    rendered = agents.read_text(encoding="utf-8")
+    for broken in (rendered.replace(BEGIN + "\n", ""), rendered + rendered):
+        agents.write_text(broken, encoding="utf-8")
+        with pytest.raises(init_project.BootstrapError, match="exactly one managed block"):
+            consumer.sync_report(target)
+        with pytest.raises(init_project.BootstrapError, match="exactly one managed block"):
+            consumer.sync_apply(target)
+        assert agents.read_text(encoding="utf-8") == broken
+
+
+@pytest.mark.parametrize(
+    "blocks",
+    [
+        [],
+        {"AGENTS.md": {"begin": BEGIN, "end": END}},
+        {"AGENTS.md": {"begin": BEGIN, "end": END, "sha256": "zz"}},
+        {"AGENTS.md": {"begin": BEGIN, "end": BEGIN, "sha256": "0" * 64}},
+        {"AGENTS.md": {"begin": "", "end": END, "sha256": "0" * 64}},
+        {".aru/manifest.json": {"begin": BEGIN, "end": END, "sha256": "0" * 64}},
+        {"../escape": {"begin": BEGIN, "end": END, "sha256": "0" * 64}},
+        {".aru/verify.sh": {"begin": BEGIN, "end": END, "sha256": "0" * 64}},
+    ],
+)
+def test_parse_refuses_malformed_blocks(blocks):
+    document = json.dumps({"schema": manifest.SCHEMA, "factory_version": "1.0.0",
+                           "runner_profile": "self-hosted-mac",
+                           "files": {".aru/verify.sh": "0" * 64}, "blocks": blocks})
+    with pytest.raises(manifest.ManifestError):
+        manifest.parse(document)
+
+
+def test_a_v230_manifest_without_blocks_still_parses():
+    """The schema string did not change, so a base branch on v2.3.0 validates a v2.3.1
+    upgrade head's manifest and the reverse."""
+    document = json.dumps({"schema": manifest.SCHEMA, "factory_version": "2.3.0",
+                           "runner_profile": "self-hosted-mac", "files": {"AGENTS.md": "0" * 64}})
+    assert manifest.parse(document)["files"] == {"AGENTS.md": "0" * 64}
+
+
+def test_the_block_markers_are_the_same_in_all_three_implementations():
+    for relative in ("hooks/check_manifest.py", "templates/verify.sh"):
+        source = (ROOT / relative).read_text(encoding="utf-8")
+        assert "extract_block" in source and '"blocks"' in source, relative
+    template = (ROOT / "templates" / "AGENTS.md").read_text(encoding="utf-8")
+    assert template.startswith(BEGIN + "\n") and template.endswith(END + "\n")
