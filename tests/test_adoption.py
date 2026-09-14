@@ -123,6 +123,12 @@ def ungoverned(tmp_path, *, files=None):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
     subprocess.run(["git", "init", "-b", "main", "-q"], cwd=repo, check=True)
+    # Adoption commits, and `git commit` refuses without an identity. Every other git
+    # fixture in this suite sets one; this one inherited whatever the machine had, so
+    # these tests passed on a developer's Mac and failed on an `aru-ci` runner whose
+    # account has no ~/.gitconfig.
+    for setting, value in (("user.name", "Test"), ("user.email", "test@example.com")):
+        subprocess.run(["git", "config", setting, value], cwd=repo, check=True)
     return repo
 
 
