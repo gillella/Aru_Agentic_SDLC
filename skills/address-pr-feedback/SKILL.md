@@ -5,7 +5,7 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
 
 # Address feedback
 
-1. Run `fetch_pr_feedback.py --pr <n>`. Read the original finding and its thread,
+1. Run `python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr <n>`. Read the original finding and its thread,
    not only the latest bot reply. Handle every still-applicable finding,
    including late results from any reviewer and summary-only P0/P1 findings. An outdated marker does not prove
    that a defect is fixed.

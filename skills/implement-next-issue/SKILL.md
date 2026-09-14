@@ -6,15 +6,15 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
 # Implement one issue
 
 1. Read current Git, worktree, PR, and board state.
-2. Run `fetch_next_work.py --agent <id> --json`.
-3. If it returns a Ready issue, claim that exact issue with `claim_issue.py`.
-4. Create the isolated worktree with `create_branch.py` and work only there.
+2. Run `python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py" --agent <id> --json`.
+3. If it returns a Ready issue, claim that exact issue with `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py"`.
+4. Create the isolated worktree with `python3 "$ARU_SDLC_HOME/scripts/create_branch.py"` and work only there.
 5. Make the smallest change inside the declared `touches:` paths.
 6. Keep the consumer-owned `.aru/verify.sh` proportional to the issue's risk.
    Run it or narrower commands locally when useful as preflight; local output is
    optional audit evidence, not merge authority.
 7. Commit and push the branch.
-8. Open the PR with `create_pr.py`; its body must contain `Closes #N`.
+8. Open the PR with `python3 "$ARU_SDLC_HOME/scripts/create_pr.py"`; its body must contain `Closes #N`.
 9. Wait for the exact-head `aru-governed-pr` check on the repository's one
    assigned runner profile: `self-hosted-mac` for `gillella` personal
    repositories, `github-hosted` for `Unum-Inc`. Never switch profiles or edit
@@ -24,9 +24,9 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
    that profile's runners and validates the linked issue's `touches:` boundary
    against the actual diff. Ad hoc local runs remain preflight evidence.
    Every PR also waits for one approval of its exact head from a GitHub account
-   other than yours; `fetch_next_work.py` reports that as `review` work, which
+   other than yours; `python3 "$ARU_SDLC_HOME/scripts/fetch_next_work.py"` reports that as `review` work, which
    the author cannot do. Do not poll for reviews.
-10. Always read `fetch_pr_feedback.py --pr <N>` before merge, even with an
+10. Always read `python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr <N>` before merge, even with an
     approval and no inline comments. If feedback exists, use the feedback skill.
     If the server check fails, use the CI remediation skill.
 

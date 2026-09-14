@@ -22,22 +22,8 @@ managed_begin="<!-- BEGIN ARU_SDLC_GOVERNANCE -->"
 managed_end="<!-- END ARU_SDLC_GOVERNANCE -->"
 global_template="$(mktemp)"
 trap 'rm -f "${global_template}"' EXIT
-python3 - "${governance_template}" "${global_template}" <<'PYTHON'
-import re
-import sys
-from pathlib import Path
-text = Path(sys.argv[1]).read_text()
-text, count = re.subn(
-    r"This repository is scaffolded.*?whose declared profile and `runs-on:` disagree\.\s*",
-    "Each repository must use its declared runner profile and trust boundary. "
-    "Read its local AGENTS.md and .aru/verify.sh; global guidance does not "
-    "select or change a repository's runner profile.\n",
-    text, flags=re.S,
-)
-if count != 1 or "__ARU_" in text:
-    raise SystemExit("error: global runner guidance could not be rendered")
-Path(sys.argv[2]).write_text(text)
-PYTHON
+PYTHONPATH="${aru_home}/scripts" python3 -c 'import policy, sys; sys.stdout.write(policy.genericized_agent_guidance())' > "${global_template}" \
+  || { echo "error: global runner guidance could not be rendered" >&2; exit 1; }
 
 retained() {
   local candidate="$1"
@@ -144,7 +130,14 @@ PYTHON
   echo "appended managed Aru guidance to ${target}"
 }
 
+plugin_installed=0
+installed="${HOME}/.claude/plugins/installed_plugins.json"
+if [ -f "${installed}" ] && python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if any(k.startswith("aru-codefactory@") for k in d.get("plugins", {})) else 1)' "${installed}"; then
+  plugin_installed=1
+fi
+
 for target in "${HOME}/.codex/AGENTS.md" "${HOME}/.claude/CLAUDE.md"; do
+  if [[ "${target}" == "${HOME}/.claude/CLAUDE.md" && "${plugin_installed}" -eq 1 ]]; then continue; fi
   install_global_guidance "${target}" "${global_template}"
 done
 
@@ -158,6 +151,7 @@ for target in "${targets[@]}"; do
       retained "${name}" || rm -f "${existing}"
     fi
   done
+  if [[ "${target}" == "${HOME}/.claude/skills" && "${plugin_installed}" -eq 1 ]]; then continue; fi
   for name in "${skills[@]}"; do
     source="${aru_home}/skills/${name}"
     destination="${target}/${name}"
@@ -170,5 +164,8 @@ for target in "${targets[@]}"; do
   done
 done
 
+if [[ "${plugin_installed}" -eq 1 ]]; then
+  echo "skipped ~/.claude/skills and ~/.claude/CLAUDE.md: the aru-codefactory plugin supplies the six skills and the governance block"
+fi
 echo "installed ${#skills[@]} Aru minimal-kernel skills"
 echo "set ARU_SDLC_HOME=${aru_home} in the environment used by your agents"

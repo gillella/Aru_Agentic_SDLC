@@ -1,0 +1,18 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "aru-codefactory",
+  "version": "2.3.0",
+  "description": "Fail-closed agentic SDLC governance: issue-first lifecycle, path budgets, one approval from another account, and a governed merge.",
+  "author": {
+    "name": "Aravind Gillella",
+    "url": "https://github.com/gillella"
+  },
+  "repository": "https://github.com/gillella/Aru_Agentic_SDLC",
+  "keywords": [
+    "sdlc",
+    "governance",
+    "github",
+    "merge-gate",
+    "issue-first"
+  ]
+}

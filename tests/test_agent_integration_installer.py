@@ -102,3 +102,33 @@ def test_ambiguous_claude_legacy_is_preserved(tmp_path, ending):
     target.write_text(original)
     assert install(tmp_path, check=False).returncode != 0
     assert target.read_text() == original
+
+
+def test_installer_skips_claude_when_plugin_installed(tmp_path):
+    installed_plugins = tmp_path / ".claude/plugins/installed_plugins.json"
+    installed_plugins.parent.mkdir(parents=True)
+    installed_plugins.write_text('{"plugins": {"aru-codefactory@2.2.1": {}}}', encoding="utf-8")
+
+    # Stale skill that should be pruned from .claude/skills
+    stale_claude = tmp_path / ".claude/skills/run-aru-factory"
+    stale_claude.parent.mkdir(parents=True)
+    stale_claude.symlink_to(ROOT / "skills/run-aru-factory")
+
+    result = install(tmp_path)
+    assert (
+        "skipped ~/.claude/skills and ~/.claude/CLAUDE.md: the aru-codefactory "
+        "plugin supplies the six skills and the governance block" in result.stdout
+    )
+    # .claude/skills has no newly linked skills
+    assert not (tmp_path / ".claude/skills/implement-next-issue").exists()
+    # stale symlink was pruned
+    assert not stale_claude.exists()
+    # .claude/CLAUDE.md was skipped
+    assert not (tmp_path / ".claude/CLAUDE.md").exists()
+
+    # Codex, Cursor, and .agents remain installed and identical
+    for relative in (".agents/skills", ".codex/skills", ".cursor/skills"):
+        installed = tmp_path / relative
+        assert {path.name for path in installed.iterdir()} == SKILLS
+        assert all(path.is_symlink() for path in installed.iterdir())
+    assert_current((tmp_path / ".codex/AGENTS.md").read_text())
