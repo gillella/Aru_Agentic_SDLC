@@ -1,0 +1,7 @@
+{
+  "name": "aru-codefactory",
+  "version": "2.3.1",
+  "description": "Fail-closed agentic SDLC governance: issue-first lifecycle, path budgets, one approval from another account, and a governed merge.",
+  "agents": "./plugin/agents/",
+  "skills": "./skills/"
+}

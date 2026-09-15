@@ -67,6 +67,32 @@ def test_claude_adapter_agrees_with_root_manifest():
     assert hooks_path.is_file(), f"adapter hooks path {hooks_path} must exist"
 
 
+def test_cursor_adapter_agrees_with_root_manifest():
+    root_data = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
+    adapter_path = ROOT / ".cursor-plugin" / "plugin.json"
+    assert adapter_path.is_file(), ".cursor-plugin/plugin.json must exist"
+    adapter = json.loads(adapter_path.read_text(encoding="utf-8"))
+
+    for key in ("name", "version", "description"):
+        assert adapter.get(key) == root_data.get(key), f"cursor adapter {key} must agree"
+
+    assert adapter.get("version") == policy.version()
+
+    agents = adapter.get("agents")
+    assert isinstance(agents, str), "cursor adapter agents must be a directory path"
+    agents_dir = ROOT / agents
+    assert agents_dir.is_dir(), f"cursor adapter agents path {agents} must be a directory"
+    agent_names = {p.name for p in agents_dir.glob("*.md")}
+    assert {"aru-implementer.md", "aru-reviewer.md", "aru-triager.md"}.issubset(agent_names)
+
+    skills = adapter.get("skills")
+    assert isinstance(skills, str), "cursor adapter skills must be a directory path"
+    skills_dir = ROOT / skills
+    assert skills_dir.is_dir(), f"cursor adapter skills path {skills} must be a directory"
+    skill_names = [p.parent.name for p in skills_dir.glob("*/SKILL.md")]
+    assert len(skill_names) == 6
+
+
 def test_marketplace_manifest_is_valid():
     market_path = ROOT / ".claude-plugin" / "marketplace.json"
     assert market_path.is_file(), "marketplace.json must exist"
