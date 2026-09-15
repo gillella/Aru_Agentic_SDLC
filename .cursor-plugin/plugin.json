@@ -3,15 +3,5 @@
   "version": "2.3.1",
   "description": "Fail-closed agentic SDLC governance: issue-first lifecycle, path budgets, one approval from another account, and a governed merge.",
   "agents": "./plugin/agents/",
-  "skills": "./skills/",
-  "client": "cursor",
-  "adapter": {
-    "target": "Cursor IDE",
-    "purpose": "Provides native Cursor plugin discovery for Aru personas and skills.",
-    "discovery": {
-      "agents_directory": "./plugin/agents/",
-      "skills_directory": "./skills/"
-    },
-    "notes": "Component fields in Cursor replace default discovery with directory paths."
-  }
+  "skills": "./skills/"
 }
