@@ -83,7 +83,7 @@ def verification(repo: Path) -> dict:
     elif not os.access(repo / relative, os.X_OK):
         status = "not-executable"
     return {"path": relative, "status": status, "executed": False,
-            "next_action": "Review real product checks, then run bash .aru/verify.sh."}
+            "next_action": "Review real product checks, then run the Factory's verify_consumer.sh."}
 
 
 def github_readiness(repo: Path, owner: str) -> dict:
@@ -132,7 +132,7 @@ def manifest_status(repo: Path, profile: str) -> dict:
 
     `stale` is the ordinary state of a consumer that has not been synced since the
     last release; `malformed` means the file cannot be trusted at all, which the
-    consumer's own `.aru/verify.sh` also refuses.
+    Factory's own verifier also refuses.
     """
     relative = manifest.MANIFEST_PATH
     raw = read_file(repo, relative)

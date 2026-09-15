@@ -1,0 +1,62 @@
+name: Aru merge policy checks
+description: >-
+  Judge a pull request head from the base branch, using this repository's code at
+  the pinned tag. Nothing from the pull request is checked out, installed or
+  executed here: head bytes are read through the GitHub contents API and hashed.
+
+inputs:
+  pr-number:
+    description: The pull request being judged.
+    required: true
+  expected-head:
+    description: The exact head SHA to judge.
+    required: true
+  github-token:
+    description: Token used only to read the pull request, its issues and head file bytes.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve the Factory checkout
+      shell: bash
+      run: |
+        set -euo pipefail
+        root="$(cd "${GITHUB_ACTION_PATH}/../../.." && pwd)"
+        for required in hooks/enforce_touches.py hooks/check_manifest.py hooks/check_stubs.py; do
+          [ -f "${root}/${required}" ] \
+            || { echo "::error::the Factory checkout at ${root} has no ${required}"; exit 1; }
+        done
+        command -v python3
+        python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
+        echo "ARU_SDLC_HOME=${root}" >> "${GITHUB_ENV}"
+
+    - name: Enforce the issue write boundary with the base branch's own checker
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        ARU_PR_NUMBER: ${{ inputs.pr-number }}
+        ARU_EXPECTED_HEAD: ${{ inputs.expected-head }}
+      run: >-
+        python3 "${ARU_SDLC_HOME}/hooks/enforce_touches.py" --pr "${ARU_PR_NUMBER}"
+        --expected-head "${ARU_EXPECTED_HEAD}"
+
+    - name: Verify Factory-managed files at the head against the base branch's manifest
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        ARU_PR_NUMBER: ${{ inputs.pr-number }}
+        ARU_EXPECTED_HEAD: ${{ inputs.expected-head }}
+      run: >-
+        python3 "${ARU_SDLC_HOME}/hooks/check_manifest.py" --pr "${ARU_PR_NUMBER}"
+        --expected-head "${ARU_EXPECTED_HEAD}"
+
+    - name: Verify the head's workflow stubs still call this Factory
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        ARU_PR_NUMBER: ${{ inputs.pr-number }}
+        ARU_EXPECTED_HEAD: ${{ inputs.expected-head }}
+      run: >-
+        python3 "${ARU_SDLC_HOME}/hooks/check_stubs.py" --pr "${ARU_PR_NUMBER}"
+        --expected-head "${ARU_EXPECTED_HEAD}"

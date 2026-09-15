@@ -7,7 +7,7 @@ caps supported commands at 14 and all fourteen are in use.
 
 What the manifest proves and what it does not: it detects drift and accidental edits in
 a consumer's Factory-managed files. It cannot establish the authenticity of a manifest
-that a pull request rewrites together with `.aru/verify.sh`, and it does not constrain a
+that a pull request rewrites together with its stubs, and it does not constrain a
 repository administrator editing the workflow or the ruleset.
 
 `AGENTS.md` is managed as a BLOCK, not a file: only the text between the governance
@@ -27,9 +27,11 @@ SCHEMA = "aru.managed-files/v1"
 MANIFEST_PATH = ".aru/manifest.json"
 VERSION_PATH = ".aru/factory-version"
 # Consumer-owned or self-referential: never hashed.
-EXCLUDED = (".aru/review.json", ".aru/verify-project.sh", ".gitignore", MANIFEST_PATH)
+EXCLUDED = (".aru/review.json", ".aru/verify-project.sh", ".gitignore",
+            ".github/ISSUE_TEMPLATE/governed-task.yml",
+            ".github/PULL_REQUEST_TEMPLATE.md", MANIFEST_PATH)
 # Managed as a marked block inside a consumer-owned file: path -> (begin line, end line).
-# Shared with hooks/check_manifest.py and templates/verify.sh; a test pins them equal.
+# Shared with hooks/check_manifest.py and scripts/verify_consumer.sh; a test pins them equal.
 BLOCKS = {
     "AGENTS.md": ("<!-- BEGIN ARU_SDLC_GOVERNANCE -->", "<!-- END ARU_SDLC_GOVERNANCE -->"),
 }

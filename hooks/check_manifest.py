@@ -30,11 +30,13 @@ import subprocess
 from pathlib import Path
 from urllib.parse import quote
 
-# Shared with scripts/manifest.py and templates/verify.sh; a test pins the three equal.
+# Shared with scripts/manifest.py; tests pin the schema string and the excluded set equal.
 SCHEMA = "aru.managed-files/v1"
 MANIFEST_PATH = ".aru/manifest.json"
 VERSION_PATH = ".aru/factory-version"
-EXCLUDED = (".aru/review.json", ".aru/verify-project.sh", ".gitignore", MANIFEST_PATH)
+EXCLUDED = (".aru/review.json", ".aru/verify-project.sh", ".gitignore",
+            ".github/ISSUE_TEMPLATE/governed-task.yml",
+            ".github/PULL_REQUEST_TEMPLATE.md", MANIFEST_PATH)
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 
@@ -81,7 +83,9 @@ def pull_request(number: int) -> dict:
 
 
 def validate(text: str, origin: str) -> dict:
-    """The same rules as scripts/manifest.py::parse; consumers have no scripts/."""
+    """The same rules as scripts/manifest.py::parse, including the excluded set: a
+    test pins the two equal, because a head that could name a consumer-owned file
+    in its manifest would make this checker judge a file the Factory does not own."""
     try:
         manifest = json.loads(text)
     except ValueError as exc:

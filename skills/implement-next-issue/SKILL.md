@@ -10,7 +10,7 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
 3. If it returns a Ready issue, claim that exact issue with `python3 "$ARU_SDLC_HOME/scripts/claim_issue.py"`.
 4. Create the isolated worktree with `python3 "$ARU_SDLC_HOME/scripts/create_branch.py"` and work only there.
 5. Make the smallest change inside the declared `touches:` paths.
-6. Keep the consumer-owned `.aru/verify.sh` proportional to the issue's risk.
+6. Keep the consumer-owned `.aru/verify-project.sh` proportional to the issue's risk.
    Run it or narrower commands locally when useful as preflight; local output is
    optional audit evidence, not merge authority.
 7. Commit and push the branch.
@@ -20,7 +20,7 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
    repositories, `github-hosted` for `Unum-Inc`. Never switch profiles or edit
    `runs-on:` to get a check to run — an offline `aru-ci` pool leaves the check
    queued, and a hosted repository is never sent to a personal Mac.
-   GitHub Actions supplies the check identity while `.aru/verify.sh` runs on
+   GitHub Actions supplies the check identity while the Factory's verifier runs on
    that profile's runners and validates the linked issue's `touches:` boundary
    against the actual diff. Ad hoc local runs remain preflight evidence.
    Every PR also waits for one approval of its exact head from a GitHub account

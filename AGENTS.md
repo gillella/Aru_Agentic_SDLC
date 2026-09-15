@@ -18,8 +18,9 @@ agent-global instructions.
 4. Keep the change inside `touches:` and run useful local preflight as needed.
 5. Open the PR through `create_pr.py` with `Closes #N`. Require the exact-head
    `aru-governed-pr` check: GitHub Actions orchestrates it on the one runner
-   profile the repository's account is assigned, where it runs the consumer's
-   `.aru/verify.sh` and validates `touches:` against the actual diff. Never
+   profile the repository's account is assigned, where the consumer's stub calls
+   the Factory's action to run its verifier and validate `touches:` against the
+   actual diff. Never
    fall back to another profile's runners.
 6. Resolve every finding and thread, and obtain one approval of the exact head
    from a GitHub account other than the PR author. Every PR needs it,
@@ -47,7 +48,7 @@ pinned to its assigned profile and cannot be scaffolded onto another one. An
 account outside it has no assigned profile and must name one explicitly with
 `--runner-profile`; without that flag the bootstrap refuses. The scaffolded
 workflow declares its profile in an
-`# aru-runner-profile:` marker, and `.aru/verify.sh` refuses a workflow whose
+`# aru-runner-profile:` marker, and the Factory's verifier refuses a stub whose
 marker and `runs-on:` disagree, an unknown marker, or a `github-hosted`
 workflow that mentions `self-hosted`. A `self-hosted-mac` outage never falls
 back to hosted runners, and a `github-hosted` repository never reaches a

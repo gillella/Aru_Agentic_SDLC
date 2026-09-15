@@ -5,6 +5,8 @@ import subprocess
 import pytest
 
 import init_project
+VERIFIER = init_project.Path(__file__).resolve().parents[1] / "scripts" / "verify_consumer.sh"
+
 
 
 def git(repo, *args):
@@ -21,7 +23,7 @@ def commit(repo, message):
 
 def verify(repo):
     return subprocess.run(
-        ["bash", ".aru/verify.sh"], cwd=repo, capture_output=True, text=True,
+        ["bash", str(VERIFIER)], cwd=repo, capture_output=True, text=True,
     )
 
 

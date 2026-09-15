@@ -274,7 +274,8 @@ def version(policy: dict[str, Any] | None = None) -> str:
 
 GENERIC_RUNNER_GUIDANCE = (
     "Each repository must use its declared runner profile and trust boundary. "
-    "Read its local AGENTS.md and .aru/verify.sh; global guidance does not "
+    "Read its local AGENTS.md and its governed workflow stubs; global guidance "
+    "does not "
     "select or change a repository's runner profile.\n"
 )
 _SCAFFOLD_PARAGRAPH = re.compile(

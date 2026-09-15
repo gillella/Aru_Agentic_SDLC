@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# Repository-owned verification for the exact-head `aru-governed-pr` check.
+# The Factory's verifier for a consumer's exact-head `aru-governed-pr` check.
+#
+# This script lives in the Factory and runs from `.github/actions/governed-pr`,
+# against the consumer checkout in the workspace. A consumer carries no copy of
+# it: that is the point. Its two workflows are stubs that call the Factory's
+# actions at a pinned tag, so verification logic cannot drift per repository and
+# a consumer cannot rewrite the script that judges it.
 #
 # Keep this proportional: run the smallest set of checks the changed paths
 # actually justify. Broad release, deployment, and production suites are
@@ -9,10 +15,11 @@
 #
 # Written for bash 3.2 so it runs unmodified on the operator-owned
 # [self-hosted, macOS, ARM64, aru-ci] runners and on GitHub-hosted runners.
-# The governed workflow declares which runner profile this repository uses; the
-# governance section below refuses any workflow that contradicts it. The first
-# section runs before anything else and regardless of what changed: it verifies
-# every Factory-managed file against `.aru/manifest.json`.
+#
+# Environment: `ARU_RUNNER_PROFILE` is the profile the calling stub declares and
+# must equal the stub's own `# aru-runner-profile:` marker. `ARU_FACTORY_SLUG`,
+# when set, is the repository whose actions the stubs must reference; empty
+# means shape checks only (the Factory verifying itself through a local path).
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
@@ -20,114 +27,6 @@ cd "${repo_root}"
 
 section() { printf '\n=== %s ===\n' "$1"; }
 fail() { printf '::error::%s\n' "$1" >&2; exit 1; }
-
-# ---------------------------------------------------------------------------
-# Always, first: Factory-managed files match the committed manifest
-# ---------------------------------------------------------------------------
-section "Managed file integrity"
-[ -f .aru/manifest.json ] \
-  || fail ".aru/manifest.json is missing; regenerate it with init_project.py --sync from the Factory checkout, never by hand"
-integrity_status=0
-python3 - <<'PY' || integrity_status=$?
-import hashlib, json, os, stat, sys
-from pathlib import Path
-
-SCHEMA = "aru.managed-files/v1"
-LIMIT = 2 * 1024 * 1024
-MALFORMED, MISMATCH = 2, 3
-
-def refuse(code, message):
-    print(message, file=sys.stderr)
-    raise SystemExit(code)
-
-def read(relative):
-    path = Path(relative)
-    if any(p.is_symlink() for p in (path, *path.parents) if str(p) not in ("", ".")):
-        return None
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
-    except OSError:
-        return None
-    with os.fdopen(fd, "rb") as handle:
-        meta = os.fstat(handle.fileno())
-        if not stat.S_ISREG(meta.st_mode) or meta.st_size > LIMIT:
-            return None
-        data = handle.read(LIMIT + 1)
-        return data if len(data) <= LIMIT else None
-
-try:
-    manifest = json.loads(Path(".aru/manifest.json").read_text(encoding="utf-8"))
-except (OSError, ValueError) as exc:
-    refuse(MALFORMED, f"manifest is unreadable or not JSON: {exc}")
-files = manifest.get("files") if isinstance(manifest, dict) else None
-if (not isinstance(manifest, dict) or manifest.get("schema") != SCHEMA
-        or not isinstance(files, dict) or not files
-        or not isinstance(manifest.get("factory_version"), str)
-        or not isinstance(manifest.get("runner_profile"), str)):
-    refuse(MALFORMED, "manifest is malformed")
-def is_hash(value):
-    return (isinstance(value, str) and len(value) == 64
-            and all(c in "0123456789abcdef" for c in value))
-
-def forbid(relative):
-    if (not isinstance(relative, str) or relative == ".aru/manifest.json"
-            or relative.startswith(("/", "../")) or "/../" in relative):
-        refuse(MALFORMED, f"manifest names a path it may not: {relative!r}")
-
-def extract_block(text, begin, end):
-    # Same rules as scripts/manifest.py::extract_block: exactly one begin line and
-    # one end line, begin first; both lines included; one trailing newline.
-    lines = text.splitlines()
-    starts = [i for i, line in enumerate(lines) if line == begin]
-    ends = [i for i, line in enumerate(lines) if line == end]
-    if len(starts) != 1 or len(ends) != 1 or ends[0] < starts[0]:
-        return None
-    return "\n".join(lines[starts[0]:ends[0] + 1]) + "\n"
-
-findings = []
-for relative in sorted(files):
-    expected = files[relative]
-    if not isinstance(relative, str) or not is_hash(expected):
-        refuse(MALFORMED, f"manifest entry for {relative!r} is malformed")
-    forbid(relative)
-    data = read(relative)
-    if data is None:
-        findings.append(f"{relative}: missing, unreadable, not a regular file, or oversized")
-    elif hashlib.sha256(data).hexdigest() != expected:
-        findings.append(f"{relative}: content differs from the manifest")
-blocks = manifest.get("blocks", {})
-if not isinstance(blocks, dict):
-    refuse(MALFORMED, "manifest blocks is malformed")
-for relative in sorted(blocks):
-    entry = blocks[relative]
-    if (not isinstance(relative, str) or not isinstance(entry, dict)
-            or set(entry) != {"begin", "end", "sha256"} or not is_hash(entry["sha256"])
-            or not all(isinstance(entry[k], str) and entry[k].strip() for k in ("begin", "end"))
-            or entry["begin"] == entry["end"] or relative in files):
-        refuse(MALFORMED, f"manifest block entry for {relative!r} is malformed")
-    forbid(relative)
-    data = read(relative)
-    if data is None:
-        findings.append(f"{relative}: missing, unreadable, not a regular file, or oversized")
-        continue
-    block = extract_block(data.decode("utf-8", "replace"), entry["begin"], entry["end"])
-    if block is None:
-        findings.append(f"{relative}: managed block markers are missing or duplicated")
-    elif hashlib.sha256(block.encode("utf-8")).hexdigest() != entry["sha256"]:
-        findings.append(f"{relative}: managed block differs from the manifest")
-for finding in findings:
-    print(finding, file=sys.stderr)
-if findings:
-    raise SystemExit(MISMATCH)
-print(f"{len(files)} managed files and {len(blocks)} managed blocks match .aru/manifest.json "
-      f"(factory {manifest['factory_version']}, profile {manifest['runner_profile']})")
-PY
-case "${integrity_status}" in
-  0) ;;
-  2) fail ".aru/manifest.json is malformed; regenerate it with init_project.py --sync from the Factory checkout, never by hand" ;;
-  3) fail "Factory-managed files diverge from .aru/manifest.json (listed above). Regenerate both with init_project.py --sync from the Factory checkout; a hand-edited manifest is a failing check, not a customization. This detects drift and accidental edits; it cannot stop a head that rewrites .aru/verify.sh itself, which aru-merge-policy and the Factory's merge_pr.py judge separately" ;;
-  *) fail "managed file integrity check did not complete (exit ${integrity_status})" ;;
-esac
 
 # ---------------------------------------------------------------------------
 # Scope: what actually changed on this head
@@ -283,20 +182,17 @@ echo "no credential-shaped literal found"
 if [ -f "${governance_flag}" ]; then
   section "Governance invariants"
 
-  [ -x .aru/verify.sh ] || fail ".aru/verify.sh must be executable"
-  [ -x .aru/hooks/pre-push ] || fail ".aru/hooks/pre-push must be executable"
-  [ -x .aru/hooks/enforce_touches.py ] || fail ".aru/hooks/enforce_touches.py must be executable"
-  [ -f .aru/lib/touches.py ] || fail ".aru/lib/touches.py (shared touches parser) is missing"
-  python3 -m py_compile .aru/lib/touches.py .aru/hooks/enforce_touches.py
-  bash -n .aru/verify.sh .aru/hooks/pre-push
-  echo "hooks, shared parser, and verify.sh parse and are executable"
-
   workflow=".github/workflows/governed-pr.yml"
+  policy_workflow=".github/workflows/merge-policy.yml"
   [ -f "${workflow}" ] || fail "${workflow} is missing"
+  [ -f "${policy_workflow}" ] || fail "${policy_workflow} is missing"
   profile_count="$(grep -c '^# aru-runner-profile: ' "${workflow}" || true)"
   [ "${profile_count}" = "1" ] \
     || fail "governed workflow must declare exactly one '# aru-runner-profile:' line"
   profile="$(sed -n 's/^# aru-runner-profile: //p' "${workflow}")"
+  if [ -n "${ARU_RUNNER_PROFILE:-}" ] && [ "${profile}" != "${ARU_RUNNER_PROFILE}" ]; then
+    fail "the governed workflow declares ${profile} but the check was invoked for ${ARU_RUNNER_PROFILE}"
+  fi
   case "${profile}" in
     self-hosted-mac)
       expected_runs_on='runs-on: [self-hosted, macOS, ARM64, aru-ci]'
@@ -328,11 +224,55 @@ if [ -f "${governance_flag}" ]; then
     || fail "the ${profile} runner profile requires exactly one active ${expected_runs_on}"
   grep -Fq 'name: aru-governed-pr' "${workflow}" \
     || fail "governed workflow must publish the aru-governed-pr check name"
-  grep -Fq 'bash .aru/verify.sh' "${workflow}" \
-    || fail "governed workflow must run .aru/verify.sh"
-  grep -Fq 'enforce_touches.py' "${workflow}" \
-    || fail "governed workflow must enforce touches: against the actual diff"
-  echo "governed workflow: ${profile} profile, check name, verify.sh, touches enforcement"
+
+  # Each stub must call exactly one Factory action, the right one, pinned to a
+  # release tag. A stub that points somewhere else is a workflow that no longer
+  # runs the Factory's checks while keeping the required check's name.
+  check_stub_reference() {
+    stub_file="$1"
+    action_name="$2"
+    references="$(sed -E 's/[[:space:]]*#.*$//' "${stub_file}" \
+      | grep -E '^[[:space:]]*uses:' \
+      | sed -E 's/^[[:space:]]*uses:[[:space:]]*//; s/[[:space:]]+$//' || true)"
+    action_reference=""
+    while IFS= read -r reference; do
+      case "${reference}" in
+        "") continue ;;
+        actions/checkout@*) continue ;;
+        *)
+          [ -z "${action_reference}" ] \
+            || fail "${stub_file} references more than one Aru action: ${action_reference} and ${reference}"
+          action_reference="${reference}"
+          ;;
+      esac
+    done <<EOF_REFERENCES
+${references}
+EOF_REFERENCES
+    [ -n "${action_reference}" ] \
+      || fail "${stub_file} must call the Factory's ${action_name} action"
+    case "${action_reference}" in
+      ./.github/actions/"${action_name}")
+        # The Factory verifying itself through a local path.
+        ;;
+      */.github/actions/"${action_name}"@v[0-9]*.[0-9]*.[0-9]*)
+        reference_slug="${action_reference%%/.github/actions/*}"
+        case "${reference_slug}" in
+          */*) ;;
+          *) fail "${stub_file} action reference is malformed: ${action_reference}" ;;
+        esac
+        if [ -n "${ARU_FACTORY_SLUG:-}" ] && [ "${reference_slug}" != "${ARU_FACTORY_SLUG}" ]; then
+          fail "${stub_file} calls ${reference_slug}, not the Factory ${ARU_FACTORY_SLUG}"
+        fi
+        ;;
+      *)
+        fail "${stub_file} must call <owner>/<repo>/.github/actions/${action_name}@vX.Y.Z, not ${action_reference}"
+        ;;
+    esac
+    echo "${stub_file}: calls ${action_reference}"
+  }
+  check_stub_reference "${workflow}" governed-pr
+  check_stub_reference "${policy_workflow}" merge-policy
+  echo "governed workflow: ${profile} profile, check name, Factory action reference"
 
   for forbidden in \
     "${profile_forbidden[@]}" \

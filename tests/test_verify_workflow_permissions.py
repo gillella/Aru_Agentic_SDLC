@@ -10,7 +10,10 @@ from __future__ import annotations
 import re
 import subprocess
 
+
 import init_project
+VERIFIER = init_project.Path(__file__).resolve().parents[1] / "scripts" / "verify_consumer.sh"
+
 
 
 def _init_git_repo(path: init_project.Path) -> None:
@@ -48,7 +51,7 @@ def test_verify_template_executable_rejects_indented_write_permission_on_macos(
     )
 
     res = subprocess.run(
-        ["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False
+        ["bash", str(VERIFIER)], cwd=tmp_path, capture_output=True, text=True, check=False
     )
     assert res.returncode == 1
     assert "governed workflow permissions must stay read-only" in res.stderr
@@ -62,14 +65,14 @@ def test_verify_template_executable_rejects_indented_write_permission_on_macos(
         capture_output=True,
     )
     res_ok = subprocess.run(
-        ["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False
+        ["bash", str(VERIFIER)], cwd=tmp_path, capture_output=True, text=True, check=False
     )
     assert res_ok.returncode == 0
     assert "proportional verification passed" in res_ok.stdout
 
 
 def test_verify_template_workflow_permissions_portable_gate():
-    path = init_project.Path(__file__).resolve().parents[1] / "templates/verify.sh"
+    path = init_project.Path(__file__).resolve().parents[1] / "scripts/verify_consumer.sh"
     content = path.read_text(encoding="utf-8")
 
     match = re.search(r"if grep -Eq '([^']+)' \"\$\{workflow\}\"; then", content)

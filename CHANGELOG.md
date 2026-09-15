@@ -1,8 +1,32 @@
 # Changelog
 
-## Unreleased
+## v2.4.0 - Thin consumers - 2026-09-15
 
-- Add native Cursor plugin adapter `.cursor-plugin/plugin.json` pointing `agents` at `plugin/agents/` and `skills` at `skills/`, agreeing with root `plugin.json` on name, version, and description (#735).
+- A governed consumer no longer carries any of the Factory's verification logic. Its two
+  workflows are stubs that call `gillella/Aru_Agentic_SDLC/.github/actions/governed-pr`
+  and `.../merge-policy` at a pinned release tag, so the script that judges a pull
+  request is never a file that pull request can rewrite, and upgrading a consumer is a
+  one-line change to the tag (#736).
+- `templates/verify.sh` moved to `scripts/verify_consumer.sh` and runs from the Factory
+  against the consumer checkout. Its managed-file section is gone, because the manifest
+  is now judged only from the base branch, and its governance section checks the stubs
+  instead of the copies: exactly one Aru action reference per stub, the right action,
+  the profile the stub declares, and read-only permissions (#736).
+- `init_project.py --sync` deletes the copies a consumer no longer needs
+  (`.aru/verify.sh`, `.aru/lib/touches.py` and the three `.aru/hooks/` scripts) and
+  reports them as retired; the issue and pull request templates become consumer-owned.
+  A scaffolded consumer is ten files, of which three are hashed plus the `AGENTS.md`
+  block, down from twelve hashed files (#736).
+- New gate `stub-origin`, enforced by `aru-merge-policy` through
+  `hooks/check_stubs.py`: a head may move the pinned tag, which is what an upgrade is,
+  but may not repoint a check at another repository or action, change the runner or the
+  declared profile, grant itself write permissions, or add `pull_request_target` to the
+  governed workflow (#736).
+- The local pre-push hook still comes from `scripts/install_hooks.sh`, which copies it
+  out of this repository; it was never the tracked consumer copy that ran (#736).
+- Native Cursor plugin adapter `.cursor-plugin/plugin.json`, pointing `agents` at
+  `plugin/agents/` and `skills` at `skills/` and agreeing with the root `plugin.json` on
+  name, version and description (#735).
 
 ## v2.3.1 - Managed block for AGENTS.md - 2026-09-14
 

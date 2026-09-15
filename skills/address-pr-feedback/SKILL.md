@@ -44,7 +44,7 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
    push), resolving conflicts within declared `touches:` boundaries.
 5. Verify actual changed behavior. Check existing relevant regression coverage
    before adding tests, following the scoped `tests/**` guidance in
-   `.coderabbit.yaml`. Run `.aru/verify.sh` or narrower useful preflight; do not
+   `.coderabbit.yaml`. Run `$ARU_SDLC_HOME/scripts/verify_consumer.sh` or narrower useful preflight; do not
    repeat broad suites or add unrelated merge-system cases for advisory prose.
 6. After a code change, commit and push; reply with the fixing commit and
    evidence, then resolve the handled thread. Require the new exact-head

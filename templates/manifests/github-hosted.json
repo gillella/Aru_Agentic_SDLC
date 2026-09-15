@@ -3,21 +3,14 @@
     "AGENTS.md": {
       "begin": "<!-- BEGIN ARU_SDLC_GOVERNANCE -->",
       "end": "<!-- END ARU_SDLC_GOVERNANCE -->",
-      "sha256": "492ccba22a8a35c764cd2405ea0d57f7edd546dfe314488d069804c51983b4ce"
+      "sha256": "3793b1b76cb85734b1c02b1d0f3b07c0961b7b490bafc8e1fe18a02755a12031"
     }
   },
-  "factory_version": "2.3.1",
+  "factory_version": "2.4.0",
   "files": {
-    ".aru/factory-version": "ad8650bc9057d9dfd809961b69dbad640c288d809fa44437d44d83d3b118c821",
-    ".aru/hooks/check_manifest.py": "1200dc4e197576c30a9890a2a2ffec0d298dbc6b9f5a4c8f0483555561a505ad",
-    ".aru/hooks/enforce_touches.py": "24be4daabf1945ffd6a1afe164404dfcf170c7540d34f8b003cacda9dad95156",
-    ".aru/hooks/pre-push": "fcd52fb9e5d275fc066ca4ce59a7e2092f046566eb550b95c40fc6f49db78efb",
-    ".aru/lib/touches.py": "dae88eccfc8b1e7de9d7500234c6f0b8074bfe6374a8abd9c9dd23336658a02c",
-    ".aru/verify.sh": "94a82d92f476bb89785ec971ca9042e77b74be796f7aebb4f34a26bf7188a44b",
-    ".github/ISSUE_TEMPLATE/governed-task.yml": "505f4ad8cb620cce2563a91224f2b48d6ac101d6d9c9ffad7b51d1cd975b4d7d",
-    ".github/PULL_REQUEST_TEMPLATE.md": "5c19b240fa53146e55174c9a84e455f641983ba40e01f769df4cf8d392ec6fd5",
-    ".github/workflows/governed-pr.yml": "662101b6f9c0ae0c0918b1c2ea510c134685b2c1daa5dbf7f49c992ba41b7f55",
-    ".github/workflows/merge-policy.yml": "65bfca8217012401dac0205beb33603a6046a4ee1920db223595e4f588fb71e2"
+    ".aru/factory-version": "2ad7b0c3f0ede58c3165b7a8a5479e890a758d39bfe8683eaef50ce6afad7232",
+    ".github/workflows/governed-pr.yml": "f06ab41810e7cf9e91c7f8be89defd0dbd9c0ef27b1b8b34b460fa60e15e59d4",
+    ".github/workflows/merge-policy.yml": "9007cd8afe2e590c81422c29fd1bf6e2b0ff22c3daeabf19a615dd1585c30b53"
   },
   "runner_profile": "github-hosted",
   "schema": "aru.managed-files/v1"
