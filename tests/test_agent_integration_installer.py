@@ -132,3 +132,68 @@ def test_installer_skips_claude_when_plugin_installed(tmp_path):
         assert {path.name for path in installed.iterdir()} == SKILLS
         assert all(path.is_symlink() for path in installed.iterdir())
     assert_current((tmp_path / ".codex/AGENTS.md").read_text())
+
+
+# --- Hermes Agent: a client with no plugin mechanism, configured only if present ---
+
+HERMES_SKILLS = ".hermes/skills/software-development"
+HERMES_GUIDANCE = ".hermes/SOUL.md"
+
+
+def test_installer_ignores_hermes_when_it_is_not_installed(tmp_path):
+    """The installer configures agents that are present; it never creates a home
+    for one that is not, because an empty ~/.hermes would make a Hermes host of a
+    machine that has never run Hermes."""
+    result = install(tmp_path)
+    assert not (tmp_path / ".hermes").exists()
+    assert "skipped Hermes Agent" in result.stdout
+
+
+def test_installer_links_the_six_skills_into_hermes_category_directory(tmp_path):
+    """Hermes discovers <category>/<skill>/SKILL.md, so the six skills are the
+    children of one category directory rather than one bundled skill."""
+    (tmp_path / ".hermes").mkdir()
+    install(tmp_path)
+    category = tmp_path / HERMES_SKILLS
+    linked = sorted(path.name for path in category.iterdir())
+    assert linked == sorted(SKILLS)
+    for name in SKILLS:
+        entry = category / name
+        assert entry.is_symlink()
+        assert (entry / "SKILL.md").is_file(), f"{name} must expose SKILL.md to Hermes"
+
+
+def test_installer_installs_and_then_updates_the_soul_block_idempotently(tmp_path):
+    (tmp_path / ".hermes").mkdir()
+    install(tmp_path)
+    guidance = tmp_path / HERMES_GUIDANCE
+    assert_current(guidance.read_text(encoding="utf-8"))
+    first = guidance.read_text(encoding="utf-8")
+    install(tmp_path)
+    assert guidance.read_text(encoding="utf-8") == first, "a second run must not drift"
+
+
+def test_installer_preserves_a_hermes_soul_the_operator_already_wrote(tmp_path):
+    (tmp_path / ".hermes").mkdir()
+    guidance = tmp_path / HERMES_GUIDANCE
+    guidance.write_text("# My own soul\n\nkeep this\n", encoding="utf-8")
+    install(tmp_path)
+    text = guidance.read_text(encoding="utf-8")
+    assert "# My own soul" in text and "keep this" in text
+    assert_current(text)
+    install(tmp_path)
+    again = guidance.read_text(encoding="utf-8")
+    assert again.count("# My own soul") == 1
+    assert again.count("<!-- BEGIN ARU_SDLC_GOVERNANCE -->") == 1
+
+
+def test_installer_refuses_a_symlinked_hermes_home(tmp_path):
+    """A linked ~/.hermes could place the block or the skills outside the home the
+    caller named, so the installer treats it as absent rather than following it."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / ".hermes").symlink_to(elsewhere)
+    result = install(tmp_path)
+    assert "skipped Hermes Agent" in result.stdout
+    assert not (elsewhere / "SOUL.md").exists()
+    assert not (elsewhere / "skills").exists()

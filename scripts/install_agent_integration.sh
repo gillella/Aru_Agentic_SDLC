@@ -17,6 +17,18 @@ targets=(
   "${HOME}/.cursor/skills"
   "${HOME}/.claude/skills"
 )
+# Hermes Agent has no plugin mechanism, so a local skills directory and a managed
+# block in its own instruction file are the only way it can carry these skills.
+# It discovers <category>/<skill>/SKILL.md, so the category directory is the
+# target and the six skills become its children. Both Hermes paths are added
+# only when ~/.hermes already exists: this installer configures agents that are
+# present and never creates a home for one that is not.
+hermes_home="${HOME}/.hermes"
+hermes_skills="${hermes_home}/skills/software-development"
+hermes_guidance="${hermes_home}/SOUL.md"
+if [[ -d "${hermes_home}" && ! -L "${hermes_home}" ]]; then
+  targets+=("${hermes_skills}")
+fi
 governance_template="${aru_home}/templates/AGENTS.md"
 managed_begin="<!-- BEGIN ARU_SDLC_GOVERNANCE -->"
 managed_end="<!-- END ARU_SDLC_GOVERNANCE -->"
@@ -136,7 +148,11 @@ if [ -f "${installed}" ] && python3 -c 'import json,sys; d=json.load(open(sys.ar
   plugin_installed=1
 fi
 
-for target in "${HOME}/.codex/AGENTS.md" "${HOME}/.claude/CLAUDE.md"; do
+guidance_targets=("${HOME}/.codex/AGENTS.md" "${HOME}/.claude/CLAUDE.md")
+if [[ -d "${hermes_home}" && ! -L "${hermes_home}" ]]; then
+  guidance_targets+=("${hermes_guidance}")
+fi
+for target in "${guidance_targets[@]}"; do
   if [[ "${target}" == "${HOME}/.claude/CLAUDE.md" && "${plugin_installed}" -eq 1 ]]; then continue; fi
   install_global_guidance "${target}" "${global_template}"
 done
@@ -166,6 +182,9 @@ done
 
 if [[ "${plugin_installed}" -eq 1 ]]; then
   echo "skipped ~/.claude/skills and ~/.claude/CLAUDE.md: the aru-codefactory plugin supplies the six skills and the governance block"
+fi
+if [[ ! -d "${hermes_home}" || -L "${hermes_home}" ]]; then
+  echo "skipped Hermes Agent: ${hermes_home} does not exist"
 fi
 echo "installed ${#skills[@]} Aru minimal-kernel skills"
 echo "set ARU_SDLC_HOME=${aru_home} in the environment used by your agents"
