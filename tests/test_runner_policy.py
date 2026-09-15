@@ -2,21 +2,30 @@
 
 from __future__ import annotations
 
-import json
+import os
 import subprocess
 
 import pytest
 import yaml
 
 import init_project
+import policy
 
 BootstrapError = init_project.BootstrapError
 ROOT = init_project.Path(__file__).resolve().parents[1]
+VERIFIER = ROOT / "scripts" / "verify_consumer.sh"
+
 MAC = "self-hosted-mac"
 HOSTED = "github-hosted"
 MAC_RUNS_ON = "runs-on: [self-hosted, macOS, ARM64, aru-ci]"
 MARKER_MAC = f"# aru-runner-profile: {MAC}"
 MARKER_HOSTED = f"# aru-runner-profile: {HOSTED}"
+
+# The single reference a governed stub is allowed to carry: this Factory's
+# composite action, pinned to the declared release.
+GOVERNED_ACTION = (
+    f"{init_project.FACTORY_REPOSITORY}/.github/actions/governed-pr@v{policy.version()}"
+)
 
 
 @pytest.mark.parametrize(
@@ -71,7 +80,13 @@ def test_scaffold_binds_the_workflow_and_instructions_to_one_profile(tmp_path, p
     assert f"# aru-runner-profile: {profile}" in raw and absent not in raw
     # Profile-independent guarantees survive in both renderings.
     assert yaml.safe_load(raw)["permissions"] == {"contents": "read", "issues": "read", "pull-requests": "read"}
-    assert "bash .aru/verify.sh" in raw and '--expected-head "$ARU_EXPECTED_HEAD"' in raw
+    # The stub carries no verification of its own: it calls the Factory's action,
+    # exactly once, at the declared release.
+    uses = [step.get("uses") for step in job["steps"] if step.get("uses")]
+    assert [reference for reference in uses if not reference.startswith("actions/checkout@")] == [
+        GOVERNED_ACTION
+    ]
+    assert ".aru/verify.sh" not in raw and "enforce_touches" not in raw
     assert profile in (tmp_path / "AGENTS.md").read_text(encoding="utf-8")
 
 
@@ -118,34 +133,48 @@ def _scaffold(tmp_path, profile):
     return git
 
 
-def _run_verify(tmp_path):
-    return subprocess.run(["bash", ".aru/verify.sh"], cwd=tmp_path,
-                          capture_output=True, text=True, check=False)
+def _run_verify(tmp_path, **environment):
+    """Run the Factory's verifier against the consumer checkout in `tmp_path`.
+
+    The consumer carries no copy of the script; the Factory's composite action runs
+    it from here, which is why the test invokes it by absolute path with the
+    consumer as the working directory.
+    """
+    return subprocess.run(["bash", str(VERIFIER)], cwd=tmp_path,
+                          capture_output=True, text=True, check=False,
+                          env={**os.environ, **environment})
 
 
-def _verify(tmp_path, profile, mutate=None, rehash=None):
-    """Scaffold one profile, optionally corrupt the workflow, then verify.
+def _verify(tmp_path, profile, mutate=None, **environment):
+    """Scaffold one profile, optionally rewrite the governed stub, then verify.
 
-    The managed-file integrity section runs first and unconditionally, so a mutated
-    workflow fails there unless its hash is updated. `rehash` does that, which is the
-    documented residual and keeps the governance assertions below testing governance.
+    `ARU_FACTORY_SLUG` is what the Factory's action passes in, so it is set here by
+    default: the accepting tests then exercise the same stub-reference comparison the
+    refusing tests below trip. `ARU_RUNNER_PROFILE` is deliberately left unset unless
+    a test names it, so the workflow's own declaration is judged on its own terms.
     """
     git = _scaffold(tmp_path, profile)
     workflow = tmp_path / ".github/workflows/governed-pr.yml"
     if mutate is not None:
         workflow.write_text(mutate(workflow.read_text(encoding="utf-8")), encoding="utf-8")
-        if rehash is not None:
-            rehash(tmp_path)
     git("add", ".")
     git("commit", "-m", "init")
-    return _run_verify(tmp_path)
+    return _run_verify(
+        tmp_path,
+        **{"ARU_FACTORY_SLUG": init_project.FACTORY_REPOSITORY, **environment},
+    )
 
 
 @pytest.mark.parametrize("profile", [MAC, HOSTED])
 def test_verification_accepts_the_workflow_of_its_declared_profile(tmp_path, profile):
-    result = _verify(tmp_path, profile)
+    result = _verify(tmp_path, profile, ARU_RUNNER_PROFILE=profile)
     assert result.returncode == 0, result.stderr
     assert f"governed workflow: {profile} profile" in result.stdout
+    assert f".github/workflows/governed-pr.yml: calls {GOVERNED_ACTION}" in result.stdout
+    assert (
+        ".github/workflows/merge-policy.yml: calls "
+        f"{init_project.FACTORY_REPOSITORY}/.github/actions/merge-policy@v{policy.version()}"
+    ) in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -168,106 +197,48 @@ def test_verification_accepts_the_workflow_of_its_declared_profile(tmp_path, pro
     ],
 )
 def test_verification_refuses_a_workflow_that_contradicts_its_profile(
-    tmp_path, profile, old, new, message, rehash_manifest,
+    tmp_path, profile, old, new, message,
 ):
-    result = _verify(tmp_path, profile, lambda raw: raw.replace(old, new), rehash_manifest)
+    result = _verify(tmp_path, profile, lambda raw: raw.replace(old, new))
     assert result.returncode == 1
     assert message in result.stderr
 
 
-# --- managed-file integrity: the first section, and the only unconditional one ---
-
-MANIFEST = ".aru/manifest.json"
-
-
-@pytest.mark.parametrize("profile", [MAC, HOSTED])
-def test_integrity_passes_on_an_untouched_scaffold(tmp_path, profile):
-    result = _verify(tmp_path, profile)
-    assert result.returncode == 0, result.stderr
-    assert "managed files and 1 managed blocks match .aru/manifest.json" in result.stdout
-    assert f"profile {profile}" in result.stdout
-
-
-def _managed_paths(tmp_path):
-    return sorted(json.loads((tmp_path / MANIFEST).read_text(encoding="utf-8"))["files"])
-
-
-@pytest.mark.parametrize("profile", [MAC, HOSTED])
-def test_integrity_refuses_each_tampered_managed_file(tmp_path, profile):
-    git = _scaffold(tmp_path, profile)
-    git("add", ".")
-    git("commit", "-m", "init")
-    managed = _managed_paths(tmp_path)
-    assert managed, "the scaffold must write a manifest that lists files"
-    for relative in managed:
-        original = (tmp_path / relative).read_bytes()
-        (tmp_path / relative).write_bytes(original + b"\n# tampered\n")
-        result = _run_verify(tmp_path)
-        (tmp_path / relative).write_bytes(original)
-        assert result.returncode == 1, relative
-        assert f"{relative}: content differs from the manifest" in result.stderr
-        assert "init_project.py --sync" in result.stderr
-        assert "cannot stop a head that rewrites .aru/verify.sh" in result.stderr
-
-
-def test_integrity_refuses_a_missing_managed_file(tmp_path):
-    git = _scaffold(tmp_path, MAC)
-    git("add", ".")
-    git("commit", "-m", "init")
-    (tmp_path / ".aru/lib/touches.py").unlink()
-    result = _run_verify(tmp_path)
-    assert result.returncode == 1
-    assert ".aru/lib/touches.py: missing, unreadable" in result.stderr
+# --- the stub reference is what makes the Factory's checks unbypassable -----
+#
+# A thin consumer's governed workflow is a stub: it keeps the check name and the
+# runner, and calls this Factory's action. A head that keeps the name but repoints
+# the reference would publish a green `aru-governed-pr` that ran nothing of ours,
+# so each of these must be a refusal with its own message.
 
 
 @pytest.mark.parametrize(
-    ("document", "message"),
-    [("{}\n", "malformed"), ("not json\n", "malformed"), (None, "is missing")],
+    ("mutate", "message"),
+    [
+        # Another repository's action: the check name survives, the Factory does not.
+        (lambda raw: raw.replace(init_project.FACTORY_REPOSITORY, "someone-else/Aru_Agentic_SDLC"),
+         f"calls someone-else/Aru_Agentic_SDLC, not the Factory {init_project.FACTORY_REPOSITORY}"),
+        # The Factory's own repository, but the wrong action for this stub.
+        (lambda raw: raw.replace("/.github/actions/governed-pr@", "/.github/actions/merge-policy@"),
+         "must call <owner>/<repo>/.github/actions/governed-pr@vX.Y.Z"),
+        # No reference at all: a stub that calls nothing verifies nothing.
+        (lambda raw: raw.replace(f"        uses: {GOVERNED_ACTION}\n", ""),
+         ".github/workflows/governed-pr.yml must call the Factory's governed-pr action"),
+    ],
 )
-def test_integrity_refuses_a_malformed_or_missing_manifest(tmp_path, document, message):
-    git = _scaffold(tmp_path, MAC)
-    git("add", ".")
-    git("commit", "-m", "init")
-    if document is None:
-        (tmp_path / MANIFEST).unlink()
-    else:
-        (tmp_path / MANIFEST).write_text(document, encoding="utf-8")
-    result = _run_verify(tmp_path)
+def test_verification_refuses_a_stub_that_does_not_call_the_factory(tmp_path, mutate, message):
+    result = _verify(tmp_path, MAC, mutate)
     assert result.returncode == 1
     assert message in result.stderr
-    assert "init_project.py --sync" in result.stderr
 
 
-def test_integrity_runs_without_a_governance_change_in_scope(tmp_path):
-    """The point of running first: the section that catches tampering is not itself
-    gated on the pull request having touched a governance path."""
-    git = _scaffold(tmp_path, MAC)
-    (tmp_path / ".aru/lib/touches.py").write_text("# tampered\n", encoding="utf-8")
-    git("add", ".")
-    git("commit", "-m", "init")
-    git("update-ref", "refs/remotes/origin/main", "HEAD")
-    (tmp_path / "src").mkdir()
-    (tmp_path / "src/app.py").write_text("value = 1\n", encoding="utf-8")
-    git("add", ".")
-    git("commit", "-m", "product change only")
-    result = _run_verify(tmp_path)
-    assert result.returncode == 1
-    assert ".aru/lib/touches.py: content differs from the manifest" in result.stderr
-
-
-def test_a_rehashed_manifest_is_the_documented_residual(tmp_path, rehash_manifest):
-    """Stated in the contract, the register and the failure message: this section
-    detects drift. It cannot stop an author who edits a managed file and regenerates
-    the manifest in the same head; `aru-merge-policy` judges that from the base branch.
+def test_verification_refuses_a_stub_whose_profile_disagrees_with_the_invocation(tmp_path):
+    """The action passes the profile it was invoked for; the stub declares its own.
+    A disagreement means the check is running somewhere its workflow did not choose.
     """
-    git = _scaffold(tmp_path, MAC)
-    (tmp_path / ".aru/lib/touches.py").write_text("# tampered\n", encoding="utf-8")
-    rehash_manifest(tmp_path)
-    git("add", ".")
-    git("commit", "-m", "init")
-    result = _run_verify(tmp_path)
-    assert result.returncode == 0, result.stderr
-    assert "managed files and 1 managed blocks match .aru/manifest.json" in result.stdout
+    result = _verify(tmp_path, MAC, ARU_RUNNER_PROFILE=HOSTED)
+    assert result.returncode == 1
+    assert f"declares {MAC} but the check was invoked for {HOSTED}" in result.stderr
 
 
 # --- account assignments are data, not a source patch (#698) ----------------
@@ -314,41 +285,3 @@ def test_a_malformed_assignment_table_refuses():
         with pytest.raises(policy.PolicyError):
             policy.account_runner_profiles(broken)
 
-
-# --- managed block: AGENTS.md is verified between its markers, not whole ---
-
-AGENTS_END = "<!-- END ARU_SDLC_GOVERNANCE -->"
-
-
-def test_integrity_keeps_consumer_text_after_the_end_marker(tmp_path):
-    git = _scaffold(tmp_path, MAC)
-    agents = tmp_path / "AGENTS.md"
-    agents.write_text(agents.read_text(encoding="utf-8") + "\n## Ours\nkeep this\n",
-                      encoding="utf-8")
-    git("add", ".")
-    git("commit", "-m", "init")
-    result = _run_verify(tmp_path)
-    assert result.returncode == 0, result.stderr
-    assert "1 managed blocks match" in result.stdout
-
-
-@pytest.mark.parametrize(
-    ("edit", "message"),
-    [
-        (lambda text: text.replace("Require a valid Ready issue", "Skip it"),
-         "AGENTS.md: managed block differs from the manifest"),
-        (lambda text: text.replace(AGENTS_END + "\n", ""),
-         "AGENTS.md: managed block markers are missing or duplicated"),
-        (lambda text: text + text, "AGENTS.md: managed block markers are missing or duplicated"),
-    ],
-)
-def test_integrity_refuses_a_tampered_or_unmarked_block(tmp_path, edit, message):
-    git = _scaffold(tmp_path, MAC)
-    git("add", ".")
-    git("commit", "-m", "init")
-    agents = tmp_path / "AGENTS.md"
-    agents.write_text(edit(agents.read_text(encoding="utf-8")), encoding="utf-8")
-    result = _run_verify(tmp_path)
-    assert result.returncode == 1
-    assert message in result.stderr
-    assert "init_project.py --sync" in result.stderr

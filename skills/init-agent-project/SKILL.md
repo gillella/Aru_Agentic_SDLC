@@ -21,12 +21,12 @@ description: Bootstrap a repository with the Aru minimal issue-to-safe-merge ker
    the other account's profile.
 
 3. Inspect the generated AGENTS.md, issue form, PR template,
-   `.github/workflows/governed-pr.yml`, `.aru/verify.sh`,
+   `.github/workflows/governed-pr.yml`, `.github/workflows/merge-policy.yml`,
    `.aru/verify-project.sh`, and hooks. Confirm the
    workflow's `# aru-runner-profile:` marker matches its `runs-on:` and the
    intended account. Replace the failing `.aru/verify-project.sh` starter with
    risk-appropriate consumer commands and keep it executable. The framework
-   `.aru/verify.sh` must invoke it before reporting success.
+   the Factory's verifier must invoke it before reporting success.
 4. If GitHub setup was requested, create or attach one Project Board with the
    five statuses: Backlog, Ready, In Progress, In Review, Done.
 5. With `--github` (which requires `--owner`), confirm the minimal ruleset has

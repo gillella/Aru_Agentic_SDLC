@@ -1,6 +1,12 @@
 name: Aru governed pull request
 # aru-runner-profile: __ARU_RUNNER_PROFILE__
 
+# A stub, on purpose. The checks run from __ARU_FACTORY_REPOSITORY__ at the tag
+# pinned below, so verification logic is never copied into a consumer and a pull
+# request cannot rewrite the script that judges it. `init_project.py --sync`
+# changes only the pinned tag. Do not add verification steps here: the Factory's
+# own verifier refuses a stub that calls anything else.
+
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -31,10 +37,6 @@ jobs:
             echo "::error::__ARU_TRUST_MESSAGE__"
             exit 1
           fi
-          command -v python3
-          python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
-          python3 -m pip --version
-          command -v gh
 
       - name: Check out the exact pull-request head
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -43,15 +45,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Run repository-owned affected verification
-        run: bash .aru/verify.sh
-
-      - name: Enforce the issue write boundary against the actual diff
-        if: ${{ github.event_name == 'pull_request' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARU_PR_NUMBER: ${{ github.event.pull_request.number }}
-          ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: >-
-          python3 .aru/hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
-          --expected-head "$ARU_EXPECTED_HEAD"
+      - name: Run the Factory's governed checks
+        uses: __ARU_FACTORY_REPOSITORY__/.github/actions/governed-pr@v__ARU_FACTORY_VERSION__
+        with:
+          runner-profile: __ARU_RUNNER_PROFILE__
+          pr-number: ${{ github.event.pull_request.number }}
+          expected-head: ${{ github.event.pull_request.head.sha }}
+          github-token: ${{ github.token }}

@@ -12,8 +12,11 @@ import pytest
 import yaml
 
 import init_project
+import policy
 
 ROOT = init_project.Path(__file__).resolve().parents[1]
+VERIFIER = ROOT / "scripts" / "verify_consumer.sh"
+
 WORKFLOW_SOURCES = ["live", "self-hosted-mac", "github-hosted"]
 
 
@@ -102,34 +105,40 @@ def test_scaffold_creates_only_minimal_governance(tmp_path):
         ".github/workflows/governed-pr.yml",
         ".github/workflows/merge-policy.yml",
         ".aru/review.json",
-        ".aru/verify.sh",
         ".aru/verify-project.sh",
-        ".aru/lib/touches.py",
         ".gitignore",
-        ".aru/hooks/pre-push",
-        ".aru/hooks/enforce_touches.py",
-        ".aru/hooks/check_manifest.py",
         ".aru/factory-version",
         ".aru/manifest.json",
     }
+    # A thin consumer carries no copy of the Factory's verification logic: the
+    # stubs call the Factory's actions, and `scripts/install_hooks.sh` installs the
+    # pre-push hook into .git/hooks from the Factory checkout.
+    for retired in init_project.RETIRED:
+        assert not (target / retired).exists(), retired
     assert (target / ".git").is_dir()
     assert not (target / "skills").exists()
     assert not (target / "scripts").exists()
     workflow = (target / ".github/workflows/governed-pr.yml").read_text(encoding="utf-8")
     assert "name: aru-governed-pr" in workflow
     assert "runs-on: [self-hosted, macOS, ARM64, aru-ci]" in workflow
-    assert "hooks/enforce_touches.py --pr" in workflow
-    assert (target / ".aru/verify.sh").stat().st_mode & 0o111
-    assert "class TouchesError" in (target / ".aru/lib/touches.py").read_text(encoding="utf-8")
-    assert (target / ".git/hooks/touches.py").is_file()
+    assert f"{init_project.FACTORY_REPOSITORY}/.github/actions/governed-pr@v" in workflow
+    assert (target / ".aru/verify-project.sh").stat().st_mode & 0o111
+    # The parser the pre-push hook needs is installed beside it, not vendored.
+    assert "class TouchesError" in (target / ".git/hooks/touches.py").read_text(encoding="utf-8")
 
 
-def test_scaffolded_hook_loads_its_vendored_canonical_parser(tmp_path, monkeypatch):
+def test_installed_hook_loads_its_canonical_parser(tmp_path, monkeypatch):
+    """A consumer vendors no hook. `install_hooks.sh` copies the pre-push hook and
+    its parser out of the Factory into `.git/hooks`, where the hook resolves the
+    parser beside itself without `ARU_SDLC_HOME`."""
     target = tmp_path / "consumer"
     init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
+    assert not (target / ".aru/hooks").exists()
     monkeypatch.delenv("ARU_SDLC_HOME", raising=False)
-    hook = target / ".aru/hooks/enforce_touches.py"
-    spec = importlib.util.spec_from_file_location("consumer_touches_hook", hook)
+    hook = target / ".git" / "hooks" / "enforce_touches.py"
+    assert hook.is_file(), "install_hooks.sh must place the enforcement hook"
+    assert (target / ".git" / "hooks" / "touches.py").is_file()
+    spec = importlib.util.spec_from_file_location("installed_touches_hook", hook)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -171,7 +180,7 @@ def test_scaffold_refuses_symlink_file_target_escape(tmp_path):
     (target / ".aru").mkdir(parents=True)
     outside = tmp_path / "outside-verify.sh"
     outside.write_text("operator-owned\n", encoding="utf-8")
-    (target / ".aru" / "verify.sh").symlink_to(outside)
+    (target / ".aru" / "verify-project.sh").symlink_to(outside)
 
     with pytest.raises(init_project.BootstrapError, match="symbolic-link"):
         init_project.scaffold("consumer", target, runner_profile="self-hosted-mac")
@@ -252,7 +261,17 @@ def test_governed_pr_workflow_provenance_and_python3(source):
         in raw
     )
     assert "Only verified pull_request events from this repository" in raw
-    assert 'enforce_touches.py --pr "$ARU_PR_NUMBER"' in raw
+    if source == "live":
+        # Aru is not a thin consumer: its own workflow still calls the hook directly.
+        assert 'hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"' in raw
+        return
+    # A consumer stub runs no commands of its own: it hands the head to the
+    # Factory's action, which is where the write-boundary call lives.
+    assert "expected-head: ${{ github.event.pull_request.head.sha }}" in raw
+    reference = f"{init_project.FACTORY_REPOSITORY}/.github/actions/governed-pr@v{policy.version()}"
+    assert raw.count(reference) == 1
+    action = (ROOT / ".github" / "actions" / "governed-pr" / "action.yml").read_text(encoding="utf-8")
+    assert '--expected-head "${ARU_EXPECTED_HEAD}"' in action
 
 
 def probe_path(tmp_path) -> str:
@@ -319,7 +338,11 @@ def test_governed_pr_trust_boundary_no_drift():
     workflows = profiled_workflows()
     rendered = yaml.safe_load(workflows["self-hosted-mac"])["jobs"]["governed-pr"]
     live = yaml.safe_load(workflows["live"])["jobs"]["governed-pr"]
-    assert rendered["steps"][0] == live["steps"][0]
+    # Aru is not a thin consumer, so its own first step still probes the toolchain
+    # it goes on to use; the boundary condition itself must not drift.
+    assert rendered["steps"][0]["name"] == live["steps"][0]["name"]
+    assert rendered["steps"][0]["env"] == live["steps"][0]["env"]
+    assert rendered["steps"][0]["run"].strip() in live["steps"][0]["run"]
     assert rendered["runs-on"] == live["runs-on"] == ["self-hosted", "macOS", "ARM64", "aru-ci"]
 
 
@@ -333,17 +356,14 @@ def test_scaffold_consumer_drift_fixtures_and_permissions(tmp_path):
         ".github/ISSUE_TEMPLATE/governed-task.yml": framework / "templates" / "issue.yml",
         ".github/PULL_REQUEST_TEMPLATE.md": framework / "templates" / "pull_request.md",
         ".github/workflows/governed-pr.yml": framework / "templates" / "governed-pr.yml",
-        ".aru/verify.sh": framework / "templates" / "verify.sh",
+        ".github/workflows/merge-policy.yml": framework / "templates" / "merge-policy.yml",
         ".aru/verify-project.sh": framework / "templates" / "verify-project.sh",
-        ".aru/lib/touches.py": framework / "scripts" / "touches.py",
-        ".aru/hooks/pre-push": framework / "hooks" / "pre-push",
-        ".aru/hooks/enforce_touches.py": framework / "hooks" / "enforce_touches.py",
-        ".aru/hooks/check_manifest.py": framework / "hooks" / "check_manifest.py",
         ".aru/manifest.json": framework / "templates" / "manifests" / "self-hosted-mac.json",
     }
     # Profile-rendered outputs must match their template rendered for the same
     # profile; every other scaffolded file stays byte-identical to its source.
-    rendered = {"AGENTS.md", ".github/workflows/governed-pr.yml"}
+    rendered = {"AGENTS.md", ".github/workflows/governed-pr.yml",
+                ".github/workflows/merge-policy.yml"}
 
     for relative, source_path in expected_sources.items():
         assert relative in written
@@ -357,8 +377,7 @@ def test_scaffold_consumer_drift_fixtures_and_permissions(tmp_path):
         assert actual_hash == expected_hash, f"Hash mismatch for {relative}"
 
     # Executable permissions binding
-    executable_files = {".aru/verify.sh", ".aru/verify-project.sh", ".aru/hooks/pre-push",
-                        ".aru/hooks/enforce_touches.py", ".aru/hooks/check_manifest.py"}
+    executable_files = {".aru/verify-project.sh"}
     for relative in written:
         dest_file = target / relative
         mode = dest_file.stat().st_mode
@@ -369,7 +388,7 @@ def test_scaffold_consumer_drift_fixtures_and_permissions(tmp_path):
 
 
 def test_verify_template_secret_scan_positives_and_negatives():
-    path = init_project.Path(__file__).resolve().parents[1] / "templates/verify.sh"
+    path = init_project.Path(__file__).resolve().parents[1] / "scripts/verify_consumer.sh"
     content = path.read_text(encoding="utf-8")
 
     match = re.search(r'secret_re="(.*?)"\s*$', content, re.MULTILINE)
@@ -442,7 +461,7 @@ def test_verify_template_classifies_nul_paths_end_to_end(tmp_path, operation):
     source = ".aru/old\tline\ncafé_🚀.txt"
     destination = "moved/new\tline\ncafé_🚀.txt"
     (tmp_path / source).write_text("governance-adjacent content\n", encoding="utf-8")
-    (tmp_path / ".aru" / "verify.sh").chmod(0o644)
+    (tmp_path / ".aru" / "verify-project.sh").chmod(0o644)
     subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
     subprocess.run(
         ["git", "commit", "-m", "initial"], cwd=tmp_path, check=True, capture_output=True
@@ -467,10 +486,10 @@ def test_verify_template_classifies_nul_paths_end_to_end(tmp_path, operation):
     )
 
     result = subprocess.run(
-        ["bash", ".aru/verify.sh"], cwd=tmp_path, capture_output=True, text=True, check=False
+        ["bash", str(VERIFIER)], cwd=tmp_path, capture_output=True, text=True, check=False
     )
     assert result.returncode == 1
-    assert ".aru/verify.sh must be executable" in result.stderr
+    assert ".aru/verify-project.sh must exist and be executable" in result.stderr
     assert '".aru/old\\tline\\ncaf\\u00e9_\\ud83d\\ude80.txt"' in result.stdout
     assert '"moved/new\\tline\\ncaf\\u00e9_\\ud83d\\ude80.txt"' in result.stdout
 
@@ -522,7 +541,7 @@ def test_verify_template_fails_closed_on_malformed_nul_evidence(tmp_path, eviden
     }
 
     result = subprocess.run(
-        ["bash", ".aru/verify.sh"],
+        ["bash", str(VERIFIER)],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -534,7 +553,7 @@ def test_verify_template_fails_closed_on_malformed_nul_evidence(tmp_path, eviden
 
 
 def test_verify_template_secret_scan_catches_runtime_generated_diff_inputs():
-    path = init_project.Path(__file__).resolve().parents[1] / "templates/verify.sh"
+    path = init_project.Path(__file__).resolve().parents[1] / "scripts/verify_consumer.sh"
     content = path.read_text(encoding="utf-8")
 
     match = re.search(r'secret_re="(.*?)"\s*$', content, re.MULTILINE)
@@ -623,7 +642,7 @@ def test_verify_template_secret_scan_catches_binary_credentials_end_to_end(tmp_p
     )
 
     result = subprocess.run(
-        ["bash", ".aru/verify.sh"],
+        ["bash", str(VERIFIER)],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -654,7 +673,7 @@ def test_verify_template_secret_scan_allows_safe_binary_control_end_to_end(tmp_p
     )
 
     result = subprocess.run(
-        ["bash", ".aru/verify.sh"],
+        ["bash", str(VERIFIER)],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -681,7 +700,7 @@ def test_verify_template_secret_scan_fallback_tree_mode_with_binary_content_end_
 
     # Safe binary in fallback mode (no origin/main comparison base)
     result = subprocess.run(
-        ["bash", ".aru/verify.sh"],
+        ["bash", str(VERIFIER)],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -703,7 +722,7 @@ def test_verify_template_secret_scan_fallback_tree_mode_with_binary_content_end_
     )
 
     result_secret = subprocess.run(
-        ["bash", ".aru/verify.sh"],
+        ["bash", str(VERIFIER)],
         cwd=tmp_path,
         capture_output=True,
         text=True,

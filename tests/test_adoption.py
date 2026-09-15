@@ -203,9 +203,22 @@ def test_adoption_keeps_the_profile_it_was_given(tmp_path):
 
 
 def test_the_verifier_is_executable_after_adoption(tmp_path):
+    # The consumer is thin: the only script adoption writes is the project's own
+    # verifier, and the workflow runs it directly, so the bit has to be set.
     repo = ungoverned(tmp_path)
     consumer.adopt(repo, PROFILE)
-    assert os.access(repo / ".aru" / "verify.sh", os.X_OK)
+    assert os.access(repo / ".aru" / "verify-project.sh", os.X_OK)
+    assert not os.access(repo / ".github" / "workflows" / "merge-policy.yml", os.X_OK)
+
+
+def test_adoption_writes_the_thin_consumer_and_nothing_retired(tmp_path):
+    repo = ungoverned(tmp_path)
+    result = consumer.adopt(repo, PROFILE)
+    written = set(result["write"]) | set(result["preserve_existing_as"]) | set(
+        result["keep_untouched"])
+    assert written == set(init_project.framework_files(PROFILE))
+    for relative in init_project.RETIRED:
+        assert not (repo / relative).exists(), f"adoption must not write {relative}"
 
 
 def test_provisioning_is_shared_with_bootstrap_not_duplicated(monkeypatch, tmp_path):
@@ -264,8 +277,11 @@ def test_adoption_commits_what_it_wrote(tmp_path):
     assert result["commit"], "adoption must not leave the tree dirty"
     assert git(repo, "status", "--porcelain") == "", "nothing may be left uncommitted"
     committed = git(repo, "show", "--name-only", "--format=", "HEAD").split()
-    assert ".aru/verify.sh" in committed
+    assert ".aru/verify-project.sh" in committed
+    assert ".github/workflows/governed-pr.yml" in committed
     assert ".github/workflows/merge-policy.yml" in committed
+    assert set(committed) == set(init_project.framework_files(PROFILE)), (
+        "every file adoption wrote, and only those, reaches the commit")
 
 
 def test_only_the_adopted_paths_are_committed(tmp_path):
@@ -277,7 +293,7 @@ def test_only_the_adopted_paths_are_committed(tmp_path):
     committed = git(repo, "show", "--name-only", "--format=", "HEAD").split()
     # Both halves matter: without the first this passes against code that never
     # commits at all, which is the defect being fixed.
-    assert ".aru/verify.sh" in committed, "the adoption files must be in this commit"
+    assert ".aru/verify-project.sh" in committed, "the adoption files must be in this commit"
     assert "src/wip.swift" not in committed
     assert "src/wip.swift" in git(repo, "status", "--porcelain")
 
@@ -298,11 +314,15 @@ def test_the_freshly_installed_hook_does_not_refuse_the_adoption_push(tmp_path):
     # branch. This is the commit that installs it, so it must still get through.
     repo, bare = with_remote(tmp_path)
     consumer.adopt(repo, PROFILE)
+    # The hook is installed into .git/hooks from the Factory, not committed into
+    # the consumer: without it present this test would prove nothing.
+    installed = repo / ".git" / "hooks" / "pre-push"
+    assert installed.is_file() and os.access(installed, os.X_OK)
+    assert not (repo / ".aru" / "hooks" / "pre-push").exists(), "and no copy is left behind"
     consumer.push_adoption(repo)
     remote_head = subprocess.run(["git", "rev-parse", "refs/heads/main"], cwd=bare,
                                  capture_output=True, text=True).stdout.strip()
     assert remote_head == git(repo, "rev-parse", "HEAD")
-    assert ".aru/hooks/pre-push" in git(repo, "show", "--name-only", "--format=", "HEAD")
 
 
 def test_without_github_the_commit_is_left_unpushed_for_inspection(tmp_path):

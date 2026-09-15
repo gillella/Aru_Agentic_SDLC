@@ -1,23 +1,24 @@
 name: Aru merge policy
 # aru-runner-profile: __ARU_RUNNER_PROFILE__
 
-# `pull_request_target` runs the copy of this file that is on the base branch, so a
-# pull request cannot change what this check does to its own head. That is the whole
-# point of this workflow: `aru-governed-pr` runs from the pull-request head, so a pull
-# request that rewrites it keeps the check name and goes green without running anything.
+# A stub, on purpose. `pull_request_target` runs the copy of this file that is on
+# the base branch, so a pull request cannot change what this check does to its
+# own head, and the action reference below is the base branch's too. The checks
+# run from __ARU_FACTORY_REPOSITORY__ at the pinned tag; `init_project.py --sync`
+# changes only that tag.
 #
 # This workflow deliberately triggers on `pull_request_target` alone. A
-# `pull_request_review` trigger would re-evaluate after an approval, but GitHub runs
-# the pull request's own copy of the workflow for that event, which would hand a
-# change control of the check that judges it. The review posture is therefore enforced
-# by `merge_pr.py`, the only path that submits a merge.
+# `pull_request_review` trigger would re-evaluate after an approval, but GitHub
+# runs the pull request's own copy of the workflow for that event, which would
+# hand a change control of the check that judges it. The review posture is
+# therefore enforced by `merge_pr.py`, the only path that submits a merge.
 #
-# The safety rule that makes `pull_request_target` acceptable: nothing here checks out,
-# installs, or executes pull-request code. The base branch is checked out, and the write
-# boundary is recomputed from the GitHub API by the trusted copy of the enforcement
-# script. The managed-file step reads head file bytes through the contents API and hashes
-# them; it never checks them out or runs them. Do not add a step that reads the head ref,
-# runs the branch's tests, or installs its dependencies.
+# The safety rule that makes `pull_request_target` acceptable: nothing here
+# checks out, installs or executes pull-request code. The base branch is checked
+# out, and every head byte the Factory's action reads comes through the contents
+# API and is hashed, never run. Do not add a step that reads the head ref, runs
+# the branch's tests, or installs its dependencies.
+
 on:
   pull_request_target:
     types: [opened, synchronize, reopened, ready_for_review]
@@ -48,8 +49,6 @@ jobs:
             echo "::error::__ARU_TRUST_MESSAGE__"
             exit 1
           fi
-          command -v python3
-          python3 -c 'import sys; assert sys.version_info >= (3, 11), sys.version'
 
       - name: Check out the base branch, never the pull-request head
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -57,21 +56,9 @@ jobs:
           ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
 
-      - name: Enforce the issue write boundary with the base branch's own checker
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARU_PR_NUMBER: ${{ github.event.pull_request.number }}
-          ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: >-
-          python3 .aru/hooks/enforce_touches.py --pr "$ARU_PR_NUMBER"
-          --expected-head "$ARU_EXPECTED_HEAD"
-
-      - name: Verify Factory-managed files at the head against the base branch's manifest
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARU_PR_NUMBER: ${{ github.event.pull_request.number }}
-          ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: >-
-          python3 .aru/hooks/check_manifest.py --pr "$ARU_PR_NUMBER"
-          --expected-head "$ARU_EXPECTED_HEAD"
-
+      - name: Run the Factory's merge-policy checks
+        uses: __ARU_FACTORY_REPOSITORY__/.github/actions/merge-policy@v__ARU_FACTORY_VERSION__
+        with:
+          pr-number: ${{ github.event.pull_request.number }}
+          expected-head: ${{ github.event.pull_request.head.sha }}
+          github-token: ${{ github.token }}

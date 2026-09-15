@@ -54,6 +54,10 @@ def test_claude_adapter_agrees_with_root_manifest():
     for key in ("name", "version", "description"):
         assert adapter.get(key) == root_data.get(key), f"adapter {key} must agree"
 
+    # Not a literal: every manifest tracks the release the Factory actually declares,
+    # so a version bump that forgets an adapter fails here instead of shipping.
+    assert adapter.get("version") == policy.version()
+
     agents = adapter.get("agents")
     if isinstance(agents, list):
         for agent_rel in agents:
@@ -76,6 +80,7 @@ def test_cursor_adapter_agrees_with_root_manifest():
     for key in ("name", "version", "description"):
         assert adapter.get(key) == root_data.get(key), f"cursor adapter {key} must agree"
 
+    # Not a literal: the adapter tracks the release the Factory declares in policy.toml.
     assert adapter.get("version") == policy.version()
 
     agents = adapter.get("agents")
@@ -243,6 +248,6 @@ def test_surface_budgets_and_vendoring_refusals_remain_intact():
         if path.name == "SKILL.md" and path.parent.parent.name == "skills"
     ]
     assert len(skills) == 6
-    verify_sh = (ROOT / "templates" / "verify.sh").read_text(encoding="utf-8")
+    verify_sh = (ROOT / "scripts" / "verify_consumer.sh").read_text(encoding="utf-8")
     assert "Factory lifecycle scripts must not be vendored" in verify_sh
     assert "Factory skills must not be vendored under .aru/skills" in verify_sh

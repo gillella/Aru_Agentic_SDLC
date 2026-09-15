@@ -24,6 +24,7 @@ from common import KernelError, checkout_repository
 from init_project import (
     CONSUMER_OWNED,
     EXECUTABLE,
+    RETIRED,
     BootstrapError,
     command,
     contained_git_hooks,
@@ -38,7 +39,7 @@ from init_project import (
 
 # Both must exist before a directory is treated as governed, so a sync refuses
 # an unrelated repository instead of half-converting it.
-GOVERNED_MARKERS = (".aru/verify.sh", ".github/workflows/governed-pr.yml")
+GOVERNED_MARKERS = (".github/workflows/governed-pr.yml", ".aru/verify-project.sh")
 
 RUNNER_PROFILE_MARKER = "# aru-runner-profile: "
 
@@ -109,14 +110,19 @@ def sync_report(directory: Path) -> dict[str, Any]:
             stale.append(relative)
         else:
             current.append(relative)
+    retired = [
+        relative for relative in RETIRED
+        if safe_destination_path(destination, relative).exists()
+    ]
     return {
         "directory": str(destination),
         "runner_profile": profile,
         "current": sorted(current),
         "stale": sorted(stale),
         "missing": sorted(missing),
+        "retired": sorted(retired),
         "preserved": sorted(CONSUMER_OWNED),
-        "in_sync": not stale and not missing,
+        "in_sync": not stale and not missing and not retired,
     }
 
 
@@ -156,7 +162,23 @@ def sync_apply(directory: Path) -> dict[str, Any]:
                 content = replaced
             write(destination, relative, content,
                   executable=relative in EXECUTABLE, replace=True)
-    return {**report, "rewritten": rewritten, "in_sync": True}
+    removed = [remove_retired(destination, relative) for relative in report["retired"]]
+    return {**report, "rewritten": rewritten, "removed": sorted(removed), "in_sync": True}
+
+
+def remove_retired(destination: Path, relative: str) -> str:
+    """Delete one copy a consumer no longer needs, and the directory it leaves
+    empty. Refuses anything that is not a regular file, so a sync can never
+    follow a link out of the repository or drop a directory of consumer work."""
+    path = safe_destination_path(destination, relative)
+    if path.is_symlink() or not path.is_file():
+        raise BootstrapError(f"{relative} is not a regular file; remove it by hand")
+    path.unlink()
+    parent = path.parent
+    while parent != destination and parent.is_dir() and not any(parent.iterdir()):
+        parent.rmdir()
+        parent = parent.parent
+    return relative
 
 
 def adopt_plan(directory: Path, runner_profile: str) -> dict[str, Any]:
@@ -276,11 +298,14 @@ def run_sync(args: argparse.Namespace) -> int:
         return 0
     changed = report.get("rewritten", [*report["stale"], *report["missing"]])
     print(f"{report['directory']} ({report['runner_profile']})")
-    if not changed:
+    if not changed and not report["retired"]:
         print(f"  in sync: {len(report['current'])} framework files current, nothing to do")
     else:
         verb = "would rewrite" if args.check else "rewrote"
         for relative in changed:
+            print(f"  {verb}: {relative}")
+        verb = "would remove (retired)" if args.check else "removed (retired)"
+        for relative in report["retired"]:
             print(f"  {verb}: {relative}")
     print(f"  preserved (consumer-owned): {', '.join(report['preserved'])}")
     return 0

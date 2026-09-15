@@ -68,7 +68,8 @@ corrects the declaration, and the gate judges the corrected one. See
    assigned runner profile.
 6. Open a PR containing `Closes #N`. The consumer-owned `aru-governed-pr`
    workflow checks out the exact PR head on that profile's runners, runs the
-   repository-defined `.aru/verify.sh`, and validates `touches:` against the
+   Factory's `scripts/verify_consumer.sh`, called by the stub through a pinned
+   action, and validates `touches:` against the
    actual diff. It has no cross-profile fallback and accepts only verified
    same-repository `pull_request` events. Merge-group verification is
    unsupported, so configured queues and pending queue or auto-merge requests
@@ -186,11 +187,11 @@ cross-profile fallback.
 The profile chooses compute only. Under either profile every required Kernel job
 keeps the `aru-governed-pr` check name, the exact-head checkout with
 `persist-credentials: false`, read-only permissions, the same `pull_request`
-head-repository provenance condition, `.aru/verify.sh`, and actual-diff
+head-repository provenance condition, the Factory's verifier, and actual-diff
 `touches:` enforcement; and rejects `pull_request_target`, Actions caches,
 artifact uploads, `environment:`, deployment secrets and write permissions. The
 scaffolded workflow records its profile in a single `# aru-runner-profile:`
-marker, and `.aru/verify.sh` requires exactly one marker, a known profile, and
+marker, and the Factory's verifier requires exactly one marker, a known profile, and
 that profile's exact `runs-on:` value. There is no cross-profile fallback in
 either direction: an offline `aru-ci` pool leaves `aru-governed-pr` queued and
 merge blocked rather than rerouting to hosted runners, and a `github-hosted`
@@ -206,12 +207,12 @@ release those files came from; both are copies of the Factory's committed
 `init_project.py --sync`. `AGENTS.md` is managed as a block: only the text between the
 `ARU_SDLC_GOVERNANCE` markers is hashed and rewritten, and a consumer's own instructions
 outside the markers are preserved by verification and by `--sync`; missing or duplicated
-markers are a failing check. `.aru/verify.sh` verifies every managed file and block
+markers are a failing check. `aru-merge-policy` verifies every managed file and block
 against the manifest first and unconditionally on the exact head, and `aru-merge-policy` verifies
 the head's managed files, read through the API and never executed, against the base
 branch's manifest; a head that changes `.aru/factory-version` is judged against its own
 manifest. A hand-edited manifest is a failing check, not a customization. The residual
-boundary is unchanged: an administrator who rewrites `.aru/verify.sh` together with the
+boundary is unchanged: an administrator who rewrites the stubs together with the
 manifest, or edits the workflow or the ruleset, is outside what a repository-owned file
 can refuse.
 

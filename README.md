@@ -3,7 +3,7 @@
 > A small, fail-closed rules-and-guidelines kernel that moves one approved
 > GitHub issue to one safely merged pull request.
 
-**Project status: v2.3.1 is the current released version (released 2026-09-14).**
+**Project status: v2.4.0 is the current released version (released 2026-09-15).**
 The version is declared once, in `scripts/policy.toml`; this line, the newest
 released heading in `CHANGELOG.md` and the newest `v*` tag restate it, and
 `tests/test_release_truth.py` fails when they disagree. Future kernel improvements
@@ -80,7 +80,7 @@ be migrated into an existing project when all of these are true:
   statuses `Backlog`, `Ready`, `In Progress`, `In Review`, and `Done`.
 - New governed issues are added to that Project Board.
 - The repository's account is assigned a runner profile and can run the
-  installed `aru-governed-pr` workflow and its consumer-owned `.aru/verify.sh`.
+  installed `aru-governed-pr` stub, which calls this repository's verification action.
   On `self-hosted-mac` that also means at least one online repository-level
   self-hosted macOS arm64 runner carrying the `aru-ci` label; on
   `github-hosted` it means Actions is enabled and the governed workflow is
@@ -217,7 +217,7 @@ python3 "$ARU_SDLC_HOME/scripts/init_project.py" \
 Review the staged `AGENTS.md`, `.github/`, `.aru/`, and `.gitignore` before
 applying them. Bootstrap installs the consumer-owned `aru-governed-pr` workflow,
 which checks out the exact PR head on the account's assigned runner profile,
-runs `.aru/verify.sh`, and validates the linked issue's `touches:` boundary
+runs the Factory's `scripts/verify_consumer.sh` through the pinned action, and validates the linked issue's `touches:` boundary
 against the actual diff. On `self-hosted-mac`, register the runner before
 requiring the check. Customize the verification commands and branch rules for
 the consumer's risk policy. The workflow deliberately has no cross-profile
@@ -227,7 +227,7 @@ An existing governed consumer updates by restaging with the `--owner` its
 repository actually lives under and reconciling changed Aru files on a normal
 project branch. Preserve its working verification commands and product rules;
 never replace working checks with generated starters. New scaffolds separate
-framework checks in `.aru/verify.sh` from product checks in the required executable
+framework checks, which run from the Factory, from product checks in the required executable
 `.aru/verify-project.sh`. Replace its failing starter with real product checks.
 When adopting this split, preserve existing verification commands in that file
 and reconcile the framework verifier deliberately.

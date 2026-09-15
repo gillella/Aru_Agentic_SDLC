@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-VERIFY = Path(__file__).resolve().parents[1] / "templates/verify.sh"
+VERIFY = Path(__file__).resolve().parents[1] / "scripts/verify_consumer.sh"
 GIT = shutil.which("git")
 
 

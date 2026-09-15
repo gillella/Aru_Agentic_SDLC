@@ -125,6 +125,8 @@ def review_declaration(reviewers: list[str] | None) -> str:
 def render_profile(content: str, profile: str) -> str:
     spec = profile_spec(profile)
     for token, value in (
+        ("__ARU_FACTORY_REPOSITORY__", FACTORY_REPOSITORY),
+        ("__ARU_FACTORY_VERSION__", policy.version()),
         ("__ARU_RUNNER_PROFILE__", profile),
         ("__ARU_RUNS_ON__", spec["runs_on"]),
         ("__ARU_TRUST_STEP__", spec["trust_step"]),
@@ -248,12 +250,26 @@ def contained_git_hooks(destination: Path) -> Path:
 # Files the consumer owns once bootstrap has run. A sync never rewrites these:
 # the reviewer list and the project's own verification are decisions the
 # repository made, not framework content to be replaced underneath it.
-CONSUMER_OWNED = (".aru/review.json", ".aru/verify-project.sh", ".gitignore")
+# Written once and never re-rendered: the consumer owns the content.
+CONSUMER_OWNED = (".aru/review.json", ".aru/verify-project.sh", ".gitignore",
+                  ".github/ISSUE_TEMPLATE/governed-task.yml",
+                  ".github/PULL_REQUEST_TEMPLATE.md")
 
 # Written with the executable bit; everything else is plain.
-EXECUTABLE = (".aru/verify.sh", ".aru/verify-project.sh",
-              ".aru/hooks/pre-push", ".aru/hooks/enforce_touches.py",
-              ".aru/hooks/check_manifest.py")
+EXECUTABLE = (".aru/verify-project.sh",)
+
+# Copies a consumer used to carry and no longer needs: the verifier, the touches
+# parser and the hooks now run from the Factory, through the workflow stubs and
+# through `scripts/install_hooks.sh`. `--sync` deletes these; nothing recreates
+# them. Keeping a stale copy would mean two answers to "what does this check do".
+RETIRED = (".aru/verify.sh", ".aru/lib/touches.py", ".aru/hooks/pre-push",
+           ".aru/hooks/enforce_touches.py", ".aru/hooks/check_manifest.py")
+
+# The repository whose composite actions a consumer's stubs call. A fork that
+# governs its own consumers must change this, and its consumers must re-sync:
+# the stub reference is what makes the Factory's checks unbypassable, so it is
+# declared here rather than discovered from a remote at render time.
+FACTORY_REPOSITORY = "gillella/Aru_Agentic_SDLC"
 
 # Both must exist before a directory is treated as governed, so a sync refuses
 # an unrelated repository instead of half-converting it.
@@ -283,6 +299,11 @@ def framework_files(
     manifest is byte-identical to the one a test pins against these same files.
     `canonical=False` omits it, which is how the renderer hashes the other files
     without reading the manifest it is about to produce.
+
+    The two workflows are stubs: they carry the trust boundary, the checkout, the
+    check name and the runner, and call this repository's composite actions at the
+    declared release. No verification logic is written into a consumer, which is
+    why `RETIRED` exists and why there is no `.aru/verify.sh` here.
     """
     profile_spec(runner_profile)
     framework = Path(__file__).resolve().parents[1]
@@ -299,13 +320,9 @@ def framework_files(
         ".github/workflows/merge-policy.yml": render_profile(
             template("merge-policy.yml"), runner_profile),
         ".aru/review.json": review_declaration(reviewers),
-        ".aru/verify.sh": template("verify.sh"),
         ".aru/verify-project.sh": template("verify-project.sh"),
-        ".aru/lib/touches.py": (framework / "scripts" / "touches.py").read_text(encoding="utf-8"),
         ".gitignore": "__pycache__/\n*.py[cod]\n.venv/\n.env\n.worktrees/\n",
     }
-    for hook in ("pre-push", "enforce_touches.py", "check_manifest.py"):
-        files[f".aru/hooks/{hook}"] = (framework / "hooks" / hook).read_text(encoding="utf-8")
     files[manifest.VERSION_PATH] = policy.version() + "\n"
     if canonical:
         files[manifest.MANIFEST_PATH] = manifest.canonical_path(runner_profile).read_text(

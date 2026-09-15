@@ -4,6 +4,11 @@
 that edits it keeps the check name and can go green without running anything. This
 workflow runs the copy on the base branch instead. These tests pin the properties that
 make that true, and the safety rule that makes `pull_request_target` acceptable here.
+
+A consumer's copy is now a stub: it owns the trigger, the trust guard, the base
+checkout, the check name and the runner, and calls the Factory's composite action at a
+pinned release for everything else. The steps that used to run inline therefore live in
+`.github/actions/merge-policy/action.yml`, and are asserted there.
 """
 
 from __future__ import annotations
@@ -14,9 +19,16 @@ import pytest
 import yaml
 
 import init_project
+import policy
 
 ROOT = Path(__file__).resolve().parents[1]
+# Aru's own live workflow is NOT a rendering of the template any more: the Factory runs
+# its checks from its own checkout, consumers call the released action. The properties
+# below that hold for any merge-policy gate are still asserted against all three.
 WORKFLOW_SOURCES = ["live", "self-hosted-mac", "github-hosted"]
+CONSUMER_SOURCES = ["self-hosted-mac", "github-hosted"]
+ACTION_PATH = ROOT / ".github/actions/merge-policy/action.yml"
+PROFILE_MARKER = "# aru-runner-profile:"
 
 
 def policy_workflows() -> dict[str, str]:
@@ -80,11 +92,32 @@ def test_merge_policy_publishes_its_verdict_exactly_once(source):
     raw = policy_workflows()[source]
     workflow = yaml.safe_load(raw)
     assert "statuses" not in workflow["permissions"]
-    assert workflow["permissions"]["contents"] == "read"
     assert "statuses/" not in raw
-    steps = workflow["jobs"]["merge-policy"]["steps"]
-    enforce = [step for step in steps if "enforce_touches.py" in str(step.get("run", ""))]
-    assert len(enforce) == 1 and "--expected-head" in enforce[0]["run"]
+    # One job, so the required context `aru-merge-policy` is published exactly once.
+    assert list(workflow["jobs"]) == ["merge-policy"]
+    assert workflow["jobs"]["merge-policy"]["name"] == "aru-merge-policy"
+
+
+@pytest.mark.parametrize("source", WORKFLOW_SOURCES)
+def test_merge_policy_asks_for_read_only_permissions(source):
+    """`check_stubs.py` refuses a head that grants itself a write scope while keeping the
+    required check's name, so the base copy must never hold one to begin with."""
+    permissions = yaml.safe_load(policy_workflows()[source])["permissions"]
+    assert permissions, "an empty permissions block would inherit the workflow default"
+    assert set(permissions.values()) == {"read"}, permissions
+
+
+@pytest.mark.parametrize("source", WORKFLOW_SOURCES)
+def test_merge_policy_declares_one_runner_profile_matching_its_runner(source):
+    """The marker is what `check_stubs.py` compares across base and head; a head that
+    moved the check to another pool while keeping the name would be caught by it only
+    if the marker and the runner agree here."""
+    raw = policy_workflows()[source]
+    declared = [line.split(":", 1)[1].strip() for line in raw.splitlines()
+                if line.strip().startswith(PROFILE_MARKER)]
+    assert len(declared) == 1, declared
+    runs_on = yaml.safe_load(raw)["jobs"]["merge-policy"]["runs-on"]
+    assert runs_on == yaml.safe_load(init_project.profile_spec(declared[0])["runs_on"])
 
 
 @pytest.mark.parametrize("source", WORKFLOW_SOURCES)
@@ -97,80 +130,73 @@ def test_merge_policy_refuses_events_it_cannot_trust(source):
     assert "exit 1" in guard
 
 
-# Aru keeps its own hooks at `hooks/`; a consumer receives them at `.aru/hooks/`.
-# The live workflow and the scaffolded one therefore differ in exactly this path
-# and nowhere else. Conflating the two is what let `templates/merge-policy.yml`
-# execute a path the scaffold never wrote, which wedged gillella/AruLifts.
-CONSUMER_HOOKS = ".aru/hooks/"
-OWN_HOOKS = "hooks/"
-
-
-def _normalise_hook_paths(text: str) -> str:
-    """Rewrite consumer hook paths to this repository's own layout."""
-    return text.replace(CONSUMER_HOOKS, OWN_HOOKS)
-
-
-# Aru is the Factory, not a scaffolded consumer: it carries no `.aru/manifest.json`,
-# so the managed-file step exists only in the rendering a consumer receives. That is
-# the second intended difference, and it is compared separately rather than ignored.
-MANAGED_FILE_STEP = "check_manifest.py"
-
-
-def _without_managed_file_step(document: dict) -> dict:
-    steps = document["jobs"]["merge-policy"]["steps"]
-    document["jobs"]["merge-policy"]["steps"] = [
-        step for step in steps if MANAGED_FILE_STEP not in str(step.get("run", ""))
+@pytest.mark.parametrize("source", CONSUMER_SOURCES)
+def test_the_consumer_stub_calls_exactly_one_aru_action_at_the_pinned_release(source):
+    """A stub carries no verification of its own: one action reference, this Factory,
+    this release. `check_stubs.py` enforces the same count at the head, and an upgrade
+    is allowed to change nothing in the reference but the tag."""
+    raw = policy_workflows()[source]
+    steps = yaml.safe_load(raw)["jobs"]["merge-policy"]["steps"]
+    uses = [str(step["uses"]) for step in steps if "uses" in step]
+    aru = [reference for reference in uses if not reference.startswith("actions/checkout@")]
+    assert aru == [
+        f"{init_project.FACTORY_REPOSITORY}/.github/actions/merge-policy@v{policy.version()}"
     ]
-    return document
+    # Nothing is executed by the stub itself except the trust guard.
+    runs = [step for step in steps if "run" in step]
+    assert len(runs) == 1 and "ARU_EVENT_NAME" in runs[0]["run"]
+    call = [step for step in steps if step.get("uses") == aru[0]][0]
+    assert call["with"]["expected-head"] == "${{ github.event.pull_request.head.sha }}"
+    assert call["with"]["pr-number"] == "${{ github.event.pull_request.number }}"
 
 
-@pytest.mark.parametrize("source", ["self-hosted-mac", "github-hosted"])
-def test_only_the_consumer_rendering_verifies_managed_files(source):
-    """A consumer's copy runs the manifest check; the Factory's own copy has nothing
-    to check, and must not execute a path it never wrote."""
-    def steps(text):
-        return yaml.safe_load(text)["jobs"]["merge-policy"]["steps"]
-
-    workflows = policy_workflows()
-    consumer = [s for s in steps(workflows[source]) if MANAGED_FILE_STEP in str(s.get("run", ""))]
-    assert len(consumer) == 1
-    assert ".aru/hooks/check_manifest.py" in consumer[0]["run"]
-    assert "--expected-head" in consumer[0]["run"]
-    assert not [s for s in steps(workflows["live"]) if MANAGED_FILE_STEP in str(s.get("run", ""))]
+# --- The checks themselves, now that they run from the Factory's composite action ---
 
 
-def test_merge_policy_has_no_profile_drift():
-    """The self-hosted rendering must still reproduce Aru's own live workflow.
-
-    Compared after normalising the hook directory and removing the managed-file step,
-    which are real and intended differences rather than drift; each is asserted on its
-    own above. Everything else -- triggers, the trust guard, permissions, runner
-    target, timeouts -- must still match exactly.
-    """
-    workflows = policy_workflows()
-    rendered = yaml.safe_load(_normalise_hook_paths(workflows["self-hosted-mac"]))
-    assert _without_managed_file_step(rendered) == yaml.safe_load(workflows["live"])
+def merge_policy_action() -> dict:
+    return yaml.safe_load(ACTION_PATH.read_text(encoding="utf-8"))
 
 
-def test_the_hook_directory_is_the_only_difference():
-    """Guard the normalisation above: it must not be hiding anything else.
+@pytest.mark.parametrize(
+    "hook", ["enforce_touches.py", "check_manifest.py", "check_stubs.py"]
+)
+def test_the_action_invokes_each_base_branch_checker_exactly_once(hook):
+    """The three judgements a merge-policy run makes about a head: its write boundary,
+    its Factory-managed files, and its workflow stubs."""
+    # Run from the resolved Factory checkout, never from the workspace the caller
+    # checked out, so a consumer repository cannot supply the script that judges it.
+    invocation = f'python3 "${{ARU_SDLC_HOME}}/hooks/{hook}"'
+    steps = merge_policy_action()["runs"]["steps"]
+    invoking = [step for step in steps if invocation in str(step.get("run", ""))]
+    assert len(invoking) == 1, [step.get("name") for step in invoking]
+    run = invoking[0]["run"]
+    assert "--pr " in run and "--expected-head " in run
 
-    Without this, widening `_normalise_hook_paths` would silently let real drift
-    through the test that exists to catch drift.
-    """
-    def executable_lines(text: str) -> set[str]:
-        # Comment prose legitimately differs between the live workflow and the
-        # template; what must not differ is anything the runner executes.
-        return {line for line in text.splitlines() if not line.strip().startswith("#")}
 
-    workflows = policy_workflows()
-    differences = (executable_lines(workflows["self-hosted-mac"])
-                   ^ executable_lines(workflows["live"]))
-    assert differences, "if these are identical, the normalisation is now pointless"
-    assert all("enforce_touches.py" in line or "manifest" in line for line in differences), (
-        f"the renderings differ beyond the hook path and the managed-file step: "
-        f"{sorted(differences)}"
-    )
+def test_the_action_never_reads_or_checks_out_the_head():
+    """The safety rule that makes `pull_request_target` acceptable, asserted where the
+    work actually happens: head bytes are read through the contents API and hashed,
+    and nothing from the pull request is checked out, installed or executed."""
+    raw = ACTION_PATH.read_text(encoding="utf-8")
+    action = merge_policy_action()
+    assert action["runs"]["using"] == "composite"
+    steps = action["runs"]["steps"]
+    # A composite step that runs nothing but `run:` cannot check anything out.
+    assert all("uses" not in step for step in steps), [s.get("uses") for s in steps]
+    for forbidden in ("actions/checkout", "git checkout", "git fetch",
+                      "github.event.pull_request.head", "pip install", "pytest"):
+        assert forbidden not in raw, forbidden
+    # The head reaches the checkers as a value to verify against, never as a ref.
+    assert "expected-head" in action["inputs"]
+
+
+def test_the_action_refuses_a_factory_checkout_missing_a_checker():
+    """A packaged tag without one of the three scripts would otherwise skip that
+    judgement silently; the resolve step fails closed instead."""
+    resolve = merge_policy_action()["runs"]["steps"][0]["run"]
+    for hook in ("hooks/enforce_touches.py", "hooks/check_manifest.py", "hooks/check_stubs.py"):
+        assert hook in resolve
+    assert "exit 1" in resolve
 
 
 def test_both_required_checks_are_declared_for_consumers():

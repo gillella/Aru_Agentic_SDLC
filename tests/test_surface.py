@@ -59,7 +59,10 @@ def test_supported_command_and_skill_budgets():
 
 
 def supported_command_paths() -> list[Path]:
-    internal_helpers = {"common.py", "local_verification.py"}
+    # `verify_consumer.sh` is the governed-pr action's verifier, not an operator
+    # command: it is the former `templates/verify.sh`, which this budget never
+    # counted either. Moving a script into scripts/ must not read as new surface.
+    internal_helpers = {"common.py", "local_verification.py", "verify_consumer.sh"}
     return [
         path
         for path in tracked_paths()

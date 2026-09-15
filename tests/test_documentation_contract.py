@@ -115,9 +115,18 @@ def governed_workflows() -> dict[str, str]:
 
 
 def test_governed_workflows_pin_touches_check_to_event_head():
-    for workflow in governed_workflows().values():
-        assert "ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}" in workflow
-        assert '--expected-head "$ARU_EXPECTED_HEAD"' in workflow
+    """Aru's own workflow plumbs the head itself; a consumer stub hands it to the
+    action, which is where the `--expected-head` call now lives."""
+    live = text(ROOT / ".github" / "workflows" / "governed-pr.yml")
+    assert "ARU_EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}" in live
+    assert '--expected-head "$ARU_EXPECTED_HEAD"' in live
+
+    action = text(ROOT / ".github" / "actions" / "governed-pr" / "action.yml")
+    assert '--expected-head "${ARU_EXPECTED_HEAD}"' in action
+    assert "ARU_EXPECTED_HEAD: ${{ inputs.expected-head }}" in action
+    for profile in init_project.RUNNER_PROFILES:
+        stub = init_project.render_profile(text(ROOT / "templates" / "governed-pr.yml"), profile)
+        assert "expected-head: ${{ github.event.pull_request.head.sha }}" in stub, profile
 
 
 def test_every_runner_profile_stays_budget_free_and_account_bound():
@@ -131,8 +140,11 @@ def test_every_runner_profile_stays_budget_free_and_account_bound():
             "Check out the exact pull-request head"
         ), name
         assert "Only verified pull_request events from this repository may execute" in workflow
-        assert "sys.version_info >= (3, 11)" in workflow, name
-        assert "command -v gh" in workflow, name
+    # The interpreter and `gh` preconditions moved with the checks themselves: a
+    # consumer stub carries no commands, so the action asserts them once.
+    action = text(ROOT / ".github" / "actions" / "governed-pr" / "action.yml")
+    assert "sys.version_info >= (3, 11)" in action
+    assert "command -v gh" in action
     assert init_project.ACCOUNT_RUNNER_PROFILES == {
         "gillella": "self-hosted-mac", "unum-inc": "github-hosted",
     }
