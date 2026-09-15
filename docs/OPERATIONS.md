@@ -219,23 +219,61 @@ approval rule is met, skipping the helper's board, criteria and queue gates.
 
 1. Register a **new** GitHub App. Never reuse the App behind
    `ARU_GITHUB_APP_RUNNER`: agents use that one for ordinary commands and could
-   post the check with it. Grant Checks: read and write, and nothing else
-   (Metadata: read is implicit). Install it on each governed repository.
+   post the check with it, which defeats the gate. Grant Checks: read and write, and nothing else (Metadata: read is
+   implicit). Install it on each governed repository, selecting only those
+   repositories rather than all.
+
+   On this repository the gate uses `Aru Code Factory - Merge Authority`, App id
+   **4921120**, which is distinct from `aru-code-factory-gillella` (4740358), the
+   App agents use for ordinary commands.
 2. Store its App id and private key in their own credentials directory, and give
-   it a runner with the same `<runner> --repo OWNER/REPO -- gh ...` interface as
-   the Factory wrapper. The runner must not print the installation token.
+   it a runner with the `<runner> --repo OWNER/REPO -- gh ...` interface. **No
+   runner ships with Aru**; it is operator-provided, and on this machine it lives
+   at `~/.aru-merge-authority/scripts/aru_merge_authority_exec.py` with its
+   credentials beside it. The runner must not print the installation token.
+
+   Three things that are expensive to discover:
+
+   - the credentials directory must be mode `0700` and its files `0600`, or the
+     App-auth helper refuses before doing any work;
+   - a helper that hardcodes its credentials path may bind that path as a
+     **default argument value**, which is fixed at function-definition time.
+     Reassigning the module global then has no effect; repoint it by substituting
+     the constant in the source before executing it;
+   - `gh api app` returns 401 under an installation token, because that endpoint
+     needs an App JWT. It cannot be used to check the App's permissions. The only
+     honest test is posting a check run and reading back `.app.id`.
+
+   Keep the runner and its credentials outside any other tool's directory. Placing
+   them inside an agent framework's home makes a kernel merge gate depend on that
+   framework being installed.
 3. On every machine or Driver host that runs `merge_pr.py`, export both variables:
 
    ```bash
-   export ARU_MERGE_APP_RUNNER="$HOME/.local/bin/aru-merge-app-run"
+   export ARU_MERGE_APP_RUNNER="$HOME/.aru-merge-authority/scripts/aru_merge_authority_exec.py"
    export ARU_MERGE_APP_ID="<numeric App id>"
    ```
 
    Setting only one of them makes `merge_pr.py` refuse every merge.
-4. Require the check. `init_project.py --github` adds it when the App can
-   already act on the new repository and reports `merge_authority: required`;
-   `not-installed` means the rule was left out. For an existing repository, add
-   it to the default-branch ruleset:
+4. Require the check, and only after proving the App can post it. Requiring a
+   check that nothing can post deadlocks every pull request, so the order is
+   probe first, require second:
+
+   ```bash
+   "$ARU_MERGE_APP_RUNNER" --repo OWNER/REPO -- gh api --method POST \
+     repos/OWNER/REPO/check-runs -f name=aru-merge-authorized \
+     -f head_sha="$(git rev-parse origin/main)" -f status=completed \
+     -f conclusion=neutral -f 'output[title]=probe' -f 'output[summary]=probe' \
+     --jq .app.id
+   ```
+
+   That must print the App id. If it prints anything else, stop and fix the App
+   before touching the ruleset.
+
+   `init_project.py --github` adds the rule for a new repository when the App can
+   already act on it and reports `merge_authority: required`; `not-installed`
+   means the rule was left out. For an existing repository, add it to the
+   default-branch ruleset:
 
    ```bash
    gh api repos/OWNER/REPO/rulesets/RULESET_ID | jq --argjson app "$ARU_MERGE_APP_ID" '{name,target,enforcement,conditions,bypass_actors,rules:(.rules|map(if .type=="required_status_checks" then .parameters.required_status_checks += [{"context":"aru-merge-authorized","integration_id":$app}] else . end))}' | gh api -X PUT repos/OWNER/REPO/rulesets/RULESET_ID --input -
