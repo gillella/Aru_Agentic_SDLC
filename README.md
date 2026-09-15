@@ -128,7 +128,7 @@ Choose the install path for your client:
   copilot plugin marketplace add gillella/Aru_Agentic_SDLC
   ```
 - **Codex**: Install via the plugin marketplace command (`/plugin marketplace add gillella/Aru_Agentic_SDLC`) or run the local installer below.
-- **Cursor**: Use the local installer below until its marketplace accepts a private repository.
+- **Cursor**: Install via native Cursor manifest (`.cursor-plugin/plugin.json`) using Customize > Plugins (Import local plugin folder) or run the local installer below.
 
 #### Local installer (Codex, Cursor, and non-plugin environments)
 

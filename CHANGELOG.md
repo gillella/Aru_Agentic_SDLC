@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add native Cursor plugin adapter `.cursor-plugin/plugin.json` pointing `agents` at `plugin/agents/` and `skills` at `skills/`, agreeing with root `plugin.json` on name, version, and description (#735).
+
 ## v2.3.1 - Managed block for AGENTS.md - 2026-09-14
 
 - `AGENTS.md` is managed as a block, not a file. The manifest records the sha256 of the
