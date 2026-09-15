@@ -7,6 +7,7 @@ import pytest
 
 import claim_issue
 import create_pr
+import merge_authority
 import merge_pr
 import review_authority
 import merge_state
@@ -22,6 +23,13 @@ def verification_body(command: str) -> str:
 
 
 def traverse(monkeypatch, number: int) -> dict:
+    # A traversal must not depend on operator configuration. `tests/conftest.py`
+    # already clears these for every test, but a traversal asserts that it reaches
+    # no external at all, so it neutralises them itself rather than trusting a
+    # caller: with the merge-authority App configured, `merge_pr.merge` calls
+    # `merge_authority.post`, which resolves the repository slug through `gh`.
+    for variable in ("ARU_MERGE_APP_RUNNER", "ARU_MERGE_APP_ID", "ARU_GITHUB_APP_RUNNER"):
+        monkeypatch.delenv(variable, raising=False)
     monkeypatch.setattr(subprocess, "run", lambda *_a, **_kw: pytest.fail("unexpected external call"))
     # This traversal stubs every external. The review posture is one: resolve it to the
     # permissive rule so the merge gate is exercised without reaching the default branch.
@@ -183,10 +191,39 @@ def traverse(monkeypatch, number: int) -> dict:
     return state
 
 
-def test_two_complete_disposable_traversals_without_state_repair(monkeypatch):
-    first = traverse(monkeypatch, 3)
-    monkeypatch.undo()
-    second = traverse(monkeypatch, 4)
+def test_two_complete_disposable_traversals_without_state_repair():
+    """Two traversals in one test, each in its own patch scope.
+
+    Not `monkeypatch.undo()`: the autouse isolation in `tests/conftest.py` shares
+    one function-scoped `monkeypatch` with the test, so undoing the test's patches
+    also undoes that isolation and hands the second traversal the operator's
+    merge-authority environment.
+    """
+    with pytest.MonkeyPatch.context() as first_patch:
+        first = traverse(first_patch, 3)
+    with pytest.MonkeyPatch.context() as second_patch:
+        second = traverse(second_patch, 4)
     assert first["issue"]["state"] == second["issue"]["state"] == "CLOSED"
     assert first["issue"]["labels"][-1]["name"] == "status:done"
     assert second["issue"]["labels"][-1]["name"] == "status:done"
+
+
+def test_a_traversal_is_hermetic_against_a_configured_merge_authority(monkeypatch, tmp_path):
+    """The failure reported on #742, pinned.
+
+    `ARU_MERGE_APP_RUNNER` and `ARU_MERGE_APP_ID` are exactly what an operator who
+    can merge exports, and CI sets neither. A suite that passes only without them
+    is green for CI and red for every person who can actually merge, which is the
+    wrong way round.
+    """
+    runner = tmp_path / "aru-merge-authority-runner"
+    runner.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    runner.chmod(0o755)
+    monkeypatch.setenv("ARU_MERGE_APP_RUNNER", str(runner))
+    monkeypatch.setenv("ARU_MERGE_APP_ID", "4921120")
+    assert merge_authority.configured() is not None, "the fixture must really be configured"
+
+    with pytest.MonkeyPatch.context() as patch:
+        state = traverse(patch, 5)
+    assert state["issue"]["state"] == "CLOSED"
+    assert state["issue"]["labels"][-1]["name"] == "status:done"
