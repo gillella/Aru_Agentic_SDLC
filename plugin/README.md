@@ -22,6 +22,7 @@ GitHub Actions never loads this plugin.
 | **Copilot CLI** | Yes (`skills/`) | Claude adapter only | Claude adapter only | `copilot plugin marketplace add gillella/Aru_Agentic_SDLC` |
 | **Codex** | Yes (`skills/`) | No | No (hooks not reached) | `/plugin marketplace add gillella/Aru_Agentic_SDLC` or `scripts/install_agent_integration.sh` |
 | **Cursor** | Yes (`skills/`) | Yes (`plugin/agents/`) | Opt-in `Write` only | Native Cursor manifest (`.cursor-plugin/plugin.json`) via Customize > Plugins (local plugin folder), or `scripts/install_agent_integration.sh` |
+| **Hermes Agent** | Yes (`skills/`) | No | No | `scripts/install_agent_integration.sh` (no plugin mechanism; skills land in `~/.hermes/skills/software-development/`, guidance in `~/.hermes/SOUL.md`) |
 
 ## Coverage Limits
 
