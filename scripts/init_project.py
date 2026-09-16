@@ -9,10 +9,11 @@ import re
 import tempfile
 from pathlib import Path
 
+import board_template
 import manifest
 import merge_authority
 import policy
-from common import PROJECT_AUTH, REPOSITORY_AUTH, KernelError, run
+from common import REPOSITORY_AUTH, KernelError, repo_slug, run
 
 STATUSES = ("Backlog", "Ready", "In Progress", "In Review", "Done")
 GITHUB_ACTIONS_APP_ID = 15368
@@ -592,12 +593,26 @@ def provision_github(
             cwd=directory,
         )
     owner = slug.split("/", 1)[0]
+    # Copy the operator's declared layout instead of creating a bare board. This is
+    # the only path that creates a governed Project, so there is no way to end up
+    # with a repository whose board skipped the template.
+    try:
+        template_owner, template_number = board_template.declared()
+        template = board_template.state(template_owner, template_number, directory)
+        board_template.assert_statuses(
+            f"board template {template_owner}/{template_number}", template["statuses"]
+        )
+    except KernelError as exc:
+        raise BootstrapError(str(exc)) from exc
     project = command(
         [
             "gh",
             "project",
-            "create",
-            "--owner",
+            "copy",
+            str(template_number),
+            "--source-owner",
+            template_owner,
+            "--target-owner",
             owner,
             "--title",
             f"{name} Delivery",
@@ -612,43 +627,13 @@ def provision_github(
         ["gh", "project", "link", number, "--owner", owner, "--repo", slug],
         cwd=directory,
     )
-    fields = command(
-        ["gh", "project", "field-list", number, "--owner", owner, "--format", "json"],
-        cwd=directory,
-        json_output=True,
-    )
-    status_fields = [field for field in fields.get("fields", []) if field.get("name") == "Status"]
-    if len(status_fields) != 1:
-        raise BootstrapError("new Project Board has no unique Status field")
-    mutation = """
-    mutation($field:ID!){
-      updateProjectV2Field(input:{
-        fieldId:$field
-        singleSelectOptions:[
-          {name:"Backlog",color:GRAY,description:""}
-          {name:"Ready",color:BLUE,description:""}
-          {name:"In Progress",color:YELLOW,description:""}
-          {name:"In Review",color:ORANGE,description:""}
-          {name:"Done",color:GREEN,description:""}
-        ]
-      }){
-        projectV2Field{... on ProjectV2SingleSelectField{id}}
-      }
-    }
-    """
-    command(
-        [
-            "gh",
-            "api",
-            "graphql",
-            "-f",
-            f"query={mutation}",
-            "-F",
-            f"field={status_fields[0]['id']}",
-        ],
-        cwd=directory,
-        auth=PROJECT_AUTH,
-    )
+    # Asserted, not rewritten: the copy carries the template's Status field, so a
+    # drifted template must refuse here rather than reach the new repository.
+    try:
+        copied = board_template.state(owner, int(number), directory)
+        board_template.assert_statuses(f"copied board {owner}/{number}", copied["statuses"])
+    except KernelError as exc:
+        raise BootstrapError(str(exc)) from exc
     # Pin the merge-authority check only once its App can act on the new repository:
     # a required check that nothing can post would deadlock the first pull request.
     pinned = merge_app is not None and merge_authority.installed(slug)
@@ -676,13 +661,31 @@ def main() -> int:
                         help="update an existing governed repository instead of creating one")
     parser.add_argument("--adopt", action="store_true",
                         help="bring an existing, ungoverned repository under the kernel")
+    parser.add_argument("--board", action="store_true",
+                        help="bring an existing repository's linked board up to the declared template")
     parser.add_argument("--check", action="store_true",
-                        help="with --sync, report divergence and write nothing")
+                        help="with --sync or --board, report divergence and write nothing")
     parser.add_argument("--ruleset", action="store_true",
                         help="with --sync, also re-provision the branch ruleset from the policy")
     parser.add_argument("--merge-app-id", type=int)
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    if args.board:
+        # Layout only: this adds views to a board that already exists and never
+        # touches the repository, the ruleset or any lifecycle state.
+        try:
+            report = board_template.sync(
+                repo_slug(args.directory), args.directory, check=args.check
+            )
+        except KernelError as exc:
+            parser.error(str(exc))
+        if args.json:
+            print(json.dumps(report, sort_keys=True))
+        else:
+            verb = "missing" if args.check else "added"
+            names = report["missing"] if args.check else report["added"]
+            print(f"{report['project']} from {report['template']}: {verb} {names or 'none'}")
+        return 0
     if args.sync or args.adopt:
         try:
             # Imported here rather than at module scope: consumer.py renders from
