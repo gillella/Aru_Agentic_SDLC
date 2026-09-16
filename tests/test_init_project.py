@@ -281,12 +281,15 @@ def test_assert_statuses_refuses_anything_but_the_five():
             board_template.assert_statuses("template", statuses)
 
 
-def test_board_sync_check_reports_missing_views_and_writes_nothing(monkeypatch, tmp_path):
+@pytest.mark.parametrize("check,created", [(True, []), (False, ["Roadmap"])])
+def test_board_sync_adds_exactly_the_missing_views(monkeypatch, tmp_path, check, created):
     issued = []
     owner, number = board_template.declared()
 
     def fake_graphql(query, directory, **variables):
-        issued.append(query)
+        if "createProjectV2View" in query:
+            issued.append(variables["name"])
+            return {"data": {"createProjectV2View": {"projectV2View": {"id": "v"}}}}
         if "repository(" in query:
             return {"data": {"repository": {"projectsV2": {"nodes": [{"number": 7}]}}}}
         views = [{"name": "All", "layout": "TABLE_LAYOUT"}]
@@ -295,11 +298,11 @@ def test_board_sync_check_reports_missing_views_and_writes_nothing(monkeypatch, 
         return compliant_project(views)
 
     monkeypatch.setattr(board_template, "_graphql", fake_graphql)
-    report = board_template.sync("gillella/consumer", tmp_path, check=True)
-    assert report["missing"] == ["Roadmap"] and report["added"] == []
+    report = board_template.sync("gillella/consumer", tmp_path, check=check)
+    # "All" is already on the board and is never recreated; check mode writes nothing.
+    assert issued == created and report["added"] == created
+    assert report["missing"] == ["Roadmap"]
     assert report["template"] == f"{owner}/{number}" and report["project"] == "gillella/7"
-    # check mode is read-only: no view is ever created.
-    assert not [q for q in issued if "createProjectV2View" in q]
 
 
 @pytest.mark.parametrize("source", WORKFLOW_SOURCES)
