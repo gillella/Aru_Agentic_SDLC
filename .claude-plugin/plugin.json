@@ -14,10 +14,6 @@
     "merge-gate",
     "issue-first"
   ],
-  "agents": [
-    "./plugin/agents/aru-implementer.md",
-    "./plugin/agents/aru-reviewer.md",
-    "./plugin/agents/aru-triager.md"
-  ],
+  "agents": "./plugin/agents/",
   "hooks": "./plugin/hooks/hooks.json"
 }
