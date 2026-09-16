@@ -29,9 +29,13 @@ file.
 | `aru-tester` | `tester` | Encodes acceptance criteria as a test that fails before the change and passes after it. Never loosens an assertion. |
 | `aru-docs` | `docs` | Changes only declared documentation paths and keeps every restatement in agreement with `scripts/policy.toml`. |
 
-The Claude adapter (`.claude-plugin/plugin.json`) and the Cursor adapter
-(`.cursor-plugin/plugin.json`) both point at the directory, so a new persona
-ships by adding a file. The root `plugin.json` carries no `agents` key.
+The Cursor adapter (`.cursor-plugin/plugin.json`) points at the directory, so a
+new persona ships by adding a file. The Claude adapter
+(`.claude-plugin/plugin.json`) must name each file instead — `claude plugin
+validate .` rejects a directory string with `agents: Invalid input` — so a new
+persona is added in both places. `test_claude_adapter_agrees_with_root_manifest`
+fails if the two fall out of step. The root `plugin.json` carries no `agents`
+key.
 
 ## Per-Client Capabilities
 

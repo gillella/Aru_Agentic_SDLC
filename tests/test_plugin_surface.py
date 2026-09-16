@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 import json
+import pathlib
 import os
 import re
 import subprocess
@@ -58,14 +59,16 @@ def test_claude_adapter_agrees_with_root_manifest():
     # so a version bump that forgets an adapter fails here instead of shipping.
     assert adapter.get("version") == policy.version()
 
+    # Not a style preference: `claude plugin validate .` rejects a directory string here
+    # ("agents: Invalid input"), unlike the Cursor adapter, so the Claude adapter must
+    # name every persona file and a new persona has to be added in both places.
     agents = adapter.get("agents")
-    if isinstance(agents, list):
-        for agent_rel in agents:
-            assert (ROOT / agent_rel).is_file(), f"agent path {agent_rel} must be a file"
-    elif isinstance(agents, str):
-        assert (ROOT / agents).is_dir(), f"agent dir {agents} must be a directory"
-    else:
-        assert False, "adapter agents must be a list or str"
+    assert isinstance(agents, list), "claude adapter agents must be a list of file paths"
+    for agent_rel in agents:
+        assert (ROOT / agent_rel).is_file(), f"agent path {agent_rel} must be a file"
+    listed = {pathlib.PurePosixPath(a).name for a in agents}
+    available = {q.name for q in (ROOT / "plugin" / "agents").glob("*.md")}
+    assert listed == available, "claude adapter must list every persona in plugin/agents/"
 
     hooks_path = ROOT / adapter.get("hooks", "")
     assert hooks_path.is_file(), f"adapter hooks path {hooks_path} must exist"

@@ -8,9 +8,10 @@
   fails before the implementation change and passes after it and never loosens an
   existing assertion; the docs persona changes no code and keeps every restatement in
   agreement with `scripts/policy.toml` (#737).
-- The Claude adapter lists the personas as the directory `./plugin/agents/` rather than
-  a file list, matching the Cursor adapter, so a new persona ships by adding a file. The
-  root `plugin.json` still carries no `agents` key (#737).
+- The Claude adapter lists all five persona files and is now pinned to exactly the
+  contents of `plugin/agents/`. It cannot use the Cursor adapter's directory form:
+  `claude plugin validate .` rejects a directory string with `agents: Invalid input`.
+  The root `plugin.json` still carries no `agents` key (#737).
 
 ## v2.4.0 - Thin consumers - 2026-09-15
 
