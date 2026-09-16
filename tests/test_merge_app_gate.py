@@ -10,6 +10,17 @@ import merge_authority
 import merge_pr
 from test_merge_gate import base_pr, install_happy_gate
 
+def stub_board_template(monkeypatch):
+    """Provisioning now copies the declared template, so the Project reads it
+    performs must be stubbed too or they reach the live-GitHub guard."""
+    monkeypatch.setattr(init_project.board_template, "_graphql", lambda *a, **k: {
+        "data": {"user": {"projectV2": {
+            "id": "PVT_1",
+            "views": {"nodes": [{"name": "All", "layout": "TABLE_LAYOUT"}]},
+            "fields": {"nodes": [{"name": "Status", "options": [
+                {"name": s} for s in init_project.board_template.STATUSES]}]},
+        }}}
+    })
 HEAD = "a" * 40
 SLUG = "gillella/consumer"
 REAL_POST = merge_authority.post
@@ -196,7 +207,7 @@ def setup_calls(monkeypatch):
     rulesets = []
     responses = {
         ("gh", "repo", "view"): {"nameWithOwner": SLUG},
-        ("gh", "project", "create"): {"number": 5, "url": "https://example.test/project/5"},
+        ("gh", "project", "copy"): {"number": 5, "url": "https://example.test/project/5"},
         ("gh", "project", "field-list"): {"fields": [{"name": "Status", "id": "PVTSSF_1"}]},
     }
 
@@ -207,6 +218,7 @@ def setup_calls(monkeypatch):
         return responses.get(tuple(argv[:3]), "")
 
     monkeypatch.setattr(init_project, "command", fake_command)
+    stub_board_template(monkeypatch)
     return rulesets
 
 

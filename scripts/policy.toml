@@ -292,3 +292,12 @@ steps = [
 [runner_profiles.accounts]
 gillella = "self-hosted-mac"
 "unum-inc" = "github-hosted"
+
+[board_template]
+# The Project every governed board is copied from. Data, not kernel logic: adding
+# a view to the operator's layout is a change to THIS project, not a change to
+# init_project.py. Provisioning refuses when the template is missing, unreadable
+# or carries statuses other than the five the kernel reads, rather than falling
+# back to a bare board. A board layout is presentation and never a gate.
+owner = "gillella"
+number = 11

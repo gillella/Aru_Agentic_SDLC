@@ -11,6 +11,7 @@ import sys
 import pytest
 import yaml
 
+import board_template
 import init_project
 import policy
 
@@ -210,12 +211,11 @@ def test_project_name_is_contained(name):
         init_project.safe_name(name)
 
 
-def test_github_setup_marks_project_graphql_authority(monkeypatch, tmp_path):
-    calls, rulesets = [], []
+def test_github_setup_copies_the_declared_board_template(monkeypatch, tmp_path):
+    calls, rulesets, reads = [], [], []
     responses = {
         ("gh", "repo", "view"): {"nameWithOwner": "gillella/consumer"},
-        ("gh", "project", "create"): {"number": 5, "url": "https://example.test/project/5"},
-        ("gh", "project", "field-list"): {"fields": [{"name": "Status", "id": "PVTSSF_1"}]},
+        ("gh", "project", "copy"): {"number": 5, "url": "https://example.test/project/5"},
     }
 
     def fake_command(argv, *, cwd, json_output=False, auth=None):
@@ -226,24 +226,83 @@ def test_github_setup_marks_project_graphql_authority(monkeypatch, tmp_path):
             return {"_links": {"html": {"href": "https://example.test/rules/1"}}}
         return responses.get(tuple(argv[:3]), "")
 
-    def calls_with(*prefix):
-        return [call for call in calls if call[0][: len(prefix)] == list(prefix)]
+    def fake_graphql(query, directory, **variables):
+        reads.append(variables.get("number"))
+        return compliant_project()
 
     monkeypatch.setattr(init_project, "command", fake_command)
+    monkeypatch.setattr(board_template, "_graphql", fake_graphql)
     result = init_project.github_setup(
         "consumer", tmp_path, private=True, owner="gillella", runner_profile="self-hosted-mac"
     )
     assert result["repository"] == "gillella/consumer"
-    assert [call[0][3] for call in calls_with("gh", "repo", "create")] == ["gillella/consumer"]
-    assert [auth for _, auth in calls_with("gh", "api", "graphql")] == [init_project.PROJECT_AUTH]
+    # A bare board is never created; the declared template is copied instead.
+    assert not [c for c in calls if c[0][:3] == ["gh", "project", "create"]]
+    copy = next(c[0] for c in calls if c[0][:3] == ["gh", "project", "copy"])
+    owner, number = board_template.declared()
+    assert copy[3] == str(number)
+    assert copy[copy.index("--source-owner") + 1] == owner
+    # The template is read before the copy and the copy re-read after it.
+    assert reads == [number, 5]
     assert rulesets == [init_project.ruleset_payload()]
-    ruleset_calls = calls_with("gh", "api", "repos/gillella/consumer/rulesets")
-    assert [auth for _, auth in ruleset_calls] == [init_project.REPOSITORY_AUTH]
     assert result["ruleset"] == "https://example.test/rules/1"
-    query = next(a for a in calls_with("gh", "api", "graphql")[0][0] if a.startswith("query="))
-    # GitHub renamed this input; the old name is rejected after the Project already exists.
-    assert "fieldId:$field" in query and "projectV2FieldId" not in query
-    assert [s for s in init_project.STATUSES if f'name:"{s}"' in query] == list(init_project.STATUSES)
+
+
+def compliant_project(views=None):
+    return {"data": {"user": {"projectV2": {
+        "id": "PVT_1",
+        "views": {"nodes": views if views is not None else [{"name": "All", "layout": "TABLE_LAYOUT"}]},
+        "fields": {"nodes": [
+            {"name": "Status", "options": [{"name": s} for s in board_template.STATUSES]}
+        ]},
+    }}}}
+
+
+@pytest.mark.parametrize("section", [
+    None, {}, {"number": 11}, {"owner": "", "number": 11}, {"owner": "gillella"},
+    {"owner": "gillella", "number": 0}, {"owner": "gillella", "number": True},
+    {"owner": "gillella", "number": "11"},
+])
+def test_board_template_declaration_fails_closed(monkeypatch, section):
+    monkeypatch.setattr(board_template.policy, "load", lambda: {"board_template": section})
+    with pytest.raises(init_project.KernelError):
+        board_template.declared()
+
+
+def test_assert_statuses_refuses_anything_but_the_five():
+    board_template.assert_statuses("template", board_template.STATUSES)
+    drifted = [
+        ("Awaiting Human Approval",) + board_template.STATUSES,
+        ("Backlog", "Ready", "In Progress", "In Review", "Complete"),
+        board_template.STATUSES[:-1],
+    ]
+    for statuses in drifted:
+        with pytest.raises(init_project.KernelError):
+            board_template.assert_statuses("template", statuses)
+
+
+@pytest.mark.parametrize("check,created", [(True, []), (False, ["Roadmap"])])
+def test_board_sync_adds_exactly_the_missing_views(monkeypatch, tmp_path, check, created):
+    issued = []
+    owner, number = board_template.declared()
+
+    def fake_graphql(query, directory, **variables):
+        if "createProjectV2View" in query:
+            issued.append(variables["name"])
+            return {"data": {"createProjectV2View": {"projectV2View": {"id": "v"}}}}
+        if "repository(" in query:
+            return {"data": {"repository": {"projectsV2": {"nodes": [{"number": 7}]}}}}
+        views = [{"name": "All", "layout": "TABLE_LAYOUT"}]
+        if variables.get("number") == number:
+            views = views + [{"name": "Roadmap", "layout": "ROADMAP_LAYOUT"}]
+        return compliant_project(views)
+
+    monkeypatch.setattr(board_template, "_graphql", fake_graphql)
+    report = board_template.sync("gillella/consumer", tmp_path, check=check)
+    # "All" is already on the board and is never recreated; check mode writes nothing.
+    assert issued == created and report["added"] == created
+    assert report["missing"] == ["Roadmap"]
+    assert report["template"] == f"{owner}/{number}" and report["project"] == "gillella/7"
 
 
 @pytest.mark.parametrize("source", WORKFLOW_SOURCES)

@@ -6,6 +6,17 @@ import os
 from integrations.adoption import check
 import init_project
 
+def stub_board_template(monkeypatch):
+    """Provisioning now copies the declared template, so the Project reads it
+    performs must be stubbed too or they reach the live-GitHub guard."""
+    monkeypatch.setattr(init_project.board_template, "_graphql", lambda *a, **k: {
+        "data": {"user": {"projectV2": {
+            "id": "PVT_1",
+            "views": {"nodes": [{"name": "All", "layout": "TABLE_LAYOUT"}]},
+            "fields": {"nodes": [{"name": "Status", "options": [
+                {"name": s} for s in init_project.board_template.STATUSES]}]},
+        }}}
+    })
 
 def test_inspection_detects_unconfigured_consumer_without_executing_it(tmp_path):
     repo = tmp_path / "consumer"
@@ -228,7 +239,7 @@ def test_provisioning_is_shared_with_bootstrap_not_duplicated(monkeypatch, tmp_p
 
     def fake_command(argv, **kw):
         calls.append(argv)
-        if argv[:2] == ["gh", "project"] and "create" in argv:
+        if argv[:2] == ["gh", "project"] and {"create", "copy"} & set(argv):
             return {"number": 9, "url": "u"}
         if "field-list" in argv:
             return {"fields": [{"name": "Status", "id": "F"}]}
@@ -237,6 +248,7 @@ def test_provisioning_is_shared_with_bootstrap_not_duplicated(monkeypatch, tmp_p
         return {}
 
     monkeypatch.setattr(init_project, "command", fake_command)
+    stub_board_template(monkeypatch)
     monkeypatch.setattr(init_project.merge_authority, "configured", lambda: None)
     init_project.provision_github("o/r", "r", tmp_path, runner_profile=PROFILE, merge_app=None)
     created = [a for a in calls if a[:3] == ["gh", "label", "create"]]
