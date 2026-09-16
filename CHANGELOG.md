@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- Two more shared subagent personas, `aru-tester` and `aru-docs`, ship in
+  `plugin/agents/`, so every client that loads the plugin can assign a tester or a
+  documentation role without a client-specific prompt. The tester writes the test that
+  fails before the implementation change and passes after it and never loosens an
+  existing assertion; the docs persona changes no code and keeps every restatement in
+  agreement with `scripts/policy.toml` (#737).
+- The Claude adapter lists all five persona files and is now pinned to exactly the
+  contents of `plugin/agents/`. It cannot use the Cursor adapter's directory form:
+  `claude plugin validate .` rejects a directory string with `agents: Invalid input`.
+  The root `plugin.json` still carries no `agents` key (#737).
+
 ## v2.4.0 - Thin consumers - 2026-09-15
 
 - A governed consumer no longer carries any of the Factory's verification logic. Its two

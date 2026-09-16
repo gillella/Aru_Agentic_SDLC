@@ -15,8 +15,10 @@
     "issue-first"
   ],
   "agents": [
+    "./plugin/agents/aru-docs.md",
     "./plugin/agents/aru-implementer.md",
     "./plugin/agents/aru-reviewer.md",
+    "./plugin/agents/aru-tester.md",
     "./plugin/agents/aru-triager.md"
   ],
   "hooks": "./plugin/hooks/hooks.json"

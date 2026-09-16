@@ -14,6 +14,29 @@ Real enforcement lives in:
 
 GitHub Actions never loads this plugin.
 
+## Subagent Personas
+
+Five shared prompts live in `plugin/agents/`, one per role the fleet routes. The
+role name in `agent-fleet`'s `config/fleet.json` is the persona's suffix, so a
+seat selected for a role loads the matching prompt without a client-specific
+file.
+
+| Persona | Fleet role | What it does |
+| --- | --- | --- |
+| `aru-implementer` | `implementer` | Implements one claimed Ready issue inside its declared paths and opens the governed PR. |
+| `aru-reviewer` | `reviewer` | Reviews a PR against acceptance criteria, the exact diff, and focused verification. Refuses a PR it authored. |
+| `aru-triager` | `triager` | Validates Backlog issues against the Ready contract. Never promotes by hand. |
+| `aru-tester` | `tester` | Encodes acceptance criteria as a test that fails before the change and passes after it. Never loosens an assertion. |
+| `aru-docs` | `docs` | Changes only declared documentation paths and keeps every restatement in agreement with `scripts/policy.toml`. |
+
+The Cursor adapter (`.cursor-plugin/plugin.json`) points at the directory, so a
+new persona ships by adding a file. The Claude adapter
+(`.claude-plugin/plugin.json`) must name each file instead — `claude plugin
+validate .` rejects a directory string with `agents: Invalid input` — so a new
+persona is added in both places. `test_claude_adapter_agrees_with_root_manifest`
+fails if the two fall out of step. The root `plugin.json` carries no `agents`
+key.
+
 ## Per-Client Capabilities
 
 | Client | Standard Skills | Subagent Personas | Advisory Hooks | Setup / Install Path |
@@ -27,7 +50,7 @@ GitHub Actions never loads this plugin.
 ## Coverage Limits
 
 - **Bash tool writes**: File writes via Bash commands (`cat > file`, `echo > file`) bypass the `PreToolUse` matcher (`Write|Edit|NotebookEdit`).
-- **Cursor**: Supports `Write` tool only (no `Edit`), and hooks are loaded opt-in from `.claude/settings*.json`. The three personas load via `.cursor-plugin/plugin.json` (or `.claude-plugin/plugin.json`).
+- **Cursor**: Supports `Write` tool only (no `Edit`), and hooks are loaded opt-in from `.claude/settings*.json`. The five personas load via `.cursor-plugin/plugin.json` (or `.claude-plugin/plugin.json`).
 - **Codex**: Hooks are not reached by this plugin.
 
 ## Verification Commands
