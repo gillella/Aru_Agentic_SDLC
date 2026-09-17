@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Every shared persona prompt requires the agent to announce its role, the model it
+  is running as, and whether that identity is fleet-launched (a launcher recorded
+  it) or self-reported, before the first action on a claimed issue. An unknown
+  model is stated as unknown rather than guessed from context (#747).
 - Two more shared subagent personas, `aru-tester` and `aru-docs`, ship in
   `plugin/agents/`, so every client that loads the plugin can assign a tester or a
   documentation role without a client-specific prompt. The tester writes the test that
