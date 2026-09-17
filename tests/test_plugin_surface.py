@@ -149,6 +149,28 @@ def test_subagent_personas_have_frontmatter_and_contracts():
     assert "scripts/policy.toml" in docs_text
 
 
+def test_persona_prompts_require_identity_announcement():
+    # Iterate every prompt file so a later persona that omits the rule fails here,
+    # even if the exact-five name set above is updated to admit it.
+    required = (
+        "Before its first action on a claimed issue",
+        "this persona's role",
+        "the model it is running as",
+        "fleet-launched",
+        "self-reported",
+        "launcher recorded",
+        "does not know",
+        "rather than guessing from context",
+    )
+    for path in sorted((ROOT / "plugin" / "agents").glob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        for phrase in required:
+            assert phrase in text, f"{path.name} must contain {phrase!r}"
+        lowered = text.lower()
+        assert "subscription account" not in lowered
+        assert "name a subscription" not in lowered
+
+
 def test_hooks_json_configuration():
     hooks_file = ROOT / "plugin" / "hooks" / "hooks.json"
     hooks_config = json.loads(hooks_file.read_text(encoding="utf-8"))

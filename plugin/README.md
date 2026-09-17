@@ -29,6 +29,15 @@ file.
 | `aru-tester` | `tester` | Encodes acceptance criteria as a test that fails before the change and passes after it. Never loosens an assertion. |
 | `aru-docs` | `docs` | Changes only declared documentation paths and keeps every restatement in agreement with `scripts/policy.toml`. |
 
+Every persona must announce, before its first action on a claimed issue, its
+role, the model it is running as, and whether that identity is fleet-launched
+(a launcher recorded it) or self-reported. A fleet-launched announcement is
+checkable against the launcher record; a self-reported one is a claim that
+nothing verifies, and the two are not equally authoritative. An agent that
+cannot determine the model says so rather than guessing from context. The rule
+lives in the five prompts so every client that loads the plugin receives it
+once.
+
 The Cursor adapter (`.cursor-plugin/plugin.json`) points at the directory, so a
 new persona ships by adding a file. The Claude adapter
 (`.claude-plugin/plugin.json`) must name each file instead — `claude plugin
