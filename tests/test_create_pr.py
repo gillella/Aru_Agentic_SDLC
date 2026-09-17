@@ -237,3 +237,61 @@ def test_board_template_state_reads_view_filters(monkeypatch, tmp_path):
             "filter": "is:pr is:open no:reviewers",
         }
     ]
+
+
+class FakePolicy:
+    def __init__(self, reviewers):
+        self.reviewers = reviewers
+        self.posture = "human"
+
+
+def test_reviewers_are_requested_so_github_notifies_the_gate(monkeypatch):
+    calls = []
+    monkeypatch.setattr(create_pr, "run", calls.append)
+    monkeypatch.setattr(
+        create_pr.review_authority, "load_policy", lambda: FakePolicy(["gillella", "octocat"])
+    )
+    assert create_pr.request_reviewers(12) == ["gillella", "octocat"]
+    assert calls == [
+        ["gh", "pr", "edit", "12", "--add-reviewer", "gillella"],
+        ["gh", "pr", "edit", "12", "--add-reviewer", "octocat"],
+    ]
+
+
+def test_a_reviewer_github_refuses_is_reported_and_skipped(monkeypatch, capsys):
+    def refuse_one(argv):
+        if argv[-1] == "author-account":
+            raise create_pr.KernelError("gh failed: reviewer cannot be the author")
+
+    monkeypatch.setattr(create_pr, "run", refuse_one)
+    monkeypatch.setattr(
+        create_pr.review_authority,
+        "load_policy",
+        lambda: FakePolicy(["author-account", "gillella"]),
+    )
+    # The refused account is skipped; the rest are still requested.
+    assert create_pr.request_reviewers(12) == ["gillella"]
+    assert "author-account" in capsys.readouterr().err
+
+
+def test_no_declared_reviewers_requests_nobody_and_is_not_an_error(monkeypatch):
+    calls = []
+    monkeypatch.setattr(create_pr, "run", calls.append)
+    monkeypatch.setattr(create_pr.review_authority, "load_policy", lambda: FakePolicy([]))
+    assert create_pr.request_reviewers(12) == []
+    assert calls == []
+
+
+def test_create_pr_reviewer_failure_does_not_refuse_pull_request(monkeypatch, capsys):
+    install_creation(monkeypatch, pr_id="PR_node_rev")
+    monkeypatch.setattr(create_pr, "repo_slug", lambda _cwd=None: "gillella/consumer")
+    monkeypatch.setattr(board_template, "add_pr_to_board", lambda *a, **k: "PVTI_x")
+
+    def explode(_number):
+        raise RuntimeError("policy read failed")
+
+    monkeypatch.setattr(create_pr, "request_reviewers", explode)
+    outcome = create_pr.create(6, "feat: small", "## Summary\n\nSmall change", "codex-1")
+    # The pull request is returned; only a note is written.
+    assert outcome["pr"] == 12
+    assert "could not request reviewers" in capsys.readouterr().err
