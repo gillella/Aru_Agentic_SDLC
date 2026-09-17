@@ -6,8 +6,9 @@ head, and merge_pr.py reads that. This helper only opens the PR and moves the
 issue to In Review, and asks GitHub to request the reviewers the repository
 declares in `.aru/review.json`, so GitHub notifies the account that owes the
 approval. It applies no review labels. Requesting is notification, not authority:
-the merge still turns on an approval of the exact head read from the default
-branch.
+the merge still turns on a submitted approval of this pull request's exact head.
+Only the reviewer declaration is read from the default branch, so a change cannot
+nominate its own reviewers.
 """
 
 from __future__ import annotations
