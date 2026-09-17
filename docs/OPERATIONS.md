@@ -1011,7 +1011,12 @@ The helper:
 - adds the created pull request to the repository's linked Project Board (if one
   is linked; failures are reported and do not refuse the pull request).
 
-It applies no review labels and assigns no reviewer.
+It applies no review labels. It does request the reviewers the repository declares
+in `.aru/review.json`, read from the default branch, so GitHub notifies the account
+that owes the approval through its own web, email and mobile channels. Requesting is
+notification, not authority: the merge still turns on an approval of the exact head,
+and a reviewer GitHub refuses is reported and skipped rather than refusing the pull
+request.
 
 ### Step 7: wait for exact-head evidence
 

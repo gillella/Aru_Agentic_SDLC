@@ -3,7 +3,11 @@
 
 Review is GitHub-native: any account other than the author approves the exact
 head, and merge_pr.py reads that. This helper only opens the PR and moves the
-issue to In Review; it applies no review labels and requests no reviewers.
+issue to In Review, and asks GitHub to request the reviewers the repository
+declares in `.aru/review.json`, so GitHub notifies the account that owes the
+approval. It applies no review labels. Requesting is notification, not authority:
+the merge still turns on an approval of the exact head read from the default
+branch.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import board_template
+import review_authority
 from common import (
     AGENT_PREFIX,
     KernelError,
@@ -80,6 +85,47 @@ def require_current_owner(number: int, owner: str, status: str = "In Progress") 
         raise KernelError("issue ownership changed before PR creation")
 
 
+
+def request_reviewers(pr_number: int) -> list[str]:
+    """Request the declared reviewers so GitHub notifies them; returns those requested.
+
+    The declaration is read from the default branch by ``review_authority``, never
+    from this pull request's head, so a change cannot nominate its own reviewers.
+    Never a gate: an account GitHub refuses -- the pull request's own author, or one
+    that cannot review this repository -- is reported and skipped, and a repository
+    that declares nobody requests nobody.
+    """
+    requested = []
+    for login in review_authority.load_policy().reviewers:
+        try:
+            run(["gh", "pr", "edit", str(pr_number), "--add-reviewer", login])
+        except KernelError as exc:
+            sys.stderr.write(f"note: could not request review from {login}: {exc}\n")
+            continue
+        requested.append(login)
+    return requested
+
+
+
+def announce(pr: dict[str, Any]) -> None:
+    """Board card and review request: notification, never authority.
+
+    Both are best-effort by contract. A failure here is reported and never refuses
+    or rolls back a pull request that is otherwise sound, so a board outage cannot
+    stop governed work.
+    """
+    pr_node_id = pr.get("id")
+    if isinstance(pr_node_id, str) and pr_node_id:
+        try:
+            board_template.add_pr_to_board(repo_slug(), pr_node_id, Path.cwd())
+        except Exception as exc:
+            sys.stderr.write(f"note: could not add PR to Project Board: {exc}\n")
+    try:
+        request_reviewers(int(pr["number"]))
+    except Exception as exc:
+        sys.stderr.write(f"note: could not request reviewers: {exc}\n")
+
+
 def create(number: int, title: str, body: str, agent: str | None = None) -> dict[str, object]:
     record = issue(number)
     if status_of(record) != "In Progress":
@@ -118,12 +164,7 @@ def create(number: int, title: str, body: str, agent: str | None = None) -> dict
             pre_mutation_check=lambda: require_current_owner(number, owner),
         )
         require_current_owner(number, owner, "In Review")
-        pr_node_id = pr.get("id")
-        if isinstance(pr_node_id, str) and pr_node_id:
-            try:
-                board_template.add_pr_to_board(repo_slug(), pr_node_id, Path.cwd())
-            except Exception as exc:
-                sys.stderr.write(f"note: could not add PR to Project Board: {exc}\n")
+        announce(pr)
     except KernelError as post_create_error:
         try:
             run(["gh", "pr", "close", str(rollback_target), "--comment",
