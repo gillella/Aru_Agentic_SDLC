@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
+import board_template
 from common import (
     AGENT_PREFIX,
     KernelError,
@@ -22,6 +24,7 @@ from common import (
     issue,
     json_print,
     label_names,
+    repo_slug,
     run,
     set_status,
     status_of,
@@ -96,7 +99,7 @@ def create(number: int, title: str, body: str, agent: str | None = None) -> dict
     run(arguments)
     rollback_target: str | int = branch
     try:
-        pr = gh_json(["pr", "view", branch, "--json", "number,url,state,headRefOid"])
+        pr = gh_json(["pr", "view", branch, "--json", "number,url,state,headRefOid,id"])
         if (
             not isinstance(pr, dict)
             or not isinstance(pr.get("number"), int)
@@ -115,6 +118,12 @@ def create(number: int, title: str, body: str, agent: str | None = None) -> dict
             pre_mutation_check=lambda: require_current_owner(number, owner),
         )
         require_current_owner(number, owner, "In Review")
+        pr_node_id = pr.get("id")
+        if isinstance(pr_node_id, str) and pr_node_id:
+            try:
+                board_template.add_pr_to_board(repo_slug(), pr_node_id, Path.cwd())
+            except Exception as exc:
+                sys.stderr.write(f"note: could not add PR to Project Board: {exc}\n")
     except KernelError as post_create_error:
         try:
             run(["gh", "pr", "close", str(rollback_target), "--comment",
