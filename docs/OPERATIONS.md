@@ -1007,7 +1007,9 @@ The helper:
 - verifies issue ownership and branch identity;
 - confirms the published remote head equals local `HEAD`;
 - appends `Closes #42`;
-- moves the issue to `In Review`.
+- moves the issue to `In Review`;
+- adds the created pull request to the repository's linked Project Board (if one
+  is linked; failures are reported and do not refuse the pull request).
 
 It applies no review labels and assigns no reviewer.
 
@@ -1265,6 +1267,24 @@ pushed after review, the merge command refuses because the current PR head no
 longer matches the approved SHA. The governed PR workflow applies the same rule
 to actual-diff `touches:` enforcement by passing the pull-request event head as
 `--expected-head`; the checked-out and remotely inspected revisions must match.
+
+### What the board can and cannot show
+
+`create_pr.py` adds the pull request it opened to the repository's linked
+Project Board. This allows the operator to track pull requests awaiting approval
+in an `Approval queue` view filtered to `is:pr is:open no:reviewers`, derived
+directly from GitHub facts rather than manually maintained cards.
+
+However, a board layout is presentation, not lifecycle or review authority:
+
+- Adding the pull request never blocks PR creation or merge; a failure to add or
+  a missing linked Project is reported and does not refuse the pull request.
+- A changes-requested pull request is indistinguishable on the board because
+  GitHub Projects has no review-decision qualifier (such as
+  `review:changes-requested`), so it cannot differentiate open unreviewed PRs
+  from those with active revision requests.
+- `fetch_pr_feedback.py` is where review decisions, unresolved comments, and
+  changes-requested status are read and verified.
 
 ## 14. Failure and recovery
 
