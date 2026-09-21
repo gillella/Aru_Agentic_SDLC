@@ -1,7 +1,36 @@
 # Changelog
 
-## Unreleased
+## v2.5.0 - The human gate is a tracked queue - 2026-09-21
 
+- `create_pr.py` adds the pull request it opens to the repository's linked Project
+  Board, so the one enforced human gate is a queue the operator can see rather than
+  something an agent mentions in a chat window. Adding the card is best-effort by
+  contract: a failure, or a repository with no linked Project, is reported and never
+  refuses the pull request. A changes-requested pull request is still indistinguishable
+  on the board, because GitHub Projects has no review-decision qualifier;
+  `fetch_pr_feedback.py` remains where review decisions are read (#748).
+- `create_pr.py` requests the declared reviewers, so GitHub's own web, email and mobile
+  notifications tell the account that owes an approval that one is waiting. It
+  deliberately requested none before, and on 2026-09-17 an approved-pending pull request
+  sat green for 21 hours holding a path reservation and two issues behind it. The
+  reviewers are read through `review_authority` from the default branch, never from the
+  pull-request head, so a change cannot nominate its own reviewers. Requesting is
+  notification, not authority: the merge still turns on an approval of the exact head,
+  and a reviewer GitHub refuses -- the author, or an account that cannot review this
+  repository -- is reported and skipped (#751).
+- A governed repository's board is provisioned by copying the Project declared in
+  `scripts/policy.toml` under `[board_template]`, instead of `gh project create` leaving
+  every repository with a bare `View 1` table. Adding a view to the operator's layout is
+  now a change to that template project rather than a change to this codebase. The five
+  lifecycle statuses are asserted after the copy rather than rewritten, so a renamed or
+  extra status surfaces once as an operator mistake instead of propagating into every
+  repository provisioned afterwards. `--board [--check]` brings an existing board up to
+  the template additively, without recreating it, so a repository keeps its items and
+  its project id. No gate is added, because a board layout is presentation and failing a
+  governed check over appearance would block code on how it looks. Known boundary:
+  GitHub's `ProjectV2ViewConfigurationInput` accepts only `visibleFieldIds`, so view
+  grouping cannot be set through the API -- the copy path carries grouping, the sync
+  path cannot (#717).
 - Every shared persona prompt requires the agent to announce its role, the model it
   is running as, and whether that identity is fleet-launched (a launcher recorded
   it) or self-reported, before the first action on a claimed issue. An unknown
@@ -16,6 +45,22 @@
   contents of `plugin/agents/`. It cannot use the Cursor adapter's directory form:
   `claude plugin validate .` rejects a directory string with `agents: Invalid input`.
   The root `plugin.json` still carries no `agents` key (#737).
+- `install_agent_integration.sh` adds Hermes Agent as a local skills target. Hermes has
+  no plugin mechanism, so the six skills become children of a `software-development`
+  category directory, which is how Hermes discovers `<category>/<skill>/SKILL.md`, and
+  the governance block is maintained in `~/.hermes/SOUL.md` with the same
+  preserve-and-replace semantics used for the other clients. Both paths are written only
+  when `~/.hermes` already exists and is not a symlink: this installer configures agents
+  that are present rather than making a Hermes host of a machine that has never run it
+  (#741).
+- A kernel traversal no longer inherits the operator's merge-authority environment.
+  `monkeypatch.undo()` between two traversals also undid the autouse isolation in
+  `conftest`, because the fixture and the test share one function-scoped monkeypatch, so
+  the second traversal ran with `ARU_MERGE_APP_RUNNER` and `ARU_MERGE_APP_ID` restored
+  and reached an external call. Each traversal now runs in its own `MonkeyPatch` context
+  and `traverse()` clears the three operator variables itself rather than trusting a
+  caller. CI sets neither variable, so the suite was green in CI and red for anyone able
+  to merge (#743).
 
 ## v2.4.0 - Thin consumers - 2026-09-15
 

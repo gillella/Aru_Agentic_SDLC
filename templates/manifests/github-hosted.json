@@ -6,11 +6,11 @@
       "sha256": "3793b1b76cb85734b1c02b1d0f3b07c0961b7b490bafc8e1fe18a02755a12031"
     }
   },
-  "factory_version": "2.4.0",
+  "factory_version": "2.5.0",
   "files": {
-    ".aru/factory-version": "2ad7b0c3f0ede58c3165b7a8a5479e890a758d39bfe8683eaef50ce6afad7232",
-    ".github/workflows/governed-pr.yml": "f06ab41810e7cf9e91c7f8be89defd0dbd9c0ef27b1b8b34b460fa60e15e59d4",
-    ".github/workflows/merge-policy.yml": "9007cd8afe2e590c81422c29fd1bf6e2b0ff22c3daeabf19a615dd1585c30b53"
+    ".aru/factory-version": "732f64d874f90788c0199b0c19bfd9b3b6436e140114e53e462832532d74c61c",
+    ".github/workflows/governed-pr.yml": "28e07dd77a1ccd28941ea414978106a20ed4b97d8a5b93008703acff85d527eb",
+    ".github/workflows/merge-policy.yml": "5c207c3174ba43fb6e32a49ac75fc789f342d374270947e4b8a0011c0a1873f3"
   },
   "runner_profile": "github-hosted",
   "schema": "aru.managed-files/v1"
