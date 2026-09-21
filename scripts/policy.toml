@@ -10,8 +10,8 @@
 # through the release procedure in docs/OPERATIONS.md, never to describe work
 # that has not been tagged.
 [release]
-version = "2.4.0"
-released = "2026-09-15"
+version = "2.5.0"
+released = "2026-09-21"
 
 [register]
 title = "Enforcement Register"

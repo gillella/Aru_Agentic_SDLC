@@ -3,7 +3,7 @@
 > A small, fail-closed rules-and-guidelines kernel that moves one approved
 > GitHub issue to one safely merged pull request.
 
-**Project status: v2.4.0 is the current released version (released 2026-09-15).**
+**Project status: v2.5.0 is the current released version (released 2026-09-21).**
 The version is declared once, in `scripts/policy.toml`; this line, the newest
 released heading in `CHANGELOG.md` and the newest `v*` tag restate it, and
 `tests/test_release_truth.py` fails when they disagree. Future kernel improvements
