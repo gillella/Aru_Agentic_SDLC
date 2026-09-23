@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -128,6 +129,23 @@ def authorized(login: str, policy: Policy) -> bool:
     return any(same_github_actor(login, name) for name in policy.reviewers)
 
 
+AGENT_TRAILER = re.compile(r"(?im)^reviewed-by-agent:\s*([A-Za-z0-9._-]+)\s*$")
+
+
+def other_party(account: str, author: str, review: dict[str, Any], author_agents: set[str]) -> bool:
+    """Whether this approval comes from a party other than the change's author.
+
+    A different GitHub account always counts. The same account counts only when the
+    review body carries a `Reviewed-by-agent: <name>` trailer naming an agent identity
+    that did not claim the issue — agents sharing one login are distinct parties, and
+    the claim label is what records which one wrote the change.
+    """
+    if not same_github_actor(account, author):
+        return True
+    match = AGENT_TRAILER.search(str(review.get("body") or ""))
+    return bool(match) and match.group(1).lower() not in author_agents
+
+
 def _latest_by_account(reviews: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """The last decisive review per account. GitHub lists reviews oldest first."""
     latest: dict[str, dict[str, Any]] = {}
@@ -142,14 +160,14 @@ def _latest_by_account(reviews: list[dict[str, Any]]) -> dict[str, dict[str, Any
 
 
 def approvals_of_head(
-    reviews: list[dict[str, Any]], *, author: str, head: str
+    reviews: list[dict[str, Any]], *, author: str, head: str, author_agents: set[str] = frozenset()
 ) -> list[dict[str, Any]]:
     """Approvals of this exact head from accounts other than the author."""
     found = []
     for account, review in _latest_by_account(reviews).items():
         if review.get("state") != "APPROVED" or review.get("commit_id") != head:
             continue
-        if same_github_actor(account, author):
+        if not other_party(account, author, review, author_agents):
             continue
         found.append(review)
     return found
@@ -178,6 +196,7 @@ def refusal(
     reviews: list[dict[str, Any]],
     policy: Policy,
     require_judgement: bool = False,
+    author_agents: set[str] = frozenset(),
 ) -> str | None:
     """Why this head may not merge, or None when an acceptable approval exists.
 
@@ -186,7 +205,7 @@ def refusal(
     """
     if policy.posture == "none":
         return None
-    approvals = approvals_of_head(reviews, author=author, head=head)
+    approvals = approvals_of_head(reviews, author=author, head=head, author_agents=author_agents)
     if not approvals:
         return "no approval of the exact head by an account other than the author"
     if not policy.strict:
