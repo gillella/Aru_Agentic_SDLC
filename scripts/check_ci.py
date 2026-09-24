@@ -117,11 +117,9 @@ def _run_binding(run: dict, pr: dict, slug: str, merged_at: datetime | None = No
     current = _timestamp(run.get("created_at")) >= _timestamp(pr.get("createdAt"))
     associations = run.get("pull_requests")
     if associations == [] and merged_at is not None:
-        # Missing associations are never inferred. Only completed pre-merge work
-        # in this PR's lifetime can use authenticated historical merge evidence.
-        if not current:
-            raise KernelError("governed Actions run predates the merged PR")
-        return True
+        # GitHub may clear associations after merge. A run before this PR is
+        # history; only an in-lifetime run can use the merged PR's evidence.
+        return current
     if not isinstance(associations, list) or len(associations) != 1:
         raise KernelError("governed Actions PR association is incomplete or conflicting")
     linked = associations[0]
@@ -268,6 +266,8 @@ def finalization_verdict(pr: dict) -> dict[str, object]:
         raise KernelError("confirmed direct merge commit parents conflict")
     require_direct_merge_history(number, head, commit["oid"])
     result = commit_verdict(head, pr=pr, merged_at=merged_at)
+    if result["state"] != "success":
+        raise KernelError("governed CI has no current in-lifetime successful run")
     if gh_json(["api", endpoint]) != merged:
         raise KernelError("merged PR provenance changed during CI inspection")
     return {"pr": number, **result}
