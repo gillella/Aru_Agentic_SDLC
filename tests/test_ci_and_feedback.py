@@ -287,6 +287,42 @@ def historical_world(monkeypatch):
     return world, calls
 
 
+@pytest.mark.parametrize('current_state', ['success', 'failure', 'pending'])
+def test_finalization_excludes_older_unassociated_run_on_same_head(monkeypatch, current_state):
+    world, _ = historical_world(monkeypatch)
+    old = workflow_run(10, created='2026-09-09T14:00:00Z')
+    old.update(pull_requests=[], run_started_at=old['created_at'],
+               updated_at='2026-09-09T14:01:00Z')
+    old_check = check_run('aru-governed-pr', run_id=10)
+    old_check.update(started_at=old['created_at'], completed_at=old['updated_at'])
+    world['runs'].insert(0, old)
+    world['checks'].insert(0, old_check)
+    world['run']['pull_requests'] = []
+    if current_state != 'success':
+        world['run'].update(status='queued' if current_state == 'pending' else 'completed',
+                            conclusion=None if current_state == 'pending' else 'failure')
+        world['check'].update(status=world['run']['status'], conclusion=world['run']['conclusion'])
+    if current_state == 'success':
+        assert check_ci.finalization_verdict(world['pr'])['state'] == 'success'
+    else:
+        with pytest.raises(check_ci.KernelError, match='pre-merge lifetime'):
+            check_ci.finalization_verdict(world['pr'])
+
+
+def test_finalization_refuses_only_older_unassociated_run(monkeypatch):
+    world, _ = historical_world(monkeypatch)
+    world['run'].update(created_at='2026-09-09T14:00:00Z', pull_requests=[])
+    with pytest.raises(check_ci.KernelError, match='no current in-lifetime successful run'):
+        check_ci.finalization_verdict(world['pr'])
+
+
+def test_finalization_rejects_older_run_with_incompatible_provenance(monkeypatch):
+    world, _ = historical_world(monkeypatch)
+    world['run'].update(created_at='2026-09-09T14:00:00Z', pull_requests=[], event='push')
+    with pytest.raises(check_ci.KernelError, match='incompatible provenance'):
+        check_ci.finalization_verdict(world['pr'])
+
+
 @pytest.mark.parametrize('target,field,value', [
     ('pr', 'state', 'OPEN'), ('pr', 'state', 'CLOSED'), ('pr', 'mergedAt', None),
     ('pr', 'headRefOid', 'd' * 40), ('pr', 'mergeCommit', {'oid': 'd' * 40}),
