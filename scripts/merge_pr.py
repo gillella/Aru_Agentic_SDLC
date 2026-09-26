@@ -11,10 +11,10 @@ from typing import Any
 import merge_authority
 import review_authority
 from check_ci import ci_verdict, finalization_verdict
-from common import KernelError, canonical_github_actor, gh_paginated, json_print, repo_slug, run, same_github_actor
+from common import AGENT_PREFIX, KernelError, canonical_github_actor, gh_paginated, json_print, label_names, repo_slug, run, same_github_actor
 from fetch_pr_feedback import fetch_feedback
 from merge_state import (
-    base_snapshot, close_out, issue_gate, linked_issues, merge_queue_snapshot,
+    base_snapshot, close_out, issue, issue_gate, linked_issues, merge_queue_snapshot,
     pull_changed_paths, pull_request,
 )
 
@@ -69,11 +69,28 @@ def approved_at_head(pr: dict[str, Any], reviews: list[dict[str, Any]]) -> bool:
         if review.get("state") in DECISIVE_REVIEW_STATES:
             # Group by account: logins are case-insensitive and an App has two spellings.
             latest[canonical_github_actor(login)] = review
-    return any(
-        review["state"] == "APPROVED" and review.get("commit_id") == head
-        and not same_github_actor(account, author)
-        for account, review in latest.items()
-    )
+    head_approvals = [
+        (account, review) for account, review in latest.items()
+        if review["state"] == "APPROVED" and review.get("commit_id") == head
+    ]
+    if any(not same_github_actor(account, author) for account, _ in head_approvals):
+        return True
+    # Only a same-account approval needs the claim labels; look them up lazily so
+    # the common path never touches the issues.
+    if not any(review_authority.AGENT_TRAILER.search(str(r.get("body") or "")) for _, r in head_approvals):
+        return False
+    agents = author_agents(pr)
+    return any(review_authority.other_party(account, author, review, agents) for account, review in head_approvals)
+
+
+def author_agents(pr: dict[str, Any]) -> set[str]:
+    """Agent identities that claimed the PR's linked issues (their `agent:` labels)."""
+    agents: set[str] = set()
+    for number in linked_issues(str(pr.get("body") or "")):
+        for name in label_names(issue(number)):
+            if name.startswith(AGENT_PREFIX):
+                agents.add(name[len(AGENT_PREFIX):].lower())
+    return agents
 
 
 def authority_refusal(pr: dict[str, Any], reviews: list[dict[str, Any]]) -> str | None:
@@ -90,6 +107,11 @@ def authority_refusal(pr: dict[str, Any], reviews: list[dict[str, Any]]) -> str 
         head=str(pr.get("headRefOid") or ""),
         reviews=reviews,
         policy=policy,
+        author_agents=(
+            author_agents(pr)
+            if any(review_authority.AGENT_TRAILER.search(str(r.get("body") or "")) for r in reviews)
+            else frozenset()
+        ),
         # Only the strict posture asks for a written judgement; the permissive postures
         # are unchanged, so a project that wants speed does not inherit this.
         require_judgement=policy.strict,

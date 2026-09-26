@@ -114,8 +114,16 @@ and refuses unless some account other than the author (a GitHub App author
 decisive review (`APPROVED`, `CHANGES_REQUESTED` or `DISMISSED`), approved the
 exact head. Comments do not supply approval, and an
 approval of an earlier commit does not carry forward. A `CHANGES_REQUESTED`
-decision or any unresolved thread still blocks. Agents sharing one GitHub account
-cannot approve each other's pull requests.
+decision or any unresolved thread still blocks.
+
+The party is the agent, not only the login. Agents that share one GitHub account
+are distinct parties: the `agent:<name>` claim label records which agent wrote the
+change, and an approval posted from the same login counts when its body carries a
+`Reviewed-by-agent: <name>` trailer on its own line naming an agent that did not
+claim the issue. The claiming agent can never approve its own change, and an
+approval without the trailer is still self-approval. The trailer is the reviewer's
+attestation; the repository's ruleset must not also demand a second login, or
+GitHub refuses the submission the kernel would allow.
 
 The writer owns remediation; a reviewer who pushes a fix becomes the last pusher,
 so someone else must approve. Every applicable finding needs a disposition from
