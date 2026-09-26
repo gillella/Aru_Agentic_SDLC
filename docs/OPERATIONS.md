@@ -211,11 +211,84 @@ identity for repository creation. Configure the App runner only after the new
 repository has an installation; routine governed repository automation should
 then use the App route.
 
+### Separate authoring, board, review, and merge authority
+
+This is an operator migration design, not a change to the Kernel or a record of
+completed host work. Keep the existing authoring App for agents' repository
+operations. The Project route above remains necessary: `common.py` sends Project
+V2 commands through the CLI's stored interactive authentication, not the App
+runner. The accounts and access below must be verified before migration.
+
+| Capability | Permitted authenticated principal and route | Agent boundary |
+| --- | --- | --- |
+| Agent authoring | Authoring App installation for repository commands, including branch and PR work | Agents may use this App; default-branch rules still forbid direct pushes. |
+| Project Board writes | Dedicated board principal through the stored CLI Project authentication used by Project V2 GraphQL and `gh project` | May run in the authoring session only if it is distinct from the named reviewer and has no review or merge authority. |
+| Human review and approval | Named human reviewer through their own GitHub session, as declared by default-branch `.aru/review.json` | No reviewer authentication, delegated approval endpoint, or shared session in agent or CI processes. |
+| Merge authorization | Merge-authority App posts `aru-merge-authorized`; an operator-controlled session alone runs `merge_pr.py --expected-head` to submit the merge | Agents never receive, execute, or call a service holding the merge-authority App. |
+| Bootstrap and recovery | Operator session uses an authorized bootstrap identity before App installation; the operator owns failed migration and confirmed-merge recovery | No bootstrap or break-glass authority in agent sessions. |
+| Runner and client access | Governed CI runs on the repository's assigned profile with read-only workflow permissions; authoring clients use the authoring and Project routes above | CI may execute PR code, so it must have no reviewer or merge credentials or callable authority service. |
+
+Enforce the boundary with separate host or service identities for agent and CI
+processes versus reviewer and merge sessions. Deny the former access to the
+latter's credential storage, process environment, inherited handles, sockets,
+and any API or IPC that could perform approval or mint/post merge authorization.
+Do not run those sessions under a shared identity or mount their authority into
+agent or runner workloads. A dedicated board principal must have Project write
+access and only the repository access needed for linked-Project operations; it
+must not be a named reviewer or a ruleset bypass actor. Hooks, shell aliases,
+command wrappers, and environment-variable omission help users choose the
+right route but cannot enforce this isolation against code the agent can run.
+
+Before changing access, the operator must prove that effective process and
+service permissions enforce those denials, that the board principal remains
+distinct from the named reviewer, that the authoring App cannot post the
+required merge check, and that default-branch controls require the exact-head
+checks and a current approval from another account. GitHub account identity,
+App installations, ruleset check publisher, runner process isolation, and
+client inheritance must be checked in the actual operating environment. Keep
+private evidence outside this public repository; record only pass/fail outcomes.
+
+Migration order and acceptance:
+
+1. **Operator decision, before any credential or host permission change:**
+   approve or reject this boundary and its private proof plan. A rejection
+   leaves current access unchanged and blocks migration.
+2. Record the current public ruleset, review policy, assigned runner profile,
+   and read-only capability results. Check the linked Project through the
+   existing route before changing it.
+3. After approval, isolate agent and CI execution from the reviewer and merge
+   sessions; provision the distinct board route and keep repository commands
+   on the existing authoring App. Migrate one client at a time, then the assigned
+   runner profile, without a cross-profile fallback.
+4. Probe the merge-authority App from the operator session and verify the check
+   publisher before requiring its check in the default-branch ruleset. Keep the
+   rule pinned to that App; a missing or wrong publisher blocks cutover.
+5. In each migrated agent and runner context, attempts to access or invoke the
+   reviewer session, submit an approval as the named human, invoke the merge
+   authority, post its required check, directly merge, or push the default
+   branch **must fail**. Authoring repository operations and linked Project
+   reads/writes **must pass** through their separate routes and retain the five
+   statuses. Verify named-human exact-head review and the helper-controlled merge on an
+   ordinary governed PR in the later operator migration, not in this design
+   issue. Missing evidence or a failed check blocks the cutover.
+6. If continuity or a denial fails, stop new agent work. Restore the previous
+   working authoring and Project routes only where isolation still holds;
+   otherwise keep access operator-only. Recheck Project access, branch rules,
+   review policy, and required checks before resuming. Never restore reviewer
+   or merge authority to an agent context as rollback.
+
+Pass only when every negative attempt fails, both ordinary authoring and
+Project Board writes succeed, only a named human reviewer can supply the required
+review, and only the operator-held merge App can publish the required check for
+`merge_pr.py`. Otherwise fail closed and retain the prior boundary until the
+operator resolves the evidence.
+
 ### Optional merge-authority App
 
-This makes `merge_pr.py` the only way an agent can complete a merge. Without it,
-`gh pr merge` satisfies the ruleset whenever `aru-governed-pr` is green and the
-approval rule is met, skipping the helper's board, criteria and queue gates.
+This makes `merge_pr.py` the only governed way for the operator to complete a
+merge. Without it, `gh pr merge` satisfies the ruleset whenever
+`aru-governed-pr` is green and the approval rule is met, skipping the helper's
+board, criteria and queue gates.
 
 1. Register a **new** GitHub App. Never reuse the App behind
    `ARU_GITHUB_APP_RUNNER`: agents use that one for ordinary commands and could
@@ -247,7 +320,8 @@ approval rule is met, skipping the helper's board, criteria and queue gates.
    Keep the runner and its credentials outside any other tool's directory. Placing
    them inside an agent framework's home makes a kernel merge gate depend on that
    framework being installed.
-3. On every machine or Driver host that runs `merge_pr.py`, export both variables:
+3. Only in the operator-controlled merge session that runs `merge_pr.py`, export
+   both variables. Do not expose this session or its runner to agents:
 
    ```bash
    export ARU_MERGE_APP_RUNNER="$HOME/.aru-merge-authority/scripts/aru_merge_authority_exec.py"
@@ -279,8 +353,8 @@ approval rule is met, skipping the helper's board, criteria and queue gates.
    gh api repos/OWNER/REPO/rulesets/RULESET_ID | jq --argjson app "$ARU_MERGE_APP_ID" '{name,target,enforcement,conditions,bypass_actors,rules:(.rules|map(if .type=="required_status_checks" then .parameters.required_status_checks += [{"context":"aru-merge-authorized","integration_id":$app}] else . end))}' | gh api -X PUT repos/OWNER/REPO/rulesets/RULESET_ID --input -
    ```
 
-5. Prove it on one documentation-only pull request: `gh pr merge` must now be refused, and
-   `merge_pr.py --expected-head` must merge it.
+5. Prove it on one documentation-only pull request: direct `gh pr merge` must be
+   refused, and the operator-run `merge_pr.py --expected-head` must merge it.
 
 While the rule is active, every open pull request shows `BLOCKED` until the
 helper posts its check; that is expected. A machine without the variables can
@@ -912,7 +986,7 @@ sequenceDiagram
     GH->>V: Run .aru/verify.sh and actual-diff touches check
     V-->>GH: Exact-head server result
     R->>GH: Approve the exact head
-    A->>M: Merge PR with expected head
+    O->>M: Merge PR with expected head
     M->>GH: Recheck gates, merge, mark Done
     A->>WT: Remove only safe closed worktree
 ```
@@ -1061,7 +1135,9 @@ arranges a reviewer on another account.
 
 ### Step 8: merge the exact head
 
-Read the exact head:
+The operator uses the isolated merge session for this step. The agent hands off
+the PR number and current head; it never invokes the merge-authority App. Read
+the exact head:
 
 ```bash
 head_sha="$(gh pr view 123 --json headRefOid --jq .headRefOid)"
