@@ -29,10 +29,21 @@ Aru is not the coding agent, not the product manager, not the CI vendor, not
 the deploy platform, and not the process that wakes the next command.
 
 The destination is: a project can take an idea through a governed Ready gate,
-implement it under exclusive claim and a path budget, merge only with
-exact-head focused local verification and one distinct reviewer, and later
-require consumer-owned deploy evidence before promotion — without Aru owning
-scheduling, runtime, or production.
+implement it under exclusive claim and a path budget, merge only with the
+exact-head `aru-governed-pr` server check and one approval of that head from a
+GitHub account other than the author, submitted through
+`merge_pr.py --expected-head`, and later require consumer-owned deploy evidence
+before promotion — without Aru owning scheduling, runtime, or production.
+
+As of this revision the server check is a GitHub Actions job: the consumer's
+`governed-pr.yml` stub runs the Factory's verifier, including the consumer's
+`.aru/verify-project.sh` and actual-diff `touches:` enforcement, on the
+repository's one assigned runner profile, and `merge-policy.yml` re-judges the
+head from the base branch. Local runs are preflight only. Who may approve is
+read from the default branch's `.aru/review.json`; under `human` (Aru's own
+posture) only a listed named account may approve, never a GitHub App. The
+canonical wording of all of this is `docs/KERNEL-CONTRACT.md`; if this file
+disagrees, the contract wins.
 
 Today the kernel covers one approved GitHub issue through one safely merged
 pull request. That is the foundation, not the whole destination.
@@ -45,9 +56,9 @@ adding a fifteenth command, or putting an orchestrator inside this repository.
 | Layer | Question it answers | Where it lives |
 | --- | --- | --- |
 | **Kernel** | What is authorized, blocked, and evidenced for one issue → one merge? | This repository. Small, fail-closed, no daemon. |
-| **Orchestration** | Who wakes the next kernel command, and when? | Outside this repository: a human cadence, cron, Hermes, or another agent loop. |
+| **Orchestration** | Who wakes the next kernel command, and when? | Outside this repository: the contract's external Driver — a human cadence, cron, Hermes, or another agent loop. |
 | **Scaffolding** | How does a new or existing project adopt the kernel and hold the workflow? | Init, skills, templates, consumer verification/runbooks. May live here as copies; truth of "it works" is a consumer repo. |
-| **Deploy** | May this revision ship, roll back, or promote? | Consumer-owned ship and runtime. The kernel may later *require evidence* for those stages. Aru is not a deploy platform. |
+| **Deploy** | May this revision ship, roll back, or promote? | Consumer-owned ship and runtime. Consumer policy may require evidence for those stages; a Kernel gate would need the admission rule. Aru is not a deploy platform. |
 
 Mixing layers is how the pre-v0.2 factory got large. A new kernel *component*
 still needs the KERNEL-CONTRACT admission rule: it must authorize or block a
@@ -171,8 +182,9 @@ on the v0.2 contract.
   actually exclusive: UI squash/rebase/merge without the Aru gate is refused.
 - One `touches:` parser shared by hook and `common.py`; path budget re-checked
   at PR create and merge, not only by a local pre-push hook.
-- Operating docs and version/changelog that match the machine (including
-  external-first reviewer assignment after PR #519).
+- Operating docs and version/changelog that match the machine. (The
+  external-first reviewer model named here after PR #519 was later replaced by
+  the one-approval rule.)
 - A completed golden-path demo on a consumer repository (the intended public
   example is `gillella/aru-golden-path-demo`; audit #522 found it stalled on a
   pre-reset contract — finish or rewind it there, not by adding kernel
@@ -182,9 +194,9 @@ on the v0.2 contract.
 
 - Scheduler or any in-repo waiter for stalled review.
 - New review providers.
-- Ideation/intake product, deploy product, or inventing a kernel-owned runner
-  in place of consumer-owned exact-head focused local verification bound by
-  the sanctioned Factory helper.
+- Ideation/intake product, deploy product, or a kernel-owned runner fleet. (The
+  exact-head check later settled on GitHub Actions calling the Factory's
+  verifier on the consumer's assigned runner profile; see Phase 3.)
 - Treating ruleset JSON in this repo as a substitute for applying the ruleset
   on GitHub.
 
@@ -219,15 +231,19 @@ complete while one of its exit tests is unmet.
 
 ### Phase 2 — Ideation to Ready
 
-**Goal.** "Should we build this?" is a governed gate. Intake, spec, and
-issue-contract scaffolding get an idea to a valid Ready issue. A human or an
-external agent still invokes every command.
+**Goal.** "Should we build this?" is answered in the issue before it becomes
+Ready work. The existing issue is the entry point; a human or an external agent
+still invokes every command.
 
 **In scope.**
 
-- Templates, skills, and checklists that turn an idea into an issue with
-  `## Acceptance Criteria`, `touches:`, and no open `depends-on: #N`.
-- Optional spec/intake documents that live in the *consumer* repo and whose
+- Issue forms and skills that turn an idea into an issue with
+  `## Acceptance Criteria`, one `touches:` declaration, and no open
+  `depends-on: #N`. The forms offer optional prompts for problem and users,
+  observable outcome, constraints, non-goals, unresolved decisions, acceptance
+  evidence and a proportional plan. None of them is required.
+- Consumer-owned design documents linked from the issue when a change needs
+  more than a short section. Their content and approval stay with the consumer;
   Ready promotion still goes through `triage_backlog.py`.
 - Teaching agents not to execute untrusted issue text.
 
@@ -235,8 +251,9 @@ external agent still invokes every command.
 
 - A kernel daemon that files issues from Slack, mail, or a product-manager
   loop.
-- Aru deciding product priority.
-- A second lifecycle store "for ideas."
+- Aru deciding product priority or product design.
+- A second lifecycle store "for ideas", a mandatory intent/spec/plan file
+  triplet, a new approval type, or a seventh skill.
 - Skipping Phase 1 because intake would be more visible.
 
 **Admission.** Phase 1 exit tests are true. Any new kernel command or skill
@@ -252,27 +269,29 @@ documents and GitHub issue forms over a new script.
 
 ### Phase 3 — Implementation scaffolding
 
-**Goal.** Adopted projects carry honest project-specific focused verification
-commands, and the sanctioned Factory helper binds that local evidence to the
-exact head while worktrees plus skills hold up under ordinary agent use. The
-kernel still has no daemon or state store.
+**Goal.** Adopted projects carry honest project-specific verification that the
+exact-head `aru-governed-pr` check actually runs, and worktrees plus skills
+hold up under ordinary agent use. The kernel still has no daemon or state
+store.
 
 **In scope.**
 
-- Consumer-owned exact-head focused local verification whose commands are the
-  project's honest lint/test/build slice, not the bootstrap
-  `python3 -m compileall` baseline, and whose evidence is executed and bound
-  by the sanctioned Factory helper rather than a repository workflow gate.
+- A consumer-owned `.aru/verify-project.sh` whose commands are the project's
+  useful lint/test/build slice, replacing the failing generated starter. The
+  consumer's `governed-pr.yml` stub runs it through the Factory's verifier on
+  the repository's assigned runner profile, at the exact PR head.
 - Skills and worktree helpers that remain correct when hooks are installed,
   `ARU_SDLC_HOME` is set, and agents follow `implement-next-issue`.
 - Bootstrap honesty: init does not claim a repo is governed until reviewers,
-  Project Board, and honest project-specific focused verification commands
-  exist (checklist already says this; make the generated output match).
+  Project Board, and project-specific verification exist.
 
 **Out of scope.**
 
-- Repository workflow gates, Actions-required merge gates, Aru-owned runners,
-  preview stacks, or a 15th kernel command that "runs the consumer tests."
+- Aru-owned runners, preview stacks, a cross-profile fallback, or a fifteenth
+  kernel command that "runs the consumer tests."
+- Mandatory plan files, fixed test-count targets, or agent evals presented as
+  product checks. An agent eval can be useful evidence about agent behavior; it
+  does not verify the consumer's product.
 - Reintroducing a factory visualizer or worker fleet so scaffolding "feels
   attended."
 - Any kernel daemon or state store that tracks verification or review progress,
@@ -285,10 +304,8 @@ used the change.
 
 **Done when.**
 
-- At least one governed consumer records exact-head focused local verification,
-  executed by the sanctioned Factory helper, using honest project-specific
-  commands rather than the bootstrap `python3 -m compileall` baseline or a
-  repository workflow gate.
+- At least one governed consumer merges through an exact-head `aru-governed-pr`
+  success that ran its own useful product checks, not the generated starter.
 - One full implement-next-issue walk on that consumer succeeds without
   undocumented operator rescue.
 - Kernel command count, skill count, and operating-document count still meet
@@ -297,55 +314,62 @@ used the change.
 ### Phase 4 — Closed-loop operation
 
 **Goal.** Optional closed-loop operation exists *outside* this repository. An
-orchestrator (Hermes, cron, a human cadence, or another agent product) only
-calls kernel commands. The kernel still has no scheduler.
+external Driver (a human cadence, cron, or another agent product) decides when
+to invoke the next bounded kernel command. The kernel still has no scheduler.
 
 **In scope.**
 
-- An external loop that invokes `fetch_next_work.py`, `claim_issue.py`,
-  `create_pr.py`, `check_ci.py`, `merge_pr.py`, and the other supported
-  commands.
-- Documentation here that names the boundary: orchestration may retry, wait,
-  and wake; it may not invent lifecycle state when GitHub is unavailable.
+- An external Driver that, on each activation, rereads GitHub and Git, invokes
+  one supported command (`fetch_next_work.py`, `claim_issue.py`,
+  `create_pr.py`, `check_ci.py`, `fetch_pr_feedback.py`, `merge_pr.py`, and the
+  others), and stops. It may surface a pull request waiting for an approval or
+  start a reviewer under another account.
+- Documentation here that names the boundary: the Driver may retry, wait, and
+  wake; it may not invent lifecycle state when GitHub is unavailable.
 
 **Out of scope.**
 
-- Any scheduler, daemon, presence registry, private queue, or capacity ledger
-  in *this* repository.
+- Any scheduler, daemon, presence registry, private queue, capacity ledger or
+  other lifecycle store, in this repository or in the Driver. Driver receipts
+  are diagnostics, never authority.
+- Statistical control bands, automatic alert-to-issue generation, or throughput
+  targets as exit conditions.
 - Restoring `run-aru-factory`, the Hermes-in-kernel loop, or the reaper as
   kernel surfaces.
-- New kernel APIs created only to make an orchestrator prettier. If the
-  orchestrator needs a new command, that command must pass Phase 1-style
-  admission as a kernel component.
+- New kernel APIs created only to make a Driver prettier. If the Driver needs a
+  new command, that command must pass Phase 1-style admission as a kernel
+  component.
 
 **Admission.** Phases 1 and 3 are done (the contract is real and a consumer
 can implement under it). Phase 2 should be done unless the loop only consumes
-already-Ready issues. Evidence: at least one external orchestrator repository
-or operator runbook, plus three consumer repos that were driven that way
-without kernel patches that reintroduce a waiter.
+already-Ready issues. Evidence: at least one external Driver repository or
+operator runbook, plus three consumer repos that were driven that way without
+kernel patches that reintroduce a waiter.
 
 **Done when.**
 
-- A closed-loop run can take Ready work to merge by calling published kernel
-  commands plus the consumer's focused local verification commands.
-- Deleting the orchestrator leaves the kernel fully usable by a human.
-- `tests/test_surface.py` still forbids the factory filenames and retains
-  the requirement that `.github/workflows` be absent in this repo.
+- An external Driver takes Ready work to merge by calling published kernel
+  commands, with every transition authorized by GitHub evidence (exact-head
+  check, distinct-account approval, helper-controlled merge) and no private
+  lifecycle store.
+- Deleting the Driver leaves the kernel fully usable by a human.
+- `tests/test_surface.py` still forbids the factory filenames and keeps the
+  repository's workflows to the two governed ones.
 
 ### Phase 5 — Ship governance
 
-**Goal.** Deploy, rollback, and promotion are consumer-owned stages. The
-kernel may require evidence that those stages happened. Aru does not ship
-software, host previews, or own production.
+**Goal.** Deploy, rollback, and promotion are consumer-owned stages. Aru does
+not ship software, host previews, or own production.
 
 **In scope.**
 
-- Issue/PR contract fields or merge-gate evidence that a consumer-defined
-  deploy/rollback/promotion check passed, when a consumer opts into that
-  stricter gate.
-- Clear authority: consumer repository decides *how* to ship; Aru only
-  blocks merge-or-promote when the consumer asked it to require that
-  evidence.
+- Consumer deployment that records observed runtime and recovery evidence:
+  what revision is running, how it was observed healthy, and a rollback or
+  recovery that was actually exercised.
+- Any gate that reads that evidence lives in consumer policy (for example GitHub
+  Environments or the consumer's own required checks). This file adds no
+  universal Kernel gate; a Kernel component for it would still need the
+  KERNEL-CONTRACT admission rule.
 
 **Out of scope.**
 
@@ -356,17 +380,41 @@ software, host previews, or own production.
   forbidden by surface tests for a reason).
 
 **Admission.** Phase 1 is done. At least three governed consumer repositories
-already deploy by their own pipelines and can show what evidence a kernel gate
-would read. Explain why GitHub Environments, required checks, or a consumer
-workflow cannot carry the gate without a new kernel surface.
+already deploy by their own pipelines and can show the runtime and recovery
+evidence a gate would read.
 
 **Done when.**
 
-- A consumer can require deploy/rollback/promotion evidence through Aru
-  without Aru executing the deploy.
-- Removing Aru does not take down the consumer's ability to ship (it only
-  removes the governance gate).
+- A consumer deploys by its own pipeline and shows observed runtime and
+  recovery evidence for a governed merge.
+- Removing Aru does not take down the consumer's ability to ship.
 - This repository still has no release/deploy/preview runtime.
+
+### Exit evidence as of `633ff1c`
+
+Checked against `origin/main` at `633ff1c` (merge of PR #780) on 2026-09-26.
+Each row names the evidence that decides the exit. `MET` cites that evidence,
+`UNMET` means the evidence shows the exit is false, and `UNKNOWN` means the
+deciding evidence has not been gathered; unknown is never rounded up. The
+phases are this file's own. They are not mapped one-to-one onto any external
+playbook, and no calendar decides them. Re-check before relying on a row.
+
+| Exit | Deciding evidence | Status |
+| --- | --- | --- |
+| P2: an idea reaches Ready on a consumer via published scaffolding | A consumer issue filed from the scaffolded form and promoted by `triage_backlog.py` | UNKNOWN — no such walk is cited; the optional planning prompts ship with #769, after this revision |
+| P2: invalid contracts fail closed | Contract tests in `tests/test_common.py` | MET |
+| P2: no in-repo scheduler | `tests/test_surface.py` wrong-layer and ledger checks | MET |
+| P3: a consumer merges on its own product checks | `jaji-mission-control` PR #227, head `21f70ea`, and `hermes-trading-automation` PR #246, head `dd7a313`: `aru-governed-pr` success, each running a non-starter `.aru/verify-project.sh` | MET |
+| P3: an implement-next-issue walk without undocumented rescue | A walk record showing no operator intervention | UNKNOWN — GitHub records merges, not the absence of rescue |
+| P3: command, skill and document budgets hold | `tests/test_surface.py` | MET |
+| P4: an external Driver takes Ready work to merge | A Driver runbook or repository plus the consumer runs it drove | UNKNOWN — none cited; the #772 pilot is where it is recorded |
+| P4: deleting the Driver leaves the kernel usable | The kernel contains no Driver; `tests/test_surface.py` | MET |
+| P4: surface test forbids factory files, two workflows only | `tests/test_surface.py` | MET |
+| P5: consumer deploy with observed runtime and recovery evidence | A consumer deployment record tied to a governed merge | UNMET — deferred to #776, not started |
+| P5: removing Aru leaves shipping intact | Per-consumer deployment evidence | UNKNOWN |
+| P5: no release/deploy runtime here | `tests/test_surface.py` forbids `release.py` and wrong-layer files | MET |
+
+No phase after Phase 1 is complete while a row above is `UNMET` or `UNKNOWN`.
 
 ## 6. What this file must never become
 
