@@ -273,6 +273,29 @@ that head. On `self-hosted-mac`, if all registered Macs are offline the
 check stays queued and merge remains blocked; it is never rerouted to
 `github-hosted` runners.
 
+### Local preflight for Factory changes
+
+`make verify` runs this repository's current `aru-governed-pr` lint and test
+scope (`ruff check scripts hooks tests integrations`, then `pytest -q`) and
+exits nonzero if either fails. It uses `.venv/bin/python` when that exists,
+otherwise `python3`; point it at another interpreter with
+`make verify PYTHON=/path/to/venv/bin/python`. A missing interpreter or a missing
+requirement from `requirements-dev.txt` fails the command instead of being skipped. It
+never installs packages, authenticates, publishes, changes GitHub or deploys.
+
+While iterating, run the focused check you need (`make lint`, or
+`python -m pytest tests/test_x.py -k name`). Run the full `make verify` before
+opening or updating a PR, and record in the PR the revision it printed and any
+failing output you fixed. If the same failure survives two or three repair
+attempts, stop and report it on the issue rather than looping. Deleting,
+skipping or weakening a test is allowed when the behavior genuinely changed, but
+it is a reviewable behavior change: say so in the PR.
+
+A local pass is preflight evidence only. The exact-head `aru-governed-pr` check,
+one approval from another account and `merge_pr.py --expected-head` remain the
+merge gates. Consumer repositories keep their product checks in their own
+`.aru/verify-project.sh`, run on their assigned runner profile.
+
 ## Review
 
 Every pull request, documentation included, needs one approval of its exact
