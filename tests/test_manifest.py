@@ -9,7 +9,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
+import common
 import consumer
 import init_project
 import manifest
@@ -325,3 +327,70 @@ def test_the_excluded_set_is_the_same_in_both_implementations():
         else:
             assert f'"{relative}"' in declared, relative
     assert declared.count('"') // 2 == len(manifest.EXCLUDED) - 1
+
+
+# Both issue forms: Aru's own, and the consumer-owned copy bootstrap writes. Neither is
+# hashed, so growing their optional prompts changes no manifest.
+ISSUE_FORMS = (".github/ISSUE_TEMPLATE/governed-task.yml", "templates/issue.yml")
+
+
+def submitted_issue(form: dict, answers: dict[str, str]) -> str:
+    """The body GitHub writes for a submitted issue form: one `### label` section per
+    field, with `_No response_` for an optional field left empty."""
+    sections = []
+    for field in form["body"]:
+        value = answers.get(field["id"], "").strip() or "_No response_"
+        sections.append(f"### {field['attributes']['label']}\n\n{value}")
+    return "\n\n".join(sections) + "\n"
+
+
+@pytest.mark.parametrize("form_path", ISSUE_FORMS)
+def test_issue_forms_add_only_optional_planning_prompts(form_path):
+    form = yaml.safe_load((ROOT / form_path).read_text(encoding="utf-8"))
+    required = {f["id"] for f in form["body"] if f.get("validations", {}).get("required")}
+    # The Factory form always required its outcome; the scaffolded form never did.
+    assert required - {"outcome"} == {"acceptance", "touches"}
+    ids = [field["id"] for field in form["body"]]
+    assert len(ids) == len(set(ids))
+    assert {"outcome", "problem", "constraints", "decisions", "plan", "evidence",
+            "dependencies"} <= set(ids)
+    assert [f for f in form["body"] if f["id"] == "touches"][0]["type"] == "input"
+
+
+@pytest.mark.parametrize("form_path", ISSUE_FORMS)
+def test_a_tiny_issue_needs_no_plan_and_stays_ready(form_path):
+    form = yaml.safe_load((ROOT / form_path).read_text(encoding="utf-8"))
+    body = submitted_issue(form, {
+        "outcome": "The typo in README is fixed.",
+        "acceptance": "- [ ] README says 'governed'",
+        "touches": "README.md",
+    })
+    record = {"body": body, "state": "OPEN"}
+    assert common.contract_errors(record) == []
+    assert common.parse_touches(body) == ["README.md"]
+    assert common.dependencies(body) == []
+
+
+@pytest.mark.parametrize("form_path", ISSUE_FORMS)
+def test_a_complex_plan_keeps_one_touches_and_separate_dependencies(form_path):
+    form = yaml.safe_load((ROOT / form_path).read_text(encoding="utf-8"))
+    body = submitted_issue(form, {
+        "outcome": "Exports survive a restart.",
+        "problem": "Operators lose queued exports when the service restarts.",
+        "constraints": "No new datastore. Non-goal: changing the export format.",
+        "decisions": "Retention period: decided by the product owner (@owner).",
+        "plan": ("#### Decision\nPersist the queue in the existing table.\n"
+                 "#### Alternatives\nAn in-memory retry loses work on crash.\n"
+                 "#### Risks\nMigration lock time; verified on a copy.\n"
+                 "#### Verification\nRestart test in the product suite."),
+        "acceptance": "- [ ] Queued exports complete after restart\n- [ ] No new datastore",
+        "evidence": "tests/test_export_restart.py fails before, passes after.",
+        "touches": "src/export.py, tests/test_export_restart.py",
+        "dependencies": "depends-on: #12\ndepends-on: #34",
+    })
+    record = {"body": body, "state": "OPEN"}
+    assert common.contract_errors(record) == []
+    assert common.parse_touches(body) == ["src/export.py", "tests/test_export_restart.py"]
+    assert common.dependencies(body) == [12, 34]
+    assert [done for done, _ in common.acceptance_items(body)] == [False, False]
+
