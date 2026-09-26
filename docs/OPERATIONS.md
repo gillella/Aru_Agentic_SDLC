@@ -567,7 +567,30 @@ and links the six skills for Codex, Claude, Cursor and shared agent discovery.
 Global guidance leaves runner selection to each repository and contains no
 unresolved template values. The recognized legacy Claude Aru section is backed
 up and replaced through its managed closing marker; personal text before and
-after that section is preserved. Ambiguous legacy boundaries are refused.
+after that section is preserved. When the Claude plugin is installed, its skills
+and instructions take precedence: the installer removes only a recognized
+duplicate Aru block from `~/.claude/CLAUDE.md` and does not link a second set of
+Claude skills. It preserves personal and stricter consumer instructions.
+
+For a project with the historical Cursor rule, run
+`scripts/install_agent_integration.sh --project <project-path>` from the same
+verified checkout. The installer updates only the known
+`.cursor/rules/aru-agentic-sdlc.mdc` format, preserves its consumer sections,
+and backs up the original. A project path is explicit because a global install
+cannot discover every consumer checkout. Malformed markers, unknown rule content,
+or stale routes outside the known managed section are reported as conflicts for
+manual reconciliation; they are never deleted by a heading match. Repeating the
+supported update leaves the resulting guidance unchanged. The managed guidance
+lists exactly the six installed skills, routes work through `fetch_next_work.py`,
+and requires another GitHub account's approval of the current head for every PR.
+
+Skill links and plugin skills supply commands; they do not erase instructions
+already active in global guidance or Cursor project rules. Reconcile each active
+surface: Codex uses its managed `~/.codex/AGENTS.md` block, Claude with the
+plugin uses the plugin skills without a duplicate Aru block in
+`~/.claude/CLAUDE.md`, and a historical Cursor project rule needs the explicit
+`--project` update. Consumer instructions outside managed sections remain in
+force, including any stricter review or release controls.
 
 Record the source revision and before/after file hashes. Repeating installation
 must preserve the resulting content. Restore the recorded backup for rollback;
@@ -604,8 +627,10 @@ export ARU_SDLC_HOME=/Users/aravindgillella/projects/Aru_Agentic_SDLC
 The installer creates symlinks for exactly six skills under supported local
 agent skill directories and maintains the delimited Aru block in
 `~/.codex/AGENTS.md`. It preserves unrelated global instructions and backs up a
-recognized legacy all-Aru file before replacing its obsolete routes. It does
-not copy the kernel into every consumer repository.
+recognized legacy all-Aru file before replacing its obsolete routes. Use
+`--project <project-path>` for a known historical Cursor project rule. The
+installer refuses unknown Aru text for manual reconciliation and does not copy
+the kernel into every consumer repository.
 
 Confirm the location before using a consumer project:
 

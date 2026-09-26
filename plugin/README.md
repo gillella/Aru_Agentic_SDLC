@@ -56,6 +56,17 @@ key.
 | **Cursor** | Yes (`skills/`) | Yes (`plugin/agents/`) | Opt-in `Write` only | Native Cursor manifest (`.cursor-plugin/plugin.json`) via Customize > Plugins (local plugin folder), or `scripts/install_agent_integration.sh` |
 | **Hermes Agent** | Yes (`skills/`) | No | No | `scripts/install_agent_integration.sh` (no plugin mechanism; skills land in `~/.hermes/skills/software-development/`, guidance in `~/.hermes/SOUL.md`) |
 
+The six plugin skills are the current workflow instructions. If Claude has this
+plugin installed, the local installer uses those skills and removes only a
+recognized duplicate Aru managed block from `~/.claude/CLAUDE.md`; personal and
+stricter consumer instructions remain. Unrecognized stale text or malformed
+boundaries require manual reconciliation. To reconcile the historical Cursor
+project rule in a named consumer checkout, run
+`scripts/install_agent_integration.sh --project <project-path>`; the installer
+preserves the rule's consumer sections and does not install a second plugin copy.
+Managed guidance names the six skills, uses `fetch_next_work.py`, and requires
+approval of every PR's current head by a different GitHub account.
+
 ## Coverage Limits
 
 - **Bash tool writes**: File writes via Bash commands (`cat > file`, `echo > file`) bypass the `PreToolUse` matcher (`Write|Edit|NotebookEdit`).
