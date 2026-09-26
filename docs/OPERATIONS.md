@@ -1288,9 +1288,10 @@ create a scheduler, autonomous loop, or second work queue.
 
 ### Delivery report
 
-`report.py` answers whether the guardrails are helping, rather than whether each
-change followed the process. It is read-only: it writes nothing, creates no file,
-and re-derives every figure from GitHub on each run.
+`report.py` describes observable activity in a bounded sample. It is read-only:
+it writes nothing, creates no file, and re-derives every figure from GitHub on
+each run. These counts support manual inspection, not a quality or productivity
+claim; no improvement percentage or 55% target follows from them.
 
 ```bash
 python3 "$ARU_SDLC_HOME/scripts/report.py" --repo OWNER/REPO --since 30d
@@ -1298,20 +1299,58 @@ python3 "$ARU_SDLC_HOME/scripts/report.py" --since 14d --limit 25 --json
 ```
 
 `--since` takes a window such as `30d`, `6w` or `48h` (default `30d`); `--limit`
-bounds how many recent merged pull requests are read (default 50). Omitting
-`--repo` uses the current checkout's remote.
+bounds the newest merged pull requests by **merge time** (default 50). Omitting
+`--repo` uses the current checkout's remote. The JSON `sample` shows the
+merged-only population, start and end of the requested window, observation time,
+requested limit, and whether more eligible PRs were omitted (`truncated`). A
+truncated sample is not a population total. Every eligible closed PR is read to
+decide whether the sample is truncated, but detailed evidence is read only for
+the selected PRs.
 
-It reports merged pull requests, how many were reworked after review (a commit
-pushed after the first review), claim-to-merge duration from the `agent:*` label
-to the merge, and observed blocks counted against the gate identifiers declared
-in `scripts/policy.toml`.
+`current_unresolved_findings` counts unresolved review threads, including
+outdated threads, and severity-labelled `[P0]`/`[P1]` review summaries without
+an explicit qualifying resolution under the same rules as
+`fetch_pr_feedback.py`. `review_threads` separately shows unresolved outdated
+threads (a subset of unresolved) and resolved threads, which are excluded from
+current findings. A summary whose review
+also owns an unresolved thread is counted once, as a thread; summaries without
+that overlap are counted once per review. `blocks_by_gate` counts **unique PRs**
+with at least one current unresolved finding, not the number of findings.
+`review_events.changes_requested` is a separate historical event count. It does
+not establish that `merge_pr.py` refused any merge, or that the finding remains
+open. The approval gate has no reportable refusal count.
 
-**Read the last line.** A `merge_pr.py` refusal raises in the operator's terminal
-and leaves no GitHub record, because the Kernel has no telemetry or ledger by
-design. Only gates with a GitHub-visible signal — the governed checks, a
-`CHANGES_REQUESTED` review, unresolved threads — can be counted. The report names
-the declared gates it cannot observe, so a low block count is never mistaken for
-proof of a clean run.
+The governed check metric reads the selected PR's **final head** and validates
+the check's GitHub Actions App, job/run identity, workflow, `pull_request` event,
+same-repository PR/head binding, retry attempt and pre-merge timestamps using
+the same provenance rules as `check_ci.py`. It reads all check and workflow-run
+pages and refuses missing, malformed, conflicting or truncated evidence. A
+rerun is represented by the latest attempt of its workflow run; superseded
+workflow runs on that final head remain observations. `blocks_by_gate` counts
+one affected PR per gate even when multiple runs failed. This is **not** the
+history of checks on earlier PR heads or all gate attempts. The separate
+`aru-merge-policy` context is no longer attributed from a same-name final-head
+check without its `pull_request_target` provenance; its gate remains in
+`unobservable_gates`. JSON `check_evidence` lists each sampled PR's final head
+and verified run IDs, attempts, workflow/check/suite IDs, App, event and result
+so an aggregate can be traced to the observed GitHub runs.
+
+`post_first_review_commit_activity` counts PRs with a commit timestamp after
+the first submitted review. It is an activity proxy, not a defect or rework
+rate: legitimate requested changes, a revised plan, or unrelated commits can
+produce it. Claim-to-merge duration still runs from the first `agent:*` label
+to merge and excludes PRs with no recorded claim. JSON consumers must migrate
+from `rework.reworked_after_review`/`rate` to
+`post_first_review_commit_activity.pull_requests`/`share`; the old names implied
+a defect interpretation. The Python `reworked()` helper remains as an alias.
+
+**Read the limitations.** A local `merge_pr.py` refusal leaves no GitHub
+receipt; the report has no telemetry or ledger. Only verified final-head
+governed checks and current unresolved findings contribute to observed gate
+counts. A low count does not prove a clean process. Unreadable or incomplete
+required evidence exits with an error instead of reporting a clean zero; a true
+empty merged-PR window reports zero. The report adds no scheduler, alert band,
+automatic issue filing, or lifecycle transition.
 
 ### MCP server
 
