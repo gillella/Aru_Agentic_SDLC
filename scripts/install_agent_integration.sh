@@ -32,6 +32,14 @@ fi
 governance_template="${aru_home}/templates/AGENTS.md"
 managed_begin="<!-- BEGIN ARU_SDLC_GOVERNANCE -->"
 managed_end="<!-- END ARU_SDLC_GOVERNANCE -->"
+project=""
+if [[ $# -gt 0 ]]; then
+  if [[ $# -ne 2 || "$1" != "--project" || -z "$2" ]]; then
+    echo "usage: $0 [--project path]" >&2
+    exit 2
+  fi
+  project="$2"
+fi
 global_template="$(mktemp)"
 trap 'rm -f "${global_template}"' EXIT
 PYTHONPATH="${aru_home}/scripts" python3 -c 'import policy, sys; sys.stdout.write(policy.genericized_agent_guidance())' > "${global_template}" \
@@ -96,6 +104,8 @@ begin = text.index("<!-- BEGIN ARU_SDLC_GOVERNANCE -->")
 end = text.index("<!-- END ARU_SDLC_GOVERNANCE -->")
 if not start < begin < end or text.count("# MASTER OPERATING DIRECTIVE: Aru_Agentic_SDLC") != 1:
     raise SystemExit("error: refusing ambiguous legacy Aru guidance")
+if text[start:begin].strip() != "# MASTER OPERATING DIRECTIVE: Aru_Agentic_SDLC\nrun-aru-factory":
+    raise SystemExit("error: refusing unknown legacy Aru guidance")
 end += len("<!-- END ARU_SDLC_GOVERNANCE -->")
 backup = p.with_name(p.name + ".pre-aru-v2." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"))
 backup.write_bytes(p.read_bytes())
@@ -110,6 +120,15 @@ PYTHON
       echo "error: refusing to edit malformed Aru block in ${target}" >&2
       exit 1
     fi
+    python3 - "${target}" <<'PYTHON'
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text()
+begin, end = "<!-- BEGIN ARU_SDLC_GOVERNANCE -->", "<!-- END ARU_SDLC_GOVERNANCE -->"
+outside = text[:text.index(begin)] + text[text.index(end) + len(end):]
+if any(word in outside for word in ("run-aru-factory", "code-review", "fetch_next_issue.py")):
+    raise SystemExit("error: refusing stale Aru guidance outside managed block")
+PYTHON
     temporary="$(mktemp)"
     awk -v begin="${managed_begin}" -v end="${managed_end}" -v template="${template}" '
       index($0, begin) {
@@ -128,6 +147,10 @@ PYTHON
   fi
 
   if grep -Fq "# Global Software Development Governance: Aru_Agentic_SDLC" "${target}"; then
+    if [[ "$(cat "${target}")" != $'# Global Software Development Governance: Aru_Agentic_SDLC\nrun-aru-factory' ]]; then
+      echo "error: refusing unknown legacy Aru guidance in ${target}" >&2
+      exit 1
+    fi
     local backup="${target}.pre-aru-v0.2.8.$(date +%Y%m%d%H%M%S)"
     cp -p "${target}" "${backup}"
     cp "${template}" "${target}"
@@ -135,11 +158,136 @@ PYTHON
     return
   fi
 
+  if grep -Eq 'run-aru-factory|code-review|fetch_next_issue\.py|MASTER OPERATING DIRECTIVE' "${target}"; then
+    echo "error: refusing unknown stale guidance in ${target}" >&2
+    exit 1
+  fi
+
   temporary="$(mktemp)"
   awk 'FNR == 1 && NR != 1 { print "" } { print }' "${target}" "${template}" > "${temporary}"
   cat "${temporary}" > "${target}"
   rm -f "${temporary}"
   echo "appended managed Aru guidance to ${target}"
+}
+
+remove_claude_managed_guidance() {
+  local target="${HOME}/.claude/CLAUDE.md"
+  [[ -e "${target}" || -L "${target}" ]] || return 0
+  if [[ -L "${HOME}/.claude" || -L "${target}" || ! -f "${target}" ]]; then
+    echo "error: refusing unsafe Claude guidance ${target}" >&2
+    exit 1
+  fi
+  python3 - "${target}" <<'PYTHON'
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+p = Path(sys.argv[1])
+text = p.read_text(encoding="utf-8")
+begin, end = "<!-- BEGIN ARU_SDLC_GOVERNANCE -->", "<!-- END ARU_SDLC_GOVERNANCE -->"
+title = "# MASTER OPERATING DIRECTIVE: Aru_Agentic_SDLC"
+if begin not in text and end not in text:
+    if title in text or "# Global Software Development Governance: Aru_Agentic_SDLC" in text:
+        raise SystemExit("error: refusing unknown Claude legacy guidance with plugin")
+    if any(word in text for word in ("run-aru-factory", "code-review", "fetch_next_issue.py")):
+        raise SystemExit("error: refusing unknown stale Claude guidance with plugin")
+else:
+    if any(text.count(marker) != 1 or marker not in text.splitlines() for marker in (begin, end)):
+        raise SystemExit("error: refusing ambiguous Aru managed boundaries")
+    start, finish = text.index(begin), text.index(end) + len(end)
+    if start >= finish:
+        raise SystemExit("error: refusing ambiguous Aru managed boundaries")
+    if title in text:
+        if text.count(title) != 1:
+            raise SystemExit("error: refusing unknown Claude legacy guidance with plugin")
+        start = text.index(title)
+        if (start >= text.index(begin)
+                or text[start:text.index(begin)].strip() != title + "\nrun-aru-factory"):
+            raise SystemExit("error: refusing ambiguous Claude legacy guidance")
+    outside = text[:start] + text[finish:]
+    if any(word in outside for word in ("run-aru-factory", "code-review", "fetch_next_issue.py")):
+        raise SystemExit("error: refusing stale Claude guidance outside managed block")
+    backup = p.with_name(p.name + ".pre-aru-v2." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"))
+    backup.write_bytes(p.read_bytes())
+    p.write_text(outside, encoding="utf-8")
+    print(f"removed duplicate Claude managed guidance in {p}; preserved {backup}")
+PYTHON
+}
+
+install_cursor_project_rule() {
+  local rule="${project}/.cursor/rules/aru-agentic-sdlc.mdc"
+  if [[ ! -d "${project}" || ! -f "${rule}" || -L "${project}" || -L "${project}/.cursor" || -L "${project}/.cursor/rules" || -L "${rule}" ]]; then
+    echo "error: refusing unsafe Cursor project rule ${rule}" >&2
+    exit 1
+  fi
+  python3 - "${rule}" "${global_template}" <<'PYTHON'
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+rule, template = map(Path, sys.argv[1:])
+text = rule.read_text(encoding="utf-8")
+begin, end = "<!-- BEGIN ARU_SDLC_GOVERNANCE -->", "<!-- END ARU_SDLC_GOVERNANCE -->"
+header = ("---\ndescription: Aru_Agentic_SDLC Issue-First governance for this repository\n"
+          "alwaysApply: true\n---\n\n# Aru Agentic SDLC (project rule)\n\n"
+          "This repository is governed by **Aru_Agentic_SDLC**.\n\n")
+if not text.startswith(header):
+    raise SystemExit("error: refusing unknown Cursor project rule")
+if begin in text or end in text:
+    if any(text.count(marker) != 1 or marker not in text.splitlines() for marker in (begin, end)):
+        raise SystemExit("error: refusing ambiguous Aru managed boundaries")
+    start, finish = text.index(begin), text.index(end) + len(end)
+    if start >= finish or start < len(header):
+        raise SystemExit("error: refusing ambiguous Aru managed boundaries")
+else:
+    section = "## Before any code change\n\n"
+    boundary = "\n## Hard constraints\n"
+    if text.count(section) != 1 or text.count(boundary) != 1:
+        raise SystemExit("error: refusing unknown legacy Cursor rule")
+    start = text.index(section)
+    finish = text.index(boundary)
+    body = text[start:finish].strip().splitlines()
+    routes = [line for line in body if line.startswith("   - ")]
+    expected = {"run-aru-factory", "implement-next-issue", "create-github-issue",
+                "code-review", "remediate-ci-failure", "address-pr-feedback",
+                "init-agent-project"}
+    known_lines = {
+        '   - `run-aru-factory` — `aru code` (synonyms software/dev/sdlc), "please continue", work the board, loop',
+        '   - `implement-next-issue` — claim/implement/PR for a named or next issue',
+        '   - `create-github-issue` — file work',
+        '   - `code-review` — review only a preassigned `review:agent` emergency fallback; otherwise refuse and await external review',
+        '   - `code-review` — review a PR',
+        '   - `remediate-ci-failure` — fix red CI',
+        '   - `address-pr-feedback` — resolve review threads',
+        '   - `init-agent-project` — bootstrap a new governed repo',
+    }
+    names = {re.match(r"   - `([^`]+)`", line).group(1) for line in routes
+             if re.match(r"   - `([^`]+)`", line)}
+    if (not text.startswith(header, 0, start) or names != expected or len(routes) != len(expected)
+            or any(line not in known_lines for line in routes)
+            or body[:3] != ["## Before any code change", "",
+                             "1. Confirm work originates from a tracked GitHub issue (Issue-First Law)."]
+            or body[3] != "2. Read and follow the matching skill under `$ARU_SDLC_HOME/skills/`:"
+            or body[-1] != '3. Prefer `python3 "$ARU_SDLC_HOME/scripts/<tool>.py"` over ad-hoc GitHub/git glue.'
+            or len(body) != 5 + len(routes)):
+        raise SystemExit("error: refusing unknown legacy Cursor rule")
+    if any(re.search(r"run-aru-factory|code-review|fetch_next_issue\.py|review:agent", line)
+           for line in text[finish:].splitlines()):
+        raise SystemExit("error: refusing stale Cursor rule outside known section")
+
+if begin in text:
+    outside = text[:start] + text[finish:]
+    if any(word in outside for word in ("run-aru-factory", "code-review", "fetch_next_issue.py")):
+        raise SystemExit("error: refusing stale Cursor rule outside managed block")
+
+replacement = template.read_text(encoding="utf-8").rstrip("\n")
+updated = text[:start] + replacement + text[finish:]
+if updated != text:
+    backup = rule.with_name(rule.name + ".pre-aru-v2." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f"))
+    backup.write_bytes(rule.read_bytes())
+    rule.write_text(updated, encoding="utf-8")
+    print(f"updated managed Cursor project rule in {rule}; preserved {backup}")
+PYTHON
 }
 
 plugin_installed=0
@@ -153,9 +301,15 @@ if [[ -d "${hermes_home}" && ! -L "${hermes_home}" ]]; then
   guidance_targets+=("${hermes_guidance}")
 fi
 for target in "${guidance_targets[@]}"; do
-  if [[ "${target}" == "${HOME}/.claude/CLAUDE.md" && "${plugin_installed}" -eq 1 ]]; then continue; fi
+  if [[ "${target}" == "${HOME}/.claude/CLAUDE.md" && "${plugin_installed}" -eq 1 ]]; then
+    remove_claude_managed_guidance
+    continue
+  fi
   install_global_guidance "${target}" "${global_template}"
 done
+if [[ -n "${project}" ]]; then
+  install_cursor_project_rule
+fi
 
 for target in "${targets[@]}"; do
   mkdir -p "${target}"
