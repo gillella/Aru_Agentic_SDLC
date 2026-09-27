@@ -140,6 +140,7 @@ def summarize(records: list[dict[str, Any]], declared: set[str] | None = None) -
         "current_unresolved_findings": {
             "threads": sum(r["unresolved_threads"] for r in records),
             "blocking_summaries": sum(r.get("unresolved_summaries", 0) for r in records),
+            "ambiguous_summary_overlaps": sum(r.get("ambiguous_summary_overlaps", 0) for r in records),
         },
         "review_threads": {
             "unresolved": sum(r["unresolved_threads"] for r in records),
@@ -226,7 +227,7 @@ def fetch_one(repo: str, pull: dict[str, Any]) -> dict[str, Any]:
         _moment(review.get("submitted_at"), "review submitted_at")
         reviews.append({"state": state, "submitted_at": review["submitted_at"]})
     check_runs = governed_checks(repo, pull)
-    threads, summaries, outdated, resolved = review_findings(repo, number, head)
+    threads, summaries, outdated, resolved, overlaps = review_findings(repo, number, head)
     return {
         "pr": number,
         "head": head,
@@ -236,6 +237,7 @@ def fetch_one(repo: str, pull: dict[str, Any]) -> dict[str, Any]:
         "check_runs": check_runs,
         "unresolved_threads": threads,
         "unresolved_summaries": summaries,
+        "ambiguous_summary_overlaps": overlaps,
         "unresolved_outdated_threads": outdated,
         "resolved_threads": resolved,
         "claimed_at": claim_moment(repo, str(pull.get("body") or "")),
@@ -429,7 +431,7 @@ def unresolved_threads(repo: str, number: int) -> int:
     return _thread_inventory(repo, number)[0]
 
 
-def review_findings(repo: str, number: int, head: str) -> tuple[int, int, int, int]:
+def review_findings(repo: str, number: int, head: str) -> tuple[int, int, int, int, int]:
     """Use the feedback helper's severity and explicit-resolution rules."""
     threads, outdated, resolved, linked_reviews = _thread_inventory(repo, number)
     owner, name = repo.split("/", 1)
@@ -469,13 +471,15 @@ def review_findings(repo: str, number: int, head: str) -> tuple[int, int, int, i
         cursor = feedback._next_cursor(connection, seen_cursors)
         if cursor is None:
             break
-    unresolved = sum(
-        1 for review in reviews
-        if review["databaseId"] not in linked_reviews
-        and feedback.BLOCKING_LABEL.search(review["body"])
+    outstanding = [
+        review["databaseId"] for review in reviews
+        if feedback.BLOCKING_LABEL.search(review["body"])
         and not any(feedback._resolves(candidate, review, head, identity[1]) for candidate in reviews)
-    )
-    return threads, unresolved, outdated, resolved
+    ]
+    # Review identity proves overlap, but not whether the summary adds a separate
+    # finding. Keep the known thread count and expose the uncertainty.
+    overlaps = sum(review_id in linked_reviews for review_id in outstanding)
+    return threads, len(outstanding) - overlaps, outdated, resolved, overlaps
 
 
 def claim_moment(repo: str, body: str) -> str | None:
@@ -530,6 +534,8 @@ def main() -> int:
     findings = report["current_unresolved_findings"]
     print(f"  current findings     : {findings['threads']} unresolved threads,"
           f" {findings['blocking_summaries']} blocking review summaries")
+    print(f"  uncertain overlap    : {findings['ambiguous_summary_overlaps']} labelled summaries"
+          " also linked to unresolved threads (possible additional findings)")
     threads = report["review_threads"]
     print(f"  thread detail        : {threads['unresolved_outdated']} unresolved outdated,"
           f" {threads['resolved']} resolved")

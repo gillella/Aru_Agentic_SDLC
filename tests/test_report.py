@@ -336,7 +336,18 @@ def test_blocking_summary_resolution_and_thread_overlap_are_not_duplicated(monke
                 summary_review(4, "Resolves review: 3\nAddressed", state="COMMENTED",
                                submitted="2026-09-10T11:00:00Z")]
     _stub_github(monkeypatch, threads=[[thread(1, review_id=1)]], summary_pages=[findings])
-    assert report.review_findings("o/r", 7, HEAD) == (1, 1, 0, 0)
+    assert report.review_findings("o/r", 7, HEAD) == (1, 1, 0, 0, 1)
+
+
+@pytest.mark.parametrize("body", [
+    "[P1] The unresolved inline thread describes this finding",
+    "[P1] A separate summary finding\nThe unresolved inline thread concerns another path",
+])
+def test_labelled_summary_with_thread_overlap_is_explicitly_ambiguous(monkeypatch, body):
+    _stub_github(monkeypatch, threads=[[thread(1, review_id=1)]],
+                 summary_pages=[[summary_review(1, body)]])
+    findings = report.summarize([report.fetch_one("o/r", dict(PULL))])["current_unresolved_findings"]
+    assert findings == {"threads": 1, "blocking_summaries": 0, "ambiguous_summary_overlaps": 1}
 
 
 def test_duplicate_review_summary_across_pages_refuses(monkeypatch):

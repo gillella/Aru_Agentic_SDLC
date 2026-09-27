@@ -1312,9 +1312,15 @@ outdated threads, and severity-labelled `[P0]`/`[P1]` review summaries without
 an explicit qualifying resolution under the same rules as
 `fetch_pr_feedback.py`. `review_threads` separately shows unresolved outdated
 threads (a subset of unresolved) and resolved threads, which are excluded from
-current findings. A summary whose review
-also owns an unresolved thread is counted once, as a thread; summaries without
-that overlap are counted once per review. `blocks_by_gate` counts **unique PRs**
+current findings. Summaries without unresolved thread overlap are counted once
+per review. A severity-labelled summary whose review also owns an unresolved
+thread is represented by the thread and counted in
+`current_unresolved_findings.ambiguous_summary_overlaps`, not in
+`blocking_summaries`. GitHub's review identity cannot establish whether its
+summary only repeats that thread or adds a separate finding. The thread and
+summary counts are therefore a lower bound when this overlap is nonzero; the
+overlap field names the summaries that need manual inspection. It is not an
+extra finding count. `blocks_by_gate` counts **unique PRs**
 with at least one current unresolved finding, not the number of findings.
 `review_events.changes_requested` is a separate historical event count. It does
 not establish that `merge_pr.py` refused any merge, or that the finding remains
