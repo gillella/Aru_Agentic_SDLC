@@ -18,7 +18,11 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
    | Advisory-only suggestion | A naming preference changes no behavior and violates no contract. Record the reasoned decision to keep the current name and resolve; no unrelated source or test edits are needed. |
    | Accepted separate follow-up | A broader refactor is useful but is not required for this PR's correctness. Record why the present behavior is safe, link the accepted tracked issue, and resolve. An actual defect cannot be deferred merely by filing an issue. |
 
+   A `[P2]` suggestion usually takes the advisory-only disposition; a `[P0]` or
+   `[P1]` finding needs a code fix or evidence-backed disagreement.
    Security/correctness defects remain blocking regardless of a low/info label.
+   Every resolved finding cites its evidence: the fixing commit and test, or the
+   guard and existing test that already prevent it.
    Do not suppress findings, fabricate agreement, or resolve a thread without
    handling its substance. Evidence-backed disposition is not a blanket waiver.
 
@@ -52,6 +56,17 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
    the push dismissed the earlier one. A disposition-only reply creates no new
    head and needs no extra commits, verification, reviewer brands or approval
    rounds; the existing exact-head approval must still stand when merging.
+
+A green service check, a bot's review summary or a COMMENT review is not
+approval. Approval is a GitHub review of the exact head by an account other than
+the author that the default branch's `.aru/review.json` authorizes; under `human`
+that is a listed named account.
+
+When a finding repeats a mistake already seen on earlier pull requests, link it to
+the maintained consumer or Kernel rule and the regression or agent-eval case that
+should catch it, or file an issue naming the owner and source evidence, following
+`integrations/adoption/README.md`. Copy no personal memories, customer data or
+credentials into that record.
 
 Do not approve your own work or poll for reviews. Waiting for an approval is not
 author work; an operator or the external Driver arranges a reviewer on another

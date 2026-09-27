@@ -3,16 +3,60 @@ description: Work admitted to the Aru lifecycle
 labels: ["status:backlog"]
 body:
   - type: textarea
+    id: outcome
+    attributes:
+      label: Outcome
+      description: Optional. The observable result.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and users
+      description: Optional. Who has the problem, and what happens today.
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints and non-goals
+      description: Optional. Limits the change must respect, and what it deliberately does not do.
+  - type: textarea
+    id: decisions
+    attributes:
+      label: Unresolved decisions
+      description: >-
+        Optional. Each open design question and the product owner who decides it.
+        An issue with an open decision that changes scope is an accepted idea, not
+        Ready work.
+  - type: textarea
+    id: plan
+    attributes:
+      label: Plan
+      description: >-
+        Optional and proportional. A tiny change needs none. For a complex change,
+        record decisions, alternatives, risks and verification approach here or
+        link a design document this repository owns.
+  - type: textarea
     id: acceptance
     attributes:
       label: Acceptance Criteria
       value: "- [ ] Observable acceptance condition"
     validations:
       required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Acceptance evidence
+      description: Optional. The test, check or observation that will show each criterion is met.
   - type: input
     id: touches
     attributes:
       label: "touches:"
-      description: Comma-separated repository-relative paths
+      description: >-
+        Comma-separated repository-relative paths. This is the only touches
+        declaration; do not start a line with "touches:" or "depends-on"
+        anywhere else in the issue.
     validations:
       required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: 'Optional. One "depends-on: #123" per line.'

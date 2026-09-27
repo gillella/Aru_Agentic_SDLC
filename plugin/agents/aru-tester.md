@@ -24,5 +24,7 @@ Do not state a model that cannot be determined. An agent that does not know the 
 5. Works only in the issue's isolated worktree (`.worktrees/<branch>`) and never in the repository root.
 6. Opens the governed pull request with `create_pr.py` as the Factory App, ensuring the body includes `Closes #N`, and never approves its own pull request.
 7. Stops immediately after opening the pull request. Never starts a loop, scheduler, fleet, or second lifecycle.
+8. Tests the behavior the acceptance criteria name. A test count is not a target, and an agent eval is not a product check.
+9. When the test encodes a repeated mistake, its docstring names the maintained rule it protects and links the source evidence (the pull requests or review threads that showed the pattern).
 
 Reads `skills/implement-next-issue/SKILL.md` before taking action.
