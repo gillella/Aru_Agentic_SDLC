@@ -9,7 +9,6 @@ import time
 from typing import Any
 
 import merge_authority
-import review_authority
 from check_ci import ci_verdict, finalization_verdict
 from common import KernelError, canonical_github_actor, gh_paginated, json_print, repo_slug, run, same_github_actor
 from fetch_pr_feedback import fetch_feedback
@@ -42,57 +41,47 @@ def refuse(gate: str, message: str, *, cause: BaseException | None = None) -> No
 
 MERGEABLE_STATES = {"CLEAN", "UNSTABLE"}
 DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
+REVIEW_STATES = DECISIVE_REVIEW_STATES | {"COMMENTED", "PENDING"}
 
 
 def pull_reviews(number: int) -> list[dict[str, Any]]:
     return gh_paginated(f"repos/{repo_slug()}/pulls/{number}/reviews?per_page=100")
 
 
-def approved_at_head(pr: dict[str, Any], reviews: list[dict[str, Any]]) -> bool:
-    """Whether an account other than the PR author approved this exact head.
-
-    The one review rule: any reviewer, any tool, as long as it is not the author.
-    Each reviewer's latest decisive review counts (GitHub lists reviews oldest
-    first); comments change nothing, and approving an earlier commit does not carry.
-    """
-    head = pr.get("headRefOid")
-    author = pr["author"].get("login") if isinstance(pr.get("author"), dict) else None
-    if not isinstance(author, str) or not author.strip():
-        refuse("approval-by-another-account", "PR author is unreadable")
+def latest_decisive_reviews(reviews: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Validate the complete review list and keep each account's last decision."""
+    if not isinstance(reviews, list):
+        refuse("approval-by-another-account", "review evidence is malformed")
     latest: dict[str, dict[str, Any]] = {}
     for review in reviews:
         user = review.get("user") if isinstance(review, dict) else None
         login = user.get("login") if isinstance(user, dict) else None
-        # A blank or non-string identity must never pass as "some other account".
-        if not isinstance(login, str) or not login.strip():
+        state = review.get("state") if isinstance(review, dict) else None
+        if (not isinstance(login, str) or not login.strip()
+                or state not in REVIEW_STATES):
             refuse("approval-by-another-account", "review evidence is malformed")
-        if review.get("state") in DECISIVE_REVIEW_STATES:
+        if state in DECISIVE_REVIEW_STATES:
+            commit = review.get("commit_id")
+            if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
+                refuse("approval-by-another-account", "review evidence is malformed")
             # Group by account: logins are case-insensitive and an App has two spellings.
             latest[canonical_github_actor(login)] = review
+    return latest
+
+
+def approved_at_head(pr: dict[str, Any], reviews: list[dict[str, Any]]) -> bool:
+    """Whether another account approved this head with no active change request."""
+    head = pr.get("headRefOid")
+    author = pr["author"].get("login") if isinstance(pr.get("author"), dict) else None
+    if not isinstance(author, str) or not author.strip():
+        refuse("approval-by-another-account", "PR author is unreadable")
+    latest = latest_decisive_reviews(reviews)
+    if any(review["state"] == "CHANGES_REQUESTED" for review in latest.values()):
+        return False
     return any(
         review["state"] == "APPROVED" and review.get("commit_id") == head
         and not same_github_actor(account, author)
         for account, review in latest.items()
-    )
-
-
-def authority_refusal(pr: dict[str, Any], reviews: list[dict[str, Any]]) -> str | None:
-    """Why the repository's declared posture rejects these approvals, or None.
-
-    Read from the default branch, so a pull request cannot authorize itself.
-    """
-    author = pr["author"].get("login") if isinstance(pr.get("author"), dict) else None
-    if not isinstance(author, str) or not author.strip():
-        refuse("approval-by-another-account", "PR author is unreadable")
-    policy = review_authority.load_policy()
-    return review_authority.refusal(
-        author=author,
-        head=str(pr.get("headRefOid") or ""),
-        reviews=reviews,
-        policy=policy,
-        # Only the strict posture asks for a written judgement; the permissive postures
-        # are unchanged, so a project that wants speed does not inherit this.
-        require_judgement=policy.strict,
     )
 
 
@@ -176,21 +165,23 @@ def require_ci_review(pr: dict, number: int, head: str, *, context: str = "", fi
     feedback = fetch_feedback(number)
     if feedback:
         refuse("unresolved-findings", f"{len(feedback)} unresolved {context}review thread(s) or blocking summary finding(s)")
+    if pr.get("reviewDecision") not in {None, "APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"}:
+        refuse("approval-by-another-account", "PR review decision is malformed")
     if pr.get("reviewDecision") == "CHANGES_REQUESTED":
         refuse("approval-by-another-account", f"a submitted {context}review still requests changes")
     reviews = pull_reviews(number)
+    if any(review["state"] == "CHANGES_REQUESTED"
+           for review in latest_decisive_reviews(reviews).values()):
+        refuse("approval-by-another-account", f"a submitted {context}review still requests changes")
     if not approved_at_head(pr, reviews):
         refuse("approval-by-another-account", f"no {context}approval of the exact head by an account other than the author")
-    denial = authority_refusal(pr, reviews)
-    if denial:
-        refuse("approval-by-an-authorized-reviewer", f"{context}{denial}")
     return ci
 
 
 def revalidate_review(pr: dict[str, Any], number: int) -> None:
     """Recheck the approval and threads after the final PR/issue/queue reads."""
     reviews = pull_reviews(number)
-    if not approved_at_head(pr, reviews) or authority_refusal(pr, reviews):
+    if not approved_at_head(pr, reviews):
         refuse("approval-by-another-account", "approval of the exact head was withdrawn before merge submission")
     feedback = fetch_feedback(number)
     if feedback:

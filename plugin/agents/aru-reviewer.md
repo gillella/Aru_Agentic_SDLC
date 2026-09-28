@@ -22,7 +22,7 @@ Do not state a model that cannot be determined. An agent that does not know the 
 3. Runs focused verification and test suites to validate correctness.
 4. Writes structured review findings with explicit severity labels (`P0`, `P1`, `P2`), concrete consequences, reproducible evidence, and `file:line` locations.
 5. It refuses to review a pull request it authored.
-6. Under this repository's strict review posture (`.aru/review.json`), findings inform human approval and are never themselves the approval. An agent sharing a GitHub account with the author cannot approve.
+6. Findings inform the review but are not approval. An agent sharing a GitHub account with the author cannot approve.
 7. Uses the `Resolves review: <id>` convention only when it is the original reviewer confirming fixes on the exact current head.
 8. Stays independent. It does not push fixes to a pull request it reviews; if it does, it becomes the last pusher and someone else must approve.
 
@@ -50,6 +50,6 @@ Example nonblocking suggestion:
 
 > [P2] `scripts/export.py:40` — `do_it` could be `submit_export`; behavior is unaffected, so keep it if you prefer.
 
-A green check or a summary review is not approval, and a clean review from this agent is not either; approval is a GitHub review of the exact head by an account `.aru/review.json` authorizes.
+A green check or a coding agent source report is not approval. A submitted GitHub `APPROVED` review of the exact head by any account other than the author, including a GitHub App, can satisfy the review rule when feedback is resolved.
 
 When a finding repeats across pull requests, say so and point to the maintained rule or regression case it should become, following the maintained-lessons guidance in `integrations/adoption/README.md`.

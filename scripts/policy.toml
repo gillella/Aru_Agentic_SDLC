@@ -164,25 +164,11 @@ blocks = "author feedback routing, merge, final revalidation and close-out"
 mechanism = "`fetch_pr_feedback.py` reads submitted P0/P1-labelled summaries and unresolved threads, including outdated ones; `fetch_next_work.py` routes feedback to the author; `merge_pr.py` refuses until resolved. Summary clearance needs explicit original-reviewer evidence on the current head; approval alone is insufficient."
 
 [[gate]]
-id = "approval-by-an-authorized-reviewer"
-enforcers = ["merge_pr.py", "review_authority.py", "aru-merge-policy"]
-control = "approval by an authorized reviewer"
-blocks = "merge, under the `human` posture"
-mechanism = "`.aru/review.json` on the default branch names the accounts that may approve; `review_authority.py` refuses an unlisted account and refuses any GitHub App outright, and requires the approval to carry a written body. Applied by `merge_pr.py`, the only path that submits a merge; `aru-merge-policy` does not apply it, because the trigger that would re-evaluate after an approval runs the pull request's own copy of the workflow"
-
-[[gate]]
-id = "posture-resolution"
-enforcers = ["review_authority.py"]
-control = "posture resolution"
-blocks = "merge, when the declaration is unusable"
-mechanism = "absent, malformed or unknown resolves to `human`, so a repository cannot lose the gate by omission; a repository that declared nothing authorizes its owner rather than nobody"
-
-[[gate]]
 id = "approval-by-another-account"
 enforcers = ["merge_pr.py", "ruleset"]
 control = "approval by another account"
 blocks = "merge"
-mechanism = "ruleset: one approval, stale approvals dismissed, last-push approval; `merge_pr.py` `approved_at_head` rereads the reviews before submission"
+mechanism = "ruleset: one approval with stale approvals dismissed; `merge_pr.py` `approved_at_head` requires an exact-head approval by another account and rereads reviews before submission"
 
 [[gate]]
 id = "base-head-race"
@@ -241,8 +227,7 @@ require_last_push_approval = false
 require_extra_approval_for_unattributed_changes = true
 # Empty on purpose: no actor may bypass the boundary.
 bypass_actors = []
-# Empty on purpose: authority to approve is resolved from .aru/review.json by
-# review_authority.py, not pinned into the ruleset.
+# Empty on purpose: any exact-head GitHub approval from another account qualifies.
 required_reviewers = []
 # Pinned by integration_id to the merge-authority App, so only merge_pr.py can
 # satisfy it. Absent from required_checks because a consumer scaffolded without

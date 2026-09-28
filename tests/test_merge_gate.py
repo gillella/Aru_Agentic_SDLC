@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+import fetch_next_work
 import merge_pr
+import review_authority
 
 HEAD = "a" * 40
 
@@ -220,6 +222,66 @@ def test_github_app_author_cannot_approve_through_its_bot_login():
 def test_unreadable_author_or_review_evidence_fails_closed(pr, reviews):
     with pytest.raises(merge_pr.KernelError):
         merge_pr.approved_at_head(pr, reviews)
+
+
+@pytest.mark.parametrize("reviews,ci_state,feedback,expected", [
+    ([approval(user={"login": "coderabbitai[bot]", "type": "Bot"}, body="")],
+     "success", [], "merge"),
+    ([approval(user={"login": "writer"})], "success", [], "review"),
+    ([approval(commit_id="c" * 40)], "success", [], "review"),
+    ([approval(), approval(id=2, user={"login": "other"}, state="CHANGES_REQUESTED")],
+     "success", [], "wait"),
+    ([approval()], "success", [{"id": 1}], "feedback"),
+    ([approval()], "failure", [], "verification"),
+])
+def test_disposable_merge_dry_run_and_picker_agree(
+    monkeypatch, reviews, ci_state, feedback, expected
+):
+    """Legacy owner-only data cannot override a current-head GitHub approval."""
+    pr = install_happy_gate(monkeypatch)
+    ci = {"head": HEAD, "state": ci_state, "checks": ["aru-governed-pr"]}
+    monkeypatch.setattr(merge_pr, "ci_verdict", lambda _n: ci)
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _n: reviews)
+    monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _n: feedback)
+    monkeypatch.setattr(fetch_next_work, "fetch_feedback", lambda _n: feedback)
+    monkeypatch.setattr(fetch_next_work, "ci_verdict", lambda _n: ci)
+
+    def forbidden_policy_read(**_kwargs):
+        raise AssertionError("legacy .aru/review.json must not be read")
+
+    monkeypatch.setattr(review_authority, "read_policy_text", forbidden_policy_read)
+    result = fetch_next_work._open_pr_work(pr)
+    assert result["type"] == expected
+    if expected == "merge":
+        dry_run = merge_pr.merge(10, HEAD, dry_run=True)
+        assert dry_run["merged"] is False
+        assert dry_run["gates"]["approved"] is True
+        assert dry_run["gates"]["ci"] == ["aru-governed-pr"]
+    else:
+        with pytest.raises(merge_pr.KernelError):
+            merge_pr.merge(10, HEAD, dry_run=True)
+
+
+def test_disposable_fixture_refuses_stale_head_in_merge_and_picker(monkeypatch):
+    pr = install_happy_gate(monkeypatch)
+    monkeypatch.setattr(merge_pr, "pull_reviews", lambda _n: [approval()])
+    ci = {"head": "c" * 40, "state": "success", "checks": ["aru-governed-pr"]}
+    monkeypatch.setattr(fetch_next_work, "fetch_feedback", lambda _n: [])
+    monkeypatch.setattr(fetch_next_work, "ci_verdict", lambda _n: ci)
+    assert fetch_next_work._open_pr_work(pr)["type"] == "wait"
+    with pytest.raises(merge_pr.KernelError, match="expected head"):
+        merge_pr.merge(10, "c" * 40, dry_run=True)
+
+
+@pytest.mark.parametrize("bad_review", [
+    approval(state="UNKNOWN"),
+    approval(commit_id=None),
+    approval(commit_id="short"),
+    approval(user={"login": ""}),
+])
+def test_malformed_review_cannot_hide_behind_a_valid_approval(bad_review):
+    with pytest.raises(merge_pr.KernelError, match="review evidence is malformed"):
+        merge_pr.approved_at_head(base_pr(), [approval(), bad_review])
 
 
 @pytest.mark.parametrize("ci_state", ["success", "pending", "failure", "untrusted"])
