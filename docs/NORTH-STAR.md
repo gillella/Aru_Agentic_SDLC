@@ -39,11 +39,14 @@ As of this revision the server check is a GitHub Actions job: the consumer's
 `governed-pr.yml` stub runs the Factory's verifier, including the consumer's
 `.aru/verify-project.sh` and actual-diff `touches:` enforcement, on the
 repository's one assigned runner profile, and `merge-policy.yml` re-judges the
-head from the base branch. Local runs are preflight only. Who may approve is
-read from the default branch's `.aru/review.json`; under `human` (Aru's own
-posture) only a listed named account may approve, never a GitHub App. The
-canonical wording of all of this is `docs/KERNEL-CONTRACT.md`; if this file
-disagrees, the contract wins.
+head from the base branch. Local runs are preflight only. Approval requires an
+`APPROVED` GitHub review of the exact head by an account other than the author:
+a person, CodeRabbit or a coding agent on a different account, subject to
+GitHub's ruleset counting that review. An author cannot approve their own PR,
+and agents sharing the author's account cannot approve each other's work. A
+local source report is not a GitHub approval; current-head feedback must be
+resolved and checks must pass. The canonical wording of all of this is
+`docs/KERNEL-CONTRACT.md`; if this file disagrees, the contract wins.
 
 Today the kernel covers one approved GitHub issue through one safely merged
 pull request. That is the foundation, not the whole destination.

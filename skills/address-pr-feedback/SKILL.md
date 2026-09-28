@@ -57,10 +57,12 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
    head and needs no extra commits, verification, reviewer brands or approval
    rounds; the existing exact-head approval must still stand when merging.
 
-A green service check, a bot's review summary or a COMMENT review is not
-approval. Approval is a GitHub review of the exact head by an account other than
-the author that the default branch's `.aru/review.json` authorizes; under `human`
-that is a listed named account.
+A green service check, a bot's review summary, a COMMENT review or a local
+source report is not approval. Approval is an `APPROVED` GitHub review of the
+exact head by an account other than the author: a person, CodeRabbit or a coding
+agent on a different account, when GitHub's ruleset counts that review. Agents
+sharing the author's account cannot approve each other's work. Current-head
+feedback must be resolved and checks must pass before merge.
 
 When a finding repeats a mistake already seen on earlier pull requests, link it to
 the maintained consumer or Kernel rule and the regression or agent-eval case that

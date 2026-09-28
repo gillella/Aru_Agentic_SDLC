@@ -74,12 +74,11 @@ rewrites it, so a consumer's custom form and stricter product rules survive
 updates; copy new prompts in deliberately if wanted.
 
 **Review.** Reviewers follow `plugin/agents/aru-reviewer.md`; authors answer with
-the dispositions in `skills/address-pr-feedback/SKILL.md`. A green check, a bot
-summary or a review comment is not approval: approval is a GitHub review of the
-exact head by an account other than the author that the default branch's
-`.aru/review.json` authorizes; under `human` that is a listed named account, never
-an App. A reviewer who pushes a fix becomes the last pusher, so someone else must
-approve.
+the dispositions in `skills/address-pr-feedback/SKILL.md`. A green check, a
+coding agent source report, or a review comment is not approval: approval is a
+GitHub `APPROVED` review of the exact head by any account other than the author,
+including a GitHub App such as CodeRabbit. A reviewer who pushes a fix becomes
+the last pusher, so someone else must approve.
 
 **Maintained lessons.** When the same mistake recurs, record it once as a
 maintained rule (the consumer's `AGENTS.md`, product checks or runbook, or a Kernel
