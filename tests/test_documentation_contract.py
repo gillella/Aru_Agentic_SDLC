@@ -156,6 +156,30 @@ def test_every_runner_profile_stays_budget_free_and_account_bound():
     assert "self-hosted" not in workflows["github-hosted"]
 
 
+def test_local_preflight_matches_the_governed_workflow_scope():
+    """`make verify` must run what the server check runs, fail closed, and stay
+    preflight: no installer, GitHub write or publish step hides in it."""
+    live = text(ROOT / ".github" / "workflows" / "governed-pr.yml")
+    makefile = text(ROOT / "Makefile")
+    lint_paths = next(
+        line.split(":=", 1)[1].strip()
+        for line in makefile.splitlines() if line.startswith("LINT_PATHS")
+    )
+    assert f"-m ruff check {lint_paths}" in live
+    assert "$(PYTHON) -m ruff check $(LINT_PATHS)" in makefile
+    assert "-m pytest -q" in live
+    assert "$(PYTHON) -m pytest -q" in makefile
+    assert "verify: prerequisites lint test" in makefile
+    assert "import pytest, ruff, yaml" in makefile
+    for forbidden in ("pip install", "gh ", "git push", "curl", "|| true", "\t-", "-ignore", "--exit-zero"):
+        assert forbidden not in makefile, forbidden
+
+    readme = " ".join(text(ROOT / "README.md").split())
+    assert "`make verify`" in readme
+    assert "preflight evidence only" in readme
+    assert "reviewable behavior change" in readme
+
+
 def test_operating_documents_record_the_account_runner_split():
     for relative in (
         "AGENTS.md", "README.md", "docs/KERNEL-CONTRACT.md", "docs/OPERATIONS.md",
