@@ -26,8 +26,9 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
    Do not suppress findings, fabricate agreement, or resolve a thread without
    handling its substance. Evidence-backed disposition is not a blanket waiver.
 
-   A blocking review summary is cleared only by its original reviewer, distinct
-   from the PR author. After the writer posts fixes and regression evidence,
+   A blocking review summary needs confirmation from its original reviewer when
+   distinct from the PR author, or any non-author account when the author raised
+   it. After the writer posts fixes and regression evidence,
    that reviewer submits a new COMMENT or APPROVE review on the exact current
    head with a standalone `Resolves review: <review_id>` line and written
    verification/disposition evidence. Use the numeric ID returned by the feedback
@@ -38,7 +39,8 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
    marker cannot clear findings. A new push needs current-head confirmation again;
    editing the original summary also requires a confirmation after that edit.
    Do not erase the original summary to remove a blocker. If its reviewer is
-   unavailable, leave the PR blocked and report why through GitHub.
+   distinct from the author and unavailable, leave the PR blocked and report why
+   through GitHub.
 3. The writer owns remediation in the existing claimed worktree. The reviewer
    stays independent and does not commit the fix; a reviewer who pushes to the
    PR becomes its last pusher, and GitHub then needs an approval from someone

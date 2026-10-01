@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- A review summary raised by the PR author can now be confirmed by any non-author
+  account after the fix, while findings from other reviewers still require their
+  original reviewer (#787).
+
 ## v2.5.0 - The human gate is a tracked queue - 2026-09-21
 
 - `create_pr.py` adds the pull request it opens to the repository's linked Project
