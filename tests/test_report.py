@@ -339,6 +339,16 @@ def test_blocking_summary_resolution_and_thread_overlap_are_not_duplicated(monke
     assert report.review_findings("o/r", 7, HEAD) == (1, 1, 0, 0, 1)
 
 
+def test_report_clears_self_raised_summary_confirmed_by_non_author(monkeypatch):
+    original = summary_review(1)
+    original['author']['login'] = 'writer'
+    confirmed = summary_review(2, "Resolves review: 1\nVerified the fix at this head.",
+                               state="APPROVED", submitted="2026-09-10T11:00:00Z")
+    _stub_github(monkeypatch, summary_pages=[[original, confirmed]])
+    findings = report.summarize([report.fetch_one("o/r", dict(PULL))])["current_unresolved_findings"]
+    assert findings["blocking_summaries"] == 0
+
+
 @pytest.mark.parametrize("body", [
     "[P1] The unresolved inline thread describes this finding",
     "[P1] A separate summary finding\nThe unresolved inline thread concerns another path",

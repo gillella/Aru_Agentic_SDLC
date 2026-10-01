@@ -23,7 +23,7 @@ Do not state a model that cannot be determined. An agent that does not know the 
 4. Writes structured review findings with explicit severity labels (`P0`, `P1`, `P2`), concrete consequences, reproducible evidence, and `file:line` locations.
 5. It refuses to review a pull request it authored.
 6. Findings inform the review but are not approval. An agent sharing a GitHub account with the author cannot approve.
-7. Uses the `Resolves review: <id>` convention only when it is the original reviewer confirming fixes on the exact current head.
+7. Uses the `Resolves review: <id>` convention on the exact current head only as the original reviewer, or as any non-author account when the PR author raised the finding.
 8. Stays independent. It does not push fixes to a pull request it reviews; if it does, it becomes the last pusher and someone else must approve.
 
 ## What to review

@@ -108,6 +108,43 @@ def test_author_cannot_clear_own_summary(monkeypatch):
     assert len(feedback.fetch_feedback(165)) == 1
 
 
+@pytest.mark.parametrize('state', ['COMMENTED', 'APPROVED'])
+def test_non_author_can_confirm_self_raised_summary(monkeypatch, state):
+    original = review(actor='writer')
+    confirmed = resolution(actor='independent-reviewer', state=state)
+    install(monkeypatch, [page([original, confirmed])])
+    assert feedback.fetch_feedback(165) == []
+
+
+@pytest.mark.parametrize('change', [
+    'writer', 'stale-head', 'earlier', 'after-edit', 'no-evidence', 'new-finding',
+])
+def test_self_raised_summary_requires_valid_independent_confirmation(monkeypatch, change):
+    original = review(actor='writer')
+    confirmed = resolution(actor='independent-reviewer')
+    if change == 'writer':
+        confirmed['author']['login'] = 'writer'
+    elif change == 'stale-head':
+        confirmed['commit']['oid'] = OLD
+    elif change == 'earlier':
+        confirmed['submittedAt'] = '2026-09-14T09:00:00Z'
+    elif change == 'after-edit':
+        original['lastEditedAt'] = '2026-09-14T12:00:00Z'
+    elif change == 'no-evidence':
+        confirmed['body'] = 'Resolves review: 1'
+    elif change == 'new-finding':
+        confirmed['body'] += '\n[P1] Another failure remains.'
+    install(monkeypatch, [page([original, confirmed])])
+    assert 1 in [item['review_id'] for item in feedback.fetch_feedback(165)]
+
+
+def test_distinct_reviewer_still_requires_that_reviewer(monkeypatch):
+    original = review(actor='original-reviewer')
+    confirmed = resolution(actor='different-non-author')
+    install(monkeypatch, [page([original, confirmed])])
+    assert [item['review_id'] for item in feedback.fetch_feedback(165)] == [1]
+
+
 def test_reads_all_review_pages_and_keeps_later_page_finding(monkeypatch):
     calls = install(monkeypatch, [page([review(body='No P1 findings.')], more=True, cursor='next'),
                                  page([review(101)])])

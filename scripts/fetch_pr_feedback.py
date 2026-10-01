@@ -207,8 +207,9 @@ def _resolves(candidate: dict, finding: dict, head: str, author: str) -> bool:
     return (
         candidate["state"] in {"COMMENTED", "APPROVED"}
         and candidate["commit"]["oid"] == head
-        and candidate["reviewer"] == finding["reviewer"]
         and candidate["reviewer"] != author
+        and (finding["reviewer"] == author
+             or candidate["reviewer"] == finding["reviewer"])
         and candidate["submitted"] > finding["updated"]
         and str(finding["databaseId"]) in RESOLUTION.findall(body)
         and bool(RESOLUTION.sub("", body).strip())

@@ -133,14 +133,15 @@ blocking until resolved. Reviewers should put each defect in an inline thread
 and use explicit severity labels when also reporting it in a review summary.
 
 For a summary finding, the writer posts fixes and regression evidence on GitHub.
-The original reviewer then submits a later COMMENT or APPROVE review on the exact
+A qualifying reviewer then submits a later COMMENT or APPROVE review on the exact
 current head containing a standalone `Resolves review: <numeric-review-id>` line
 and written verification/disposition evidence outside that line. The numeric ID
 comes from the finding's `review_id` or its GitHub `pullrequestreview-<id>` URL.
 Each line resolves the entire named summary, so every finding in that summary
 must be addressed; multiple summaries require separate reference lines. The
-confirmation must be by the original reviewer, distinct from the PR author,
-and contain no new P0/P1 labels. Do not place the reference in quoted or fenced
+confirmation must come from the original reviewer when distinct from the PR
+author, or from any non-author account when the author raised the finding, and
+contain no new P0/P1 labels. Do not place the reference in quoted or fenced
 example text. A general approval, an author reply, a dismissed review, or a
 confirmation on an earlier head does not resolve the finding. Editing the
 original summary invalidates any confirmation submitted before that edit. A subsequent push
@@ -151,7 +152,8 @@ approver. It cannot infer severity from arbitrary prose or verify the truth of
 a reviewer's explanation; unlabelled defects still need unresolved inline
 threads. Identity is the authenticated GitHub account, not an agent name in the
 body; agents sharing credentials cannot be distinguished. If the original
-reviewer is unavailable, a summary stays blocked rather than inventing a waiver.
+reviewer is distinct from the author and unavailable, a summary stays blocked
+rather than inventing a waiver.
 All review pages must be readable and complete. As with the other merge evidence,
 separate GitHub reads and merge submission are not atomic.
 
