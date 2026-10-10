@@ -24,6 +24,7 @@ def tree(tmp_path):
     write(tmp_path, "tests/test_reporting.py", "import reporting\ndef test_answer(): assert reporting.answer() == 1\n")
     write(tmp_path, "tests/test_caller.py", "import caller\ndef test_call(): assert caller.call() == 1\n")
     write(tmp_path, "tests/test_other.py")
+    write(tmp_path, "Makefile", "TEST_SOURCE_ROOTS := scripts tests\n")
     return tmp_path
 
 
@@ -254,3 +255,75 @@ def test_real_factory_ordinary_test_module_has_a_focused_selection():
     assert "tests/test_triage_backlog.py" in result["tests"]
     assert set(test_scope.INVARIANTS) <= set(result["tests"])
     assert "tests/test_consumer_sync.py" not in result["tests"]
+
+
+@pytest.mark.parametrize("declaration", [
+    "", "TEST_SOURCE_ROOTS = scripts tests", "TEST_SOURCE_ROOTS := scripts tests\nTEST_SOURCE_ROOTS := scripts tests",
+    "TEST_SOURCE_ROOTS := scripts tests $(shell false)", "TEST_SOURCE_ROOTS := scripts tests ../outside",
+    "TEST_SOURCE_ROOTS := scripts tests missing", "TEST_SOURCE_ROOTS := scripts scripts tests",
+    "TEST_SOURCE_ROOTS := scripts", "override TEST_SOURCE_ROOTS := scripts tests",
+    "TEST_SOURCE_ROOTS := scripts tests /absolute", "TEST_SOURCE_ROOTS := scripts tests hooks",
+    "TEST_SOURCE_ROOTS := scripts tests scripts/nested",
+])
+def test_invalid_or_unknown_source_root_policy_falls_upward(tree, declaration):
+    write(tree, "Makefile", declaration + "\n")
+    result = test_scope.select(tree, {"scripts/reporting.py"})
+    assert result["mode"] == "full" and result["tests"] == ["tests"]
+    assert "source-root policy" in result["rationale"][0]
+
+
+def test_unreadable_source_root_policy_falls_upward(tree):
+    (tree / "Makefile").unlink()
+    assert test_scope.select(tree, {"scripts/reporting.py"})["mode"] == "full"
+
+
+def test_declared_public_caller_tree_selects_behavior_and_caller_tests(tree):
+    write(tree, "adapter/public.py", "import reporting\ndef call(): return reporting.answer()\n")
+    write(tree, "tests/test_public.py", "from adapter import public\n")
+    write(tree, "Makefile", "TEST_SOURCE_ROOTS := scripts tests adapter\n")
+    result = test_scope.select(tree, {"scripts/reporting.py"})
+    assert result["mode"] == "focused"
+    assert "adapter/public.py" in result["affected_sources"]
+    assert "tests/test_public.py" in result["tests"]
+    assert result["source_roots"] == ["scripts", "tests", "adapter"]
+
+
+def test_undeclared_or_sensitive_caller_cannot_be_waived_by_known_roots(tree):
+    write(tree, "adapter/public.py", "import reporting\n")
+    assert test_scope.select(tree, {"scripts/reporting.py"})["mode"] == "full"
+    write(tree, "Makefile", "TEST_SOURCE_ROOTS := scripts tests adapter\n")
+    write(tree, "adapter/auth.py", "import reporting\n")
+    assert test_scope.select(tree, {"scripts/reporting.py"})["mode"] == "full"
+
+
+def test_symlink_source_root_cannot_escape_repository_policy(tree, tmp_path_factory):
+    outside = tmp_path_factory.mktemp("outside")
+    write(outside, "module.py")
+    (tree / "adapter").symlink_to(outside, target_is_directory=True)
+    write(tree, "Makefile", "TEST_SOURCE_ROOTS := scripts tests adapter\n")
+    assert test_scope.select(tree, {"scripts/reporting.py"})["mode"] == "full"
+
+
+def test_real_ordinary_production_story_selects_public_callers_and_behavior():
+    root = Path(__file__).resolve().parents[1]
+    result = test_scope.select(root, {"scripts/triage_backlog.py"})
+    assert result["mode"] == "focused"
+    assert {"scripts/triage_backlog.py", "integrations/mcp/tools.py", "integrations/mcp/server.py"} <= set(result["affected_sources"])
+    assert {"tests/test_triage_backlog.py", "tests/test_mcp_server.py"} <= set(result["tests"])
+    assert set(test_scope.INVARIANTS) <= set(result["tests"])
+    assert "tests/test_consumer_sync.py" not in result["tests"]
+    assert test_scope.select(root, {"scripts/merge_pr.py"})["mode"] == "full"
+    assert test_scope.select(root, {"unknown/module.py"})["mode"] == "full"
+
+
+def test_literal_verifier_test_list_does_not_create_a_business_caller(tree):
+    write(tree, "scripts/test_scope.py", 'INVARIANTS = ["tests/test_reporting.py"]\n')
+    result = test_scope.select(tree, {"scripts/reporting.py"})
+    assert result["mode"] == "focused"
+    assert "scripts/test_scope.py" not in result["affected_sources"]
+    assert "tests/test_reporting.py" in result["tests"]
+
+
+def test_explicit_sensitive_production_import_is_not_a_terminal_test_reference(tree):
+    write(tree, "scripts/merge_authority.py", "from tests import test_reporting\n")
+    assert test_scope.select(tree, {"scripts/reporting.py"})["mode"] == "full"

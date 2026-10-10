@@ -1,4 +1,5 @@
-# Full preflight remains `verify`; `verify-story` uses the story CI selector. It is preflight evidence only: it never authenticates, publishes,
+# Full preflight remains `verify`; `verify-story` uses the story CI selector.
+# It is preflight evidence only: it never authenticates, publishes,
 # changes GitHub, installs packages or deploys, and a pass does not authorize a
 # merge. Only the exact-head server check and another account's approval do.
 #
@@ -8,6 +9,9 @@
 
 PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python3)
 LINT_PATHS := scripts hooks tests integrations
+# Literal Factory consumer policy, read as data (never sourced) by the selector.
+# Shared/sensitive paths override these roots; unknown source trees require full tests.
+TEST_SOURCE_ROOTS := scripts tests integrations
 
 .PHONY: verify verify-story verify-release prerequisites lint test test-story
 

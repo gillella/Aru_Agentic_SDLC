@@ -85,11 +85,37 @@ def full(paths: set[str], reason: str) -> dict:
             "rationale": [reason]}
 
 
-def ordinary(path: str) -> bool:
+def source_roots(root: Path) -> tuple[str, ...]:
+    """Read one literal consumer declaration; never evaluate or source Make syntax."""
+    declarations = [line for line in (root / "Makefile").read_text(encoding="utf-8").splitlines()
+                    if re.match(r"^\s*(?:(?:export|override)\s+)?TEST_SOURCE_ROOTS\b", line)]
+    if len(declarations) != 1:
+        raise ValueError("source roots require exactly one literal declaration")
+    match = re.fullmatch(r"TEST_SOURCE_ROOTS := ([A-Za-z0-9_/-]+(?: [A-Za-z0-9_/-]+)*)", declarations[0])
+    if not match:
+        raise ValueError("source roots must be literal safe repository directories")
+    roots = tuple(match[1].split(" "))
+    if len(set(roots)) != len(roots) or not {"scripts", "tests"} <= set(roots):
+        raise ValueError("source roots are duplicated or omit mandatory source trees")
+    for name in roots:
+        parts = PurePosixPath(name).parts
+        if not safe_path(name) or parts[0] in {"hooks", "templates", "plugin", "docs"}:
+            raise ValueError("source root is unsafe or belongs to sensitive policy")
+        directory = root / name
+        if not directory.is_dir() or directory.resolve() != root.resolve().joinpath(*parts):
+            raise ValueError("source root is missing or escapes through a symlink")
+        if not any(directory.rglob("*.py")):
+            raise ValueError("source root has no known Python source")
+        if any(other != name and name.startswith(other + "/") for other in roots):
+            raise ValueError("source roots overlap")
+    return roots
+
+
+def ordinary(path: str, roots: tuple[str, ...]) -> bool:
     value = PurePosixPath(path)
     if path == "tests/conftest.py":
         return False
-    if value.parts[0] not in {"scripts", "tests"} or value.suffix != ".py":
+    if not any(path.startswith(directory + "/") for directory in roots) or value.suffix != ".py":
         return False
     return value.stem not in SHARED and not any(
         token in path.lower() for token in ("auth", "merge", "secret", "security", "verif", "scope")
@@ -107,6 +133,8 @@ def python_graph(root: Path) -> tuple[dict[str, set[str]], set[str]]:
     paths = {path.relative_to(root).as_posix(): path for path in sources}
     graph: dict[str, set[str]] = {}
     for relative, path in paths.items():
+        if path.is_symlink():
+            raise ValueError("source inventory includes a symlink")
         source = path.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=relative)
         imports = set()
@@ -133,8 +161,10 @@ def python_graph(root: Path) -> tuple[dict[str, set[str]], set[str]]:
             target for target in paths if target != relative and (
                 PurePosixPath(target).stem in imports
                 or any(name.endswith("." + PurePosixPath(target).stem) for name in imports)
-                or PurePosixPath(target).name in references
-                or any(target in reference.split() for reference in references)
+                or ((relative.startswith("tests/") or not target.startswith("tests/")) and (
+                    PurePosixPath(target).name in references
+                    or any(target in reference.split() for reference in references)
+                ))
             )
         }
     tests = {path for path in paths if path.startswith("tests/test_")}
@@ -155,7 +185,11 @@ def select(root: Path, paths: set[str], *, release: bool = False) -> dict:
         return full(paths, "release verification always runs full regression and migration/rollback coverage")
     if not paths or not all(safe_path(path) for path in paths):
         return full(paths, "empty or unsafe diff evidence")
-    if any(not ordinary(path) for path in paths):
+    try:
+        roots = source_roots(root)
+    except (OSError, UnicodeError, ValueError) as exc:
+        return full(paths, f"unknown or malformed source-root policy: {type(exc).__name__}")
+    if any(not ordinary(path, roots) for path in paths):
         return full(paths, "shared, sensitive, release/policy or unrecognized changed path")
     if any(not (root / path).is_file() or (root / path).is_symlink() for path in paths):
         return full(paths, "deleted/renamed-away path requires broad regression")
@@ -166,7 +200,7 @@ def select(root: Path, paths: set[str], *, release: bool = False) -> dict:
     if not set(INVARIANTS) <= tests:
         return full(paths, "mandatory governance tests missing")
     affected = caller_closure(graph, paths)
-    if any(not ordinary(path) for path in affected - tests):
+    if any(not ordinary(path, roots) for path in affected - tests):
         return full(paths, "affected caller is shared or sensitive")
     behavior_tests = tests & affected
     if not behavior_tests:
@@ -177,6 +211,7 @@ def select(root: Path, paths: set[str], *, release: bool = False) -> dict:
         if not reached & tests:
             return full(paths, f"no test coverage identified for {path}")
     return {"mode": "focused", "changed_paths": sorted(paths),
+            "source_roots": list(roots), "affected_sources": sorted(affected - tests),
             "tests": sorted(behavior_tests | set(INVARIANTS)),
             "rationale": ["actual changed behavior plus transitive callers and changed/new tests",
                           "mandatory scope, review independence and runner trust invariants"]}

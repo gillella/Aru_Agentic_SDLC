@@ -21,6 +21,13 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
    changed paths, selected tests and rationale; issue prose/checkboxes never waive
    tests. Selection follows changed behavior and transitive Python callers, literal
    module/file references and changed/new tests, rather than only edited tests.
+   The Factory's literal `TEST_SOURCE_ROOTS := ...` Makefile declaration names
+   known ordinary Python source trees; the selector reads it as data without Make
+   evaluation, shell sourcing or importing adapters. Missing, malformed, duplicate,
+   nonexistent or unsafe roots require full coverage. The JSON also reports the
+   affected production sources/callers and declared roots; sensitive/shared path
+   overrides still apply inside every declared tree. Changing that policy is itself
+   broad-impact verification and requires the full suite.
    Every focused run includes scope/touches, independent-review and runner trust
    invariants. Shared/sensitive/verification/auth/merge/CI/selector changes,
    unrecognized paths, deleted or renamed-away files, missing test mapping and
