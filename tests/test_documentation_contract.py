@@ -190,3 +190,29 @@ def test_operating_documents_record_the_account_runner_split():
         content = text(ROOT / relative)
         assert "self-hosted-mac" in content, relative
         assert "github-hosted" in content, relative
+
+
+def test_active_verification_guidance_rejects_retired_instructions():
+    for relative in ("README.md", "docs/OPERATIONS.md"):
+        content = text(ROOT / relative)
+        assert "path-derived" not in content.casefold(), relative
+        for line in content.splitlines():
+            if ".aru/verify.sh" in line:
+                assert any(label in line.casefold() for label in ("legacy", "retired")), (
+                    relative, line,
+                )
+
+
+def test_documented_scaffold_matches_the_generator():
+    operations = text(ROOT / "docs/OPERATIONS.md")
+    tree = operations.split("The helper creates:\n\n```text\n", 1)[1].split("\n```", 1)[0]
+    stack = []
+    documented = set()
+    for line in tree.splitlines()[1:]:
+        prefix, name = line.split("── ", 1)
+        depth = len(prefix) // 4
+        stack = [*stack[:depth], name.rstrip("/")]
+        if not name.endswith("/"):
+            documented.add("/".join(stack))
+    for profile in init_project.RUNNER_PROFILES:
+        assert documented == set(init_project.framework_files(profile)), profile

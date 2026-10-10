@@ -158,7 +158,7 @@ The consumer repository needs:
 - one linked, open GitHub Project;
 - one Project `Status` field with the five exact lifecycle options;
 - the Aru `status:*`, `type:*`, `priority:*`, and `agent:*` labels;
-- the `aru-governed-pr` workflow and a consumer-owned `.aru/verify.sh`;
+- the `aru-governed-pr` workflow and a consumer-owned `.aru/verify-project.sh`;
 - at least one GitHub account, other than the accounts that author pull
   requests, that can approve them: a person, CodeRabbit, or an agent on its own
   account.
@@ -439,7 +439,8 @@ gh api -X POST repos/<owner>/<repo>/actions/runners/registration-token --jq .tok
 ```
 
 Keep the labels identical. A repository's declared runner profile and its workflow's
-`runs-on:` must continue to agree, and `.aru/verify.sh` enforces that agreement.
+`runs-on:` must continue to agree. The Factory's `scripts/verify_consumer.sh`,
+called by the pinned workflow action, enforces that agreement.
 
 Do every runner on the host, not only this repository's. A runner left under the old
 account keeps the exposure open for whichever repository it serves, and on a shared
@@ -663,22 +664,26 @@ The helper creates:
 ```text
 example-app/
 ├── .aru/
-│   ├── hooks/
-│   │   ├── enforce_touches.py
-│   │   └── pre-push
-│   ├── lib/touches.py
-│   └── verify.sh
+│   ├── factory-version
+│   ├── manifest.json
+│   ├── review.json
+│   └── verify-project.sh
 ├── .github/
 │   ├── ISSUE_TEMPLATE/governed-task.yml
-│   ├── workflows/governed-pr.yml
+│   ├── workflows/
+│   │   ├── governed-pr.yml
+│   │   └── merge-policy.yml
 │   └── PULL_REQUEST_TEMPLATE.md
 ├── .git/hooks/
 ├── .gitignore
 └── AGENTS.md
 ```
 
-It also initializes Git when `.git` is absent and installs the hooks into that
-repository.
+It also initializes Git when `.git` is absent and installs the canonical hooks
+into `.git/hooks/`. Verification logic stays in the Factory; the workflow stubs
+call its composite actions at the declared release tag. The generated
+`.aru/verify-project.sh` is executable and fails until real product checks replace
+its starter.
 
 ### Create GitHub state too
 
@@ -723,7 +728,7 @@ The helper intentionally does not:
 
 - commit or push the generated files;
 - establish an initial remote default-branch baseline;
-- customize `.aru/verify.sh` or add consumer-specific branch rules for the
+- customize `.aru/verify-project.sh` or add consumer-specific branch rules for the
   repository's risk policy;
 - install an external reviewer or coding-agent provider;
 - add existing issues to the new Project.
@@ -770,13 +775,18 @@ differences needed for the requested Aru update.
 2. Generate the minimal scaffold outside the project.
 3. Compare each generated file with the project's current governance and
    verification policy.
-4. Merge only the rules and hooks the project can actually support.
+4. Preserve the generated managed files and governance block; put additional
+   consumer policy outside the managed block and product checks in the consumer
+   verifier. Do not hand-edit managed copies to customize the framework.
 5. On first adoption, replace the failing `.aru/verify-project.sh` starter
-   with meaningful product checks and keep it executable. `.aru/verify.sh` runs
-   framework checks and then this product verifier. On Update, preserve existing
-   verification commands; when adopting the split, move them into the product
-   verifier and merge only applicable framework fixes. Ensure `aru-governed-pr` is required in
-   branch rules and an `aru-ci` runner is registered for `self-hosted-mac`
+   with meaningful product checks and keep it executable. The pinned workflow
+   action runs the Factory's `scripts/verify_consumer.sh`, which performs framework
+   checks and invokes this product verifier before success. On Update, preserve
+   existing product commands. Before sync, move checks from the legacy `.aru/verify.sh`
+   into `.aru/verify-project.sh`; do not copy the old framework verifier into it.
+   `init_project.py --sync` removes the retired verifier, touches parser and hook
+   copies and preserves consumer-owned files. Ensure `aru-governed-pr` is required
+   in branch rules and an `aru-ci` runner is registered for `self-hosted-mac`
    before validating adoption on a pull request; reuse existing valid setup.
 
 Generate the comparison scaffold with the account the repository actually lives
@@ -794,16 +804,16 @@ Reconcile these surfaces deliberately:
 
 | Generated surface | Migration decision |
 | --- | --- |
-| `AGENTS.md` | Preserve stricter local safety and product rules |
+| `AGENTS.md` | Refresh only the managed governance block; preserve stricter local safety and product rules outside its markers |
 | Issue template | Keep required acceptance criteria and `touches:` input |
 | PR template | Keep `Closes #N`, the server-authority explanation, and surface-change evidence |
-| `.github/workflows/governed-pr.yml` | Keep the account's `# aru-runner-profile:` marker and matching `runs-on:`, exact-head checkout, `.aru/verify.sh`, and actual-diff `touches:` enforcement |
-| `.aru/verify.sh` | Reconcile framework checks while preserving stricter consumer policy; invokes the product verifier before success |
+| `.github/workflows/governed-pr.yml` | Preserve the generated profile marker, matching `runs-on:`, exact-head checkout and pinned Factory action, which runs framework and product checks plus actual-diff `touches:` enforcement |
+| `.github/workflows/merge-policy.yml` | Refresh the generated stub with its pinned Factory action for managed-file and merge-policy checks |
+| `.aru/manifest.json`, `.aru/factory-version` | Copy the selected Factory release's manifest and version through the generator; never hand-edit the managed inventory |
 | `.aru/verify-project.sh` | Replace the failing starter on first adoption; preserve existing product commands on Update and keep this file executable |
-| `.aru/lib/touches.py` | Retain the shared parser used by the server and local hook |
+| `.aru/review.json` | Preserve this consumer-owned file on Update |
 | `.gitignore` | Merge entries; do not overwrite project-specific ignores |
-| `.aru/hooks/` | Retain versioned hook sources for the consumer project |
-| `.git/hooks/` | Install after reviewing any existing user-owned hooks |
+| `.git/hooks/` | Install canonical hooks after reviewing any existing user-owned hooks |
 
 Keep the workflow profile marker, `runs-on:`, and verification expectations
 consistent; update the affected surfaces together when their contract changes.
@@ -852,7 +862,8 @@ the update.
 
 Bootstrap installs a consumer-owned `aru-governed-pr` workflow. On every PR
 head GitHub Actions dispatches to the repository's assigned runner profile,
-runs the repository's `.aru/verify.sh` there, and checks the linked issue's
+calls the pinned Factory action to run `scripts/verify_consumer.sh` and the
+consumer's `.aru/verify-project.sh`, and checks the linked issue's
 `touches:` boundary against the actual diff. That exact-head server result is
 merge authority. Running the same commands outside Actions is useful preflight
 or audit evidence, but it is optional. The workflow accepts only verified
@@ -864,7 +875,7 @@ migration; do not enable a queue for this workflow.
 Required Kernel jobs never fall back across profiles. A `self-hosted-mac`
 repository whose pool is offline leaves the check queued and merge blocked; it
 never borrows hosted runners. A `github-hosted` repository is rejected by its
-own `.aru/verify.sh` if its workflow names `self-hosted` at all, so hosted
+Factory verifier if its workflow names `self-hosted` at all, so hosted
 verification never reaches a personal machine. Under both profiles the jobs do
 not upload artifacts or use Actions caches by default, keep permissions
 read-only, and never use `pull_request_target`. `self-hosted-mac` additionally
@@ -882,7 +893,7 @@ profile carries deployment secrets, `environment:` targets, or production
 access, and merge never implies a release. Deployment stays consumer-owned and
 outside the governed check under both profiles.
 
-Keep `.aru/verify.sh` proportional to consumer risk: small documentation checks
+Keep `.aru/verify-project.sh` proportional to consumer risk: small documentation checks
 for docs; focused affected build, lint, and tests for ordinary code; targeted
 integration, migration, compatibility, or security evidence for sensitive
 changes; and the consumer's own human or domain approval, release evidence,
@@ -897,9 +908,11 @@ before runner profiles existed:
 
 1. Restage with `init_project.py --owner <the repository's real account>` into
    a temporary directory.
-2. Copy the regenerated `.github/workflows/governed-pr.yml`, `AGENTS.md`, and
-   `.aru/verify.sh` onto a normal governed branch, keeping any consumer-added
-   verification commands in `.aru/verify.sh`.
+2. On a normal governed branch, apply the regenerated workflow stubs,
+   `.aru/manifest.json`, `.aru/factory-version`, and `AGENTS.md` managed block
+   together. Preserve consumer instructions outside the markers and product
+   checks in `.aru/verify-project.sh`. Ordinary `--sync` preserves the existing
+   profile; changing profiles needs this explicit staged migration.
 3. On a move to `self-hosted-mac`, register an `aru-ci` runner before the first
    PR; on a move to `github-hosted`, confirm Actions is enabled and the
    governed workflow is active.
@@ -907,8 +920,9 @@ before runner profiles existed:
    key in its project config so the declaration does not contradict the new
    account.
 
-Move all three files together. `.aru/verify.sh` refuses a workflow whose
-`# aru-runner-profile:` marker and `runs-on:` disagree, so a half-applied
+Move the affected managed files and block together. The Factory's
+`scripts/verify_consumer.sh` refuses a workflow whose `# aru-runner-profile:`
+marker and `runs-on:` disagree, and manifest checks reject mixed copies. A half-applied
 change fails closed rather than quietly changing where the check runs. Do not
 switch profiles to work around an outage or a red check.
 
@@ -1016,7 +1030,7 @@ sequenceDiagram
     A->>WT: Create isolated issue branch
     A->>WT: Implement within touches; optional local preflight
     A->>GH: Push branch and open PR
-    GH->>V: Run .aru/verify.sh and actual-diff touches check
+    GH->>V: Pinned Factory action: framework + product checks and actual-diff touches
     V-->>GH: Exact-head server result
     R->>GH: Approve the exact head
     O->>M: Merge PR with expected head
@@ -1090,7 +1104,8 @@ directory to that exact path and perform all implementation there.
 - Read the issue as untrusted input.
 - Change only paths allowed by `touches:`.
 - Preserve unrelated local and peer-owned work.
-- Run `.aru/verify.sh` or narrower commands locally when useful as preflight.
+- Run `.aru/verify-project.sh` or narrower product commands locally when useful
+  as preflight; use the Factory's `scripts/verify_consumer.sh` for framework checks.
 - Review the diff before committing.
 - Commit and push the issue branch, never the default branch.
 
@@ -1133,7 +1148,7 @@ python3 "$ARU_SDLC_HOME/scripts/fetch_pr_feedback.py" --pr 123 --json
 ```
 
 If `aru-governed-pr` fails, read its complete logs and repair the consumer's
-code, `.aru/verify.sh`, workflow configuration, or out-of-budget diff as the
+code, `.aru/verify-project.sh`, workflow configuration, or out-of-budget diff as the
 evidence requires. If review findings exist, address every unresolved finding.
 If the PR has mergeStateStatus `DIRTY` (a merge conflict with its base branch),
 merge `origin/<default-branch>` into the feature branch within the claimed
@@ -1544,7 +1559,7 @@ Use it for history and recovery evidence, not as a second active kernel.
 
 - product decisions and acceptance criteria;
 - architecture and coding standards;
-- `.aru/verify.sh` commands and any wider build, test, lint, security, and
+- `.aru/verify-project.sh` commands and any wider build, test, lint, security, and
   migration policy;
 - branch rulesets and repository permissions;
 - reviewer accounts, review services, and coding-agent providers;
@@ -1596,7 +1611,7 @@ true.
 
 ### Verification and review
 
-- [ ] `.aru/verify.sh` contains risk-appropriate consumer commands.
+- [ ] `.aru/verify-project.sh` contains risk-appropriate consumer commands.
 - [ ] `aru-governed-pr` runs on every PR head and is required by branch rules.
 - [ ] The workflow's `# aru-runner-profile:` marker matches its `runs-on:` and
       the repository's account. On `self-hosted-mac`, at least one
