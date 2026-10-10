@@ -305,9 +305,15 @@ board, criteria and queue gates.
    App agents use for ordinary commands.
 2. Store its App id and private key in their own credentials directory, and give
    it a runner with the `<runner> --repo OWNER/REPO -- gh ...` interface. **No
-   runner ships with Aru**; it is operator-provided, and on this machine it lives
-   at `~/.aru-merge-authority/scripts/aru_merge_authority_exec.py` with its
-   credentials beside it. The runner must not print the installation token.
+   runner ships with Aru**. On the Mac Mini, the working operator-provided runner
+   is the root-owned `/usr/local/bin/aru-merge-authority-run` wrapper. It uses
+   `sudo -u aru-merge` to run as the separate `aru-merge` user, with credentials
+   in `/Users/aru-merge/.aru-merge-authority/`. The operator may receive a sudo
+   password prompt when invoking it. The runner must not print the installation
+   token.
+
+   A stale key fails as `HTTP 401` on the runner's first call; check the App's
+   key fingerprint rather than changing the gate.
 
    Three things that are expensive to discover:
 
@@ -324,11 +330,13 @@ board, criteria and queue gates.
    Keep the runner and its credentials outside any other tool's directory. Placing
    them inside an agent framework's home makes a kernel merge gate depend on that
    framework being installed.
-3. Only in the operator-controlled merge session that runs `merge_pr.py`, export
-   both variables. Do not expose this session or its runner to agents:
+3. Only in the operator-controlled merge session on the Mac Mini that runs
+   `merge_pr.py`, export both variables and complete any sudo password prompt
+   there. The wrapper runs as the separate `aru-merge` user. Do not expose this
+   session or its runner to agents:
 
    ```bash
-   export ARU_MERGE_APP_RUNNER="$HOME/.aru-merge-authority/scripts/aru_merge_authority_exec.py"
+   export ARU_MERGE_APP_RUNNER="/usr/local/bin/aru-merge-authority-run"
    export ARU_MERGE_APP_ID="<numeric App id>"
    ```
 
