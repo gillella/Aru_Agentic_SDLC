@@ -28,9 +28,24 @@ are not part of the public API. `CHANGELOG.md` records version history.
 | **External Driver** | Decide when to invoke the next bounded kernel command | None; it must reread GitHub and Git on every activation |
 | **Consumer policy** | Product scope, additional risk controls, engineering checks, release, deploy, and production | The consumer repository and its operators |
 
-The Kernel is this repository. A Driver may be a human, a scheduled task, or any
-agent in any framework, working outside this repository; its source and receipts
-live outside, and neither the Kernel nor consumer bootstrap installs one.
+The Kernel is the lifecycle helpers and contract in this repository. A Driver
+may be a human, a scheduled task, or any agent in any framework. Optional
+maintained Driver source may live under `driver/` in this monorepo, owned by the
+Driver package, but the Kernel remains independently usable. A future Driver
+package must declare its own package and explicit install entry points under
+`driver/`; Kernel commands, installed skills, consumer bootstrap, and governed
+workflows never import, install, schedule, or activate it. There is currently
+no verified maintained source or installer for the installed monitor; this
+source boundary does not establish either one.
+
+Driver operators own any separate installation and its permissions. A Driver
+may invoke bounded Kernel commands with the authoring and Project Board access
+they require, but it gains no lifecycle authority of its own. Reviewer
+credentials remain with a different GitHub account, and the merge-authority
+credential and operator-only `merge_pr.py --expected-head` remain outside the
+Driver. Live configuration, credentials, processes, scheduler job definitions,
+and operational receipts stay outside Git. Existing scheduler jobs are not
+changed by admitting source under `driver/`.
 Consumer policy may be stricter for a product but is never a universal Aru
 requirement. GitHub remains the sole lifecycle authority; operational receipts
 never authorize a claim, review, merge or issue closure.
@@ -258,12 +273,15 @@ Supported lifecycle commands are `init_project.py`, `triage_backlog.py`,
 The Kernel contains no scheduler, daemon, private queue, presence registry,
 worker handoff, telemetry, persistent capacity store, notification bridge,
 dashboard, preview, deployment, release, incident, or second lifecycle store.
+Optional `driver/` source is separately packaged and is not part of the
+supported Kernel command or installed-skill surface.
 
 A component enters the Kernel only when it directly authorizes or blocks a
 lifecycle transition, no simpler GitHub/Git primitive solves it, the default path
 uses it now, and evidence from three governed consumers shows the need.
 
-Source files are limited to 800 lines; supported scripts to 12-14; runtime skills
+Python source files, including any under `driver/`, are limited to 800 lines;
+supported scripts to 12-14; runtime skills
 to six; and active operating documents to `README.md`, `AGENTS.md`,
 `CHANGELOG.md`, `docs/KERNEL-CONTRACT.md`, `docs/ENFORCEMENT-REGISTER.md`,
 `docs/OPERATIONS.md`, and `docs/DEGRADED-MODE.md`. Aggregate line volume is
