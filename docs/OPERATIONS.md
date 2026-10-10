@@ -533,8 +533,10 @@ Approval is enforced by `merge_pr.py`, the only path that submits a merge.
 Every PR requires a GitHub `APPROVED` review of its exact current head from an
 account other than the PR author. A person, CodeRabbit, or a coding agent using
 its own account can qualify. A GitHub App author `app/<slug>` and its
-`<slug>[bot]` login count as the same account. Pushes dismiss earlier approvals;
-the approving account need not differ from the latest pusher. Unresolved findings
+`<slug>[bot]` login count as the same account. GitHub dismisses stale approvals
+when new commits change the reviewed diff; `merge_pr.py` separately requires
+approval of the exact current head. The approving account need not differ from
+the latest pusher. Unresolved findings
 and a `CHANGES_REQUESTED` review still block.
 
 Legacy `.aru/review.json` declarations have no merge or PR-creation effect.
@@ -920,7 +922,8 @@ The local pre-push hook resolves and refuses direct pushes to the remote default
 branch, but local
 hooks are not a server-side security boundary. `init_project.py --github`
 creates a minimal ruleset with no configured bypass actors that requires
-`aru-governed-pr` and one approval, dismissing stale approvals on push.
+`aru-governed-pr` and one approval, dismissing stale approvals when new commits
+change the reviewed diff.
 `merge_pr.py` also requires that approval to name the exact current head and
 come from an account other than the PR author; it does not compare the approver
 with the latest pusher.
@@ -1142,8 +1145,9 @@ evidence requires. If review findings exist, address every unresolved finding.
 If the PR has mergeStateStatus `DIRTY` (a merge conflict with its base branch),
 merge `origin/<default-branch>` into the feature branch within the claimed
 worktree (never rebase or force push), resolve conflicts within declared
-`touches:` boundaries, and push. Any new push requires a new exact-head server
-check and a new approval; GitHub dismisses the earlier one.
+`touches:` boundaries, and push. A changed PR head requires a new exact-head
+server check and approval under `merge_pr.py`. GitHub also dismisses earlier
+approvals when new commits change the reviewed diff.
 
 Use the feedback skill to record each finding's disposition. Read the original
 finding, including late results from any reviewer; a bot setup reply or
@@ -1158,13 +1162,13 @@ an outdated marker does not establish resolution.
 
 Actual security/correctness defects block regardless of a low/info label.
 The writer fixes; the reviewer stays independent and does not push fixes.
-Every push needs fresh exact-head approval from an account other than the PR
-author; the approving account need not differ from the latest pusher.
+A changed PR head needs fresh exact-head approval from an account other than
+the PR author; the approving account need not differ from the latest pusher.
 One approval of the current head is enough; no extra brands or rounds are
 required. Check existing relevant coverage before requesting new tests,
 following `.coderabbit.yaml`'s scoped test guidance. A reply-only disposition
 does not require another commit or repeated suites; all ordinary merge evidence
-must still be valid, and any push requires fresh exact-head CI and a fresh
+must still be valid, and a changed head requires fresh exact-head CI and a fresh
 approval.
 
 Waiting for an approval is not author work: `fetch_next_work.py` reports it as
@@ -1413,8 +1417,8 @@ a `CHANGES_REQUESTED` review decision or any unresolved thread still blocks. The
 helper rereads the reviews and threads after its final PR, issue and queue
 reads, immediately before submission.
 
-The bootstrap ruleset asks GitHub to enforce the same rule: one approving
-review and stale approvals dismissed on push. `require_last_push_approval` is
+The bootstrap ruleset requires one approving review and dismisses stale approvals
+when new commits change the reviewed diff. `require_last_push_approval` is
 false; the approving account need not differ from the latest pusher.
 Nothing in the Kernel assigns, ranks, probes, times out or replaces reviewers.
 
@@ -1594,7 +1598,8 @@ true.
 - [ ] Required lifecycle, type, and priority labels exist; the helpers can
       create issue-specific agent labels.
 - [ ] The default-branch ruleset requires one approval and dismisses stale
-      approvals on push. The Kernel does not require latest-pusher approval.
+      approvals when new commits change the reviewed diff. The Kernel does not
+      require latest-pusher approval.
 - [ ] At least one reviewer account other than the authoring accounts can
       approve pull requests.
 - [ ] GitHub CLI authentication can read and update Issues, PRs, and Projects.
