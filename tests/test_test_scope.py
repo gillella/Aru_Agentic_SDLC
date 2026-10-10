@@ -9,6 +9,13 @@ import pytest
 import test_scope
 
 
+@pytest.fixture(autouse=True)
+def isolate_fixture_repository_from_ci_checkout(monkeypatch):
+    """Temporary repositories have their own commits, not the server checkout head."""
+    monkeypatch.delenv("ARU_TEST_BASE", raising=False)
+    monkeypatch.delenv("ARU_EXPECTED_HEAD", raising=False)
+
+
 def write(root: Path, path: str, content: str = "def test_ok(): pass\n") -> None:
     file = root / path
     file.parent.mkdir(parents=True, exist_ok=True)
@@ -327,3 +334,27 @@ def test_literal_verifier_test_list_does_not_create_a_business_caller(tree):
 def test_explicit_sensitive_production_import_is_not_a_terminal_test_reference(tree):
     write(tree, "scripts/merge_authority.py", "from tests import test_reporting\n")
     assert test_scope.select(tree, {"scripts/reporting.py"})["mode"] == "full"
+
+
+def test_cli_still_binds_ci_environment_to_the_actual_checkout(repository, monkeypatch, capsys):
+    root, base = repository
+    write(root, "scripts/reporting.py", "def answer(): return 2\n")
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("ARU_TEST_BASE", base)
+    monkeypatch.setenv("ARU_EXPECTED_HEAD", base)
+    assert test_scope.main([]) == 0
+    document = json.loads(capsys.readouterr().out)
+    assert document["mode"] == "focused"
+    assert document["changed_paths"] == ["scripts/reporting.py"]
+
+
+@pytest.mark.parametrize("expected_head", ["0" * 40, "malformed-head"])
+def test_cli_rejects_wrong_ci_environment_head(repository, monkeypatch, capsys, expected_head):
+    root, base = repository
+    monkeypatch.chdir(root)
+    monkeypatch.setenv("ARU_TEST_BASE", base)
+    monkeypatch.setenv("ARU_EXPECTED_HEAD", expected_head)
+    with pytest.raises(SystemExit) as exc:
+        test_scope.main([])
+    assert exc.value.code == 2
+    assert "exact-head checkout evidence failed" in capsys.readouterr().err
