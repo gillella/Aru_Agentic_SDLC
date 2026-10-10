@@ -77,6 +77,7 @@ def traverse(monkeypatch, number: int) -> dict:
         state["issue"]["labels"] = labels
 
     monkeypatch.setattr(triage_backlog, "list_issues", lambda **_: [current_issue(number)])
+    monkeypatch.setattr(triage_backlog, "issue", current_issue)
     monkeypatch.setattr(triage_backlog, "unresolved_dependencies", lambda _record: [])
     monkeypatch.setattr(triage_backlog, "set_status", move_status)
     assert triage_backlog.triage()["promoted"] == [number]

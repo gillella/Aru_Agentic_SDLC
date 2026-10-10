@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import copy
+import sys
+
 import pytest
 
 import triage_backlog
@@ -215,3 +218,130 @@ def test_promote_issue_avoids_signature_introspection_on_setter(monkeypatch):
     triage_backlog.promote_issue(15)
 
     assert calls == [(15, "Ready", "Backlog", None)]
+
+
+def scoped_context(monkeypatch, records):
+    live = {record["number"]: copy.deepcopy(record) for record in records}
+    reads, writes = [], []
+
+    def read(number):
+        reads.append(number)
+        return copy.deepcopy(live[number])
+
+    def transition(number, status, *, expected_current=None, pre_mutation_check=None):
+        assert expected_current == "Backlog"
+        pre_mutation_check()
+        writes.append((number, status))
+
+    monkeypatch.setattr(triage_backlog, "issue", read)
+    monkeypatch.setattr(triage_backlog, "list_issues", lambda **_: pytest.fail("unscoped read"))
+    monkeypatch.setattr(triage_backlog, "unresolved_dependencies", lambda _: [])
+    monkeypatch.setattr(triage_backlog, "set_status", transition)
+    return live, reads, writes
+
+
+def test_scoped_triage_selects_one_by_priority_without_unrelated_candidates(monkeypatch):
+    _, reads, writes = scoped_context(monkeypatch, [
+        backlog_issue(1, "priority:p0"),
+        backlog_issue(7, "priority:p1"),
+        backlog_issue(8, "priority:p0"),
+    ])
+    assert triage_backlog.triage(issue_numbers=[7, 8]) == {"promoted": [8], "rejected": {}}
+    assert reads == [7, 8, 8]
+    assert writes == [(8, "Ready")]
+
+
+def test_scoped_all_stays_inside_deduplicated_authorized_subset(monkeypatch):
+    _, reads, writes = scoped_context(monkeypatch, [
+        backlog_issue(1, "priority:p0"), backlog_issue(7), backlog_issue(8, "priority:p0"),
+    ])
+    result = triage_backlog.triage(issue_numbers=[7, 8, 7], promote_all=True)
+    assert result == {"promoted": [8, 7], "rejected": {}}
+    assert reads == [7, 8, 8, 7]
+    assert writes == [(8, "Ready"), (7, "Ready")]
+
+
+@pytest.mark.parametrize(("record", "message"), [
+    ({**backlog_issue(7), "state": "CLOSED"}, "issue is not open"),
+    ({**backlog_issue(7), "labels": [{"name": "status:ready"}]}, "must be Backlog"),
+    (backlog_issue(7, "agent:other"), "claimed issues"),
+    (backlog_issue(7, "needs-human"), "needs-human"),
+    (backlog_issue(7, "type:epic"), "type:epic"),
+    (backlog_issue(7, body="## Acceptance Criteria\n- [ ] incomplete"), "touches:"),
+])
+def test_invalid_scoped_item_never_falls_back(monkeypatch, record, message):
+    _, reads, writes = scoped_context(monkeypatch, [record, backlog_issue(1, "priority:p0")])
+    result = triage_backlog.triage(issue_numbers=[7])
+    assert result["promoted"] == []
+    assert any(message in error for error in result["rejected"][7])
+    assert reads == [7]
+    assert writes == []
+
+
+def test_scoped_dependency_blocker_is_reported_without_promotion(monkeypatch):
+    _, _, writes = scoped_context(monkeypatch, [backlog_issue(7)])
+    monkeypatch.setattr(triage_backlog, "unresolved_dependencies", lambda _: [9])
+    assert triage_backlog.triage(issue_numbers=[7]) == {
+        "promoted": [], "rejected": {7: ["open dependencies: #9"]},
+    }
+    assert writes == []
+
+
+@pytest.mark.parametrize("numbers", [[], [0], [-1], [True], ["7"], [7, 0]])
+def test_invalid_scope_fails_before_authority_reads(monkeypatch, numbers):
+    monkeypatch.setattr(triage_backlog, "issue", lambda _: pytest.fail("invalid scope read"))
+    with pytest.raises(KernelError, match="positive issue IDs"):
+        triage_backlog.triage(issue_numbers=numbers)
+
+
+@pytest.mark.parametrize("change", ["body", "labels", "state", "claim"])
+def test_promotion_observed_drift_refuses_before_writes(monkeypatch, change):
+    live, _, writes = scoped_context(monkeypatch, [backlog_issue(7)])
+    transition = triage_backlog.set_status
+
+    def race(*args, **kwargs):
+        if change == "body":
+            live[7]["body"] += "\nnew scope"
+        elif change == "labels":
+            live[7]["labels"].append({"name": "needs-human"})
+        elif change == "state":
+            live[7]["state"] = "CLOSED"
+        else:
+            live[7]["labels"].append({"name": "agent:other"})
+        transition(*args, **kwargs)
+
+    monkeypatch.setattr(triage_backlog, "set_status", race)
+    with pytest.raises(KernelError, match="changed after evaluation"):
+        triage_backlog.triage(issue_numbers=[7])
+    assert writes == []
+
+
+def test_dependency_reopening_after_evaluation_refuses_before_writes(monkeypatch):
+    record = backlog_issue(7)
+    record["body"] += "\ndepends-on: #9"
+    _, _, writes = scoped_context(monkeypatch, [record])
+    states = iter([[], [9]])
+    monkeypatch.setattr(triage_backlog, "unresolved_dependencies", lambda _: next(states))
+    with pytest.raises(KernelError, match="open dependencies: #9"):
+        triage_backlog.triage(issue_numbers=[7])
+    assert writes == []
+
+
+def test_unreadable_scoped_authority_is_an_error_not_empty_work(monkeypatch):
+    def unavailable(_):
+        raise KernelError("GitHub unavailable")
+    monkeypatch.setattr(triage_backlog, "issue", unavailable)
+    with pytest.raises(KernelError, match="GitHub unavailable"):
+        triage_backlog.triage(issue_numbers=[7])
+
+
+def test_cli_forwards_repeated_scope_and_explicit_batch(monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(sys, "argv", ["triage_backlog.py", "--issue", "7", "--issue", "8", "--all", "--json"])
+    def triage(**kwargs):
+        calls.append(kwargs)
+        return {"promoted": [], "rejected": {}}
+    monkeypatch.setattr(triage_backlog, "triage", triage)
+    assert triage_backlog.main() == 0
+    assert calls == [{"promote_all": True, "issue_numbers": [7, 8]}]
+    assert '"promoted": []' in capsys.readouterr().out

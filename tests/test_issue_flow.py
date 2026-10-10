@@ -47,8 +47,9 @@ def test_triage_does_not_promote_human_gated_or_epic_issues(monkeypatch):
 
 
 def test_triage_promotes_one_complete_issue(monkeypatch):
-    records = [{"number": 2, "title": "blocked"}, {"number": 3, "title": "ready"}, {"number": 4, "title": "also ready"}]
+    records = [backlog_issue("status:backlog", number=n) for n in (2, 3, 4)]
     monkeypatch.setattr(triage_backlog, "list_issues", lambda **_: records)
+    monkeypatch.setattr(triage_backlog, "issue", lambda n: next(r for r in records if r["number"] == n))
     monkeypatch.setattr(triage_backlog, "evaluate", lambda item: ["missing"] if item["number"] == 2 else [])
     promoted = []
 
@@ -60,7 +61,8 @@ def test_triage_promotes_one_complete_issue(monkeypatch):
         pre_mutation_check=None,
     ):
         assert expected_current == "Backlog"
-        assert pre_mutation_check is None
+        assert callable(pre_mutation_check)
+        pre_mutation_check()
         promoted.append((number, status, expected_current))
 
     monkeypatch.setattr(triage_backlog, "set_status", transactional_set_status)
