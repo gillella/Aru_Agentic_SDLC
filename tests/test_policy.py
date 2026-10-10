@@ -214,6 +214,9 @@ def test_last_push_approval_is_deliberately_off():
     assert policy.ruleset_parameters()["require_last_push_approval"] is False
     register = " ".join(policy.REGISTER_PATH.read_text(encoding="utf-8").split())
     assert "is not required" in register
+    contract = " ".join((ROOT / "docs/KERNEL-CONTRACT.md").read_text(encoding="utf-8").split())
+    assert "`require_last_push_approval` is deliberately false" in contract
+    assert "but need not differ from the latest pusher" in contract
 
 
 def test_missing_ruleset_table_refuses():

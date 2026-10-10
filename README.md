@@ -301,9 +301,10 @@ merge gates. Consumer repositories keep their product checks in their own
 Every pull request, documentation included, needs one approval of its exact
 current head from a GitHub account other than the author: a person, CodeRabbit,
 or a coding agent working under its own account. The bootstrap ruleset has
-GitHub enforce it (one approval, stale approvals dismissed, approval of the
-last push by someone other than its pusher), and `merge_pr.py` rereads it
-before submission. A push dismisses earlier approvals; unresolved threads and a
+GitHub enforce it (one approval and stale approvals dismissed), and
+`merge_pr.py` rereads the exact-head non-author approval before submission.
+The approving account need not differ from the latest pusher. A push dismisses
+earlier approvals; unresolved threads and a
 `CHANGES_REQUESTED` decision still block. There are no review tiers, reviewer
 labels, provider rankings, capability probes or refresh helpers, and agents that
 share one GitHub account cannot approve each other.

@@ -106,7 +106,11 @@ def github_readiness(repo: Path, owner: str) -> dict:
 
 
 def approval_rule(repo: Path, name: str, branch: object) -> str:
-    """Whether the default branch's rules require one fresh approval of the last push."""
+    """Whether the default branch requires approval with stale reviews dismissed.
+
+    Latest-pusher approval is a separate optional consumer control, not part of
+    the Kernel's non-author exact-head approval rule.
+    """
     if not isinstance(branch, str) or not branch:
         return "unknown"
     raw = command(["gh", "api", f"repos/{name}/rules/branches/{quote(branch, safe='')}"], repo)
@@ -121,8 +125,7 @@ def approval_rule(repo: Path, name: str, branch: object) -> str:
         if (isinstance(parameters, dict)
                 and type(parameters.get("required_approving_review_count")) is int
                 and parameters["required_approving_review_count"] >= 1
-                and parameters.get("dismiss_stale_reviews_on_push") is True
-                and parameters.get("require_last_push_approval") is True):
+                and parameters.get("dismiss_stale_reviews_on_push") is True):
             return "enforced"
     return "not-enforced"
 
