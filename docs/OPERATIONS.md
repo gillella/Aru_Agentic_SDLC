@@ -218,12 +218,16 @@ completed host work. Keep the existing authoring App for agents' repository
 operations. The Project route above remains necessary: `common.py` sends Project
 V2 commands through the CLI's stored interactive authentication, not the App
 runner. The accounts and access below must be verified before migration.
+The current Kernel accepts an exact-head approval from any non-author account,
+including a GitHub App. The inert `.aru/review.json` cannot enforce the proposed
+named-human restriction below; that needs a separately authorized consumer
+control before it can be treated as active.
 
 | Capability | Permitted authenticated principal and route | Agent boundary |
 | --- | --- | --- |
 | Agent authoring | Authoring App installation for repository commands, including branch and PR work | Agents may use this App; default-branch rules still forbid direct pushes. |
 | Project Board writes | Dedicated board principal through the stored CLI Project authentication used by Project V2 GraphQL and `gh project` | May run in the authoring session only if it is distinct from the named reviewer and has no review or merge authority. |
-| Human review and approval | Named human reviewer through their own GitHub session, as declared by default-branch `.aru/review.json` | No reviewer authentication, delegated approval endpoint, or shared session in agent or CI processes. |
+| Human review and approval | Proposed named human reviewer through their own GitHub session; the inert `.aru/review.json` does not enforce eligibility | No reviewer authentication, delegated approval endpoint, or shared session in agent or CI processes. |
 | Merge authorization | Merge-authority App posts `aru-merge-authorized`; an operator-controlled session alone runs `merge_pr.py --expected-head` to submit the merge | Agents never receive, execute, or call a service holding the merge-authority App. |
 | Bootstrap and recovery | Operator session uses an authorized bootstrap identity before App installation; the operator owns failed migration and confirmed-merge recovery | No bootstrap or break-glass authority in agent sessions. |
 | Runner and client access | Governed CI runs on the repository's assigned profile with read-only workflow permissions; authoring clients use the authoring and Project routes above | CI may execute PR code, so it must have no reviewer or merge credentials or callable authority service. |
@@ -518,47 +522,31 @@ Approval is enforced by `merge_pr.py`, the only path that submits a merge.
 
 ### Who may approve, and what to do when nobody can
 
-A repository declares its review posture in `.aru/review.json` on its default branch:
+Every PR requires a GitHub `APPROVED` review of its exact current head from an
+account other than the PR author. A person, CodeRabbit, or a coding agent using
+its own account can qualify. A GitHub App author `app/<slug>` and its
+`<slug>[bot]` login count as the same account. Pushes dismiss earlier approvals;
+the approving account need not differ from the latest pusher. Unresolved findings
+and a `CHANGES_REQUESTED` review still block.
 
-```json
-{ "authority": "human", "reviewers": ["your-github-login"] }
-```
+Legacy `.aru/review.json` declarations have no merge or PR-creation effect.
+`scripts/review_authority.py` remains only an importable compatibility stub.
+The Kernel has no reviewer list, human-only posture, no-approval posture, or
+minimum approval-body length, and it does not request reviewers from that file.
+The proposed named-human migration above is an operator design, not an active
+control supplied by this inert declaration.
 
-`human` requires the approving account to be listed, and refuses any GitHub App even if
-one is listed. `any` accepts any account other than the author, which is the rule that
-applied before the posture existed. `none` requires no approval. Anything absent,
-malformed, or unrecognised resolves to `human`, so a repository cannot lose the gate by
-omission. A repository that has declared nothing authorizes the account that owns it,
-which is why a newly created repository can still merge its first change.
+GitHub authenticates an account; it cannot establish that a person read the
+change. An agent using a person's credential is indistinguishable from that
+person at the API. Keep reviewer credentials outside authoring-agent and CI
+processes, and merge authority isolated in the operator-controlled session.
+A coding reviewer may use its own account; it must not share credentials with
+the writer. The authority-isolation design above is an operator proposal.
 
-The declaration is read from the default branch, never from the pull request. Adding a
-reviewer, or weakening the posture, is therefore judged by the declaration already on the
-default branch: changing who may approve needs an approval from someone who already may.
-
-Understand what this does and does not establish. It binds approval authority to named
-accounts and structurally excludes Apps. It does not establish that a person read the
-change: an agent holding a credential for a listed account is indistinguishable from its
-owner at every API. Keep credentials for listed accounts away from agents; that is the
-control, not this gate.
-
-**An approval must say something.** Under `human`, an approval with no written body is
-refused, and the refusal says so rather than reporting a generic approval failure. The
-minimum is twelve characters: enough to exclude the tokens people type without looking,
-short enough to admit a real one-line judgement.
-
-Be clear about what that buys. It raises the floor on effort and leaves a record of what
-the approver believed they were approving. It does not establish that anyone read the
-change, and a reviewer determined to wave things through will write twelve characters. The
-permissive postures do not require it.
-
-**When no authorized reviewer is available.** Under `human` with nobody able to approve,
-nothing merges, including a revert. Do not resolve this by disabling branch protection:
-that is the practice this kernel exists to remove, and it leaves the repository unguarded
-for as long as anyone forgets to restore it. Instead an administrator adds themselves to
-the ruleset as a temporary bypass actor, merges, and removes the entry. GitHub records
-each ruleset version, so the window is visible afterwards and its length is a fact rather
-than a recollection. Prefer adding a second authorized reviewer before an emergency to
-relying on this during one.
+When no qualifying reviewer is available, keep the PR In Review. An operator
+or external Driver can arrange review by another account through GitHub;
+comments, green checks and the author's own approval cannot replace it.
+Reviewer absence does not authorize a bypass actor or disabling protection.
 
 ### Installed agent guidance
 
@@ -924,7 +912,10 @@ The local pre-push hook resolves and refuses direct pushes to the remote default
 branch, but local
 hooks are not a server-side security boundary. `init_project.py --github`
 creates a minimal ruleset with no configured bypass actors that requires
-`aru-governed-pr` and one approval of the last push, dismissing stale approvals.
+`aru-governed-pr` and one approval, dismissing stale approvals on push.
+`merge_pr.py` also requires that approval to name the exact current head and
+come from an account other than the PR author; it does not compare the approver
+with the latest pusher.
 Existing or manually adopted repositories must configure an
 equivalent rule. The generated rule pins that context to the GitHub Actions App
 integration ID `15368`, so a same-named status from another producer cannot
@@ -1125,12 +1116,10 @@ The helper:
 - adds the created pull request to the repository's linked Project Board (if one
   is linked; failures are reported and do not refuse the pull request).
 
-It applies no review labels. It does request the reviewers the repository declares
-in `.aru/review.json`, read from the default branch, so GitHub notifies the account
-that owes the approval through its own web, email and mobile channels. Requesting is
-notification, not authority: the merge still turns on an approval of the exact head,
-and a reviewer GitHub refuses is reported and skipped rather than refusing the pull
-request.
+It applies no review labels and does not request reviewers. Legacy
+`.aru/review.json` declarations have no PR-creation effect. An operator, external
+Driver, ordinary GitHub review request or consumer-owned `CODEOWNERS` file can
+arrange notification; merge still requires a non-author approval of the exact head.
 
 ### Step 7: wait for exact-head evidence
 
@@ -1160,8 +1149,9 @@ an outdated marker does not establish resolution.
 | Accepted tracked follow-up | Explain why current behavior is safe and link the accepted refactor issue. A real defect cannot be waived by moving it to another issue. |
 
 Actual security/correctness defects block regardless of a low/info label.
-The writer fixes; the reviewer stays independent. A reviewer who pushes a fix
-becomes the last pusher, so GitHub then needs an approval from someone else.
+The writer fixes; the reviewer stays independent and does not push fixes.
+Every push needs fresh exact-head approval from an account other than the PR
+author; the approving account need not differ from the latest pusher.
 One approval of the current head is enough; no extra brands or rounds are
 required. Check existing relevant coverage before requesting new tests,
 following `.coderabbit.yaml`'s scoped test guidance. A reply-only disposition
@@ -1416,9 +1406,9 @@ helper rereads the reviews and threads after its final PR, issue and queue
 reads, immediately before submission.
 
 The bootstrap ruleset asks GitHub to enforce the same rule: one approving
-review, stale approvals dismissed on push, and approval of the most recent push
-by someone other than its pusher. Nothing in the Kernel assigns, ranks, probes,
-times out or replaces reviewers.
+review and stale approvals dismissed on push. `require_last_push_approval` is
+false; the approving account need not differ from the latest pusher.
+Nothing in the Kernel assigns, ranks, probes, times out or replaces reviewers.
 
 A coding agent may review another agent's pull request when it works under a
 different GitHub account. A useful review reads the issue and acceptance
@@ -1595,8 +1585,8 @@ true.
 - [ ] Governed issues are automatically or explicitly added to the Project.
 - [ ] Required lifecycle, type, and priority labels exist; the helpers can
       create issue-specific agent labels.
-- [ ] The default-branch ruleset requires one approval, dismisses stale
-      approvals, and requires approval of the last push.
+- [ ] The default-branch ruleset requires one approval and dismisses stale
+      approvals on push. The Kernel does not require latest-pusher approval.
 - [ ] At least one reviewer account other than the authoring accounts can
       approve pull requests.
 - [ ] GitHub CLI authentication can read and update Issues, PRs, and Projects.

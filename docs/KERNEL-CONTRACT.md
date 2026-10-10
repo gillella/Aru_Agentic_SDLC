@@ -106,9 +106,10 @@ person, CodeRabbit, or a coding agent working under its own account. The Kernel
 does not assign, rank, probe, time out or replace reviewers, and no label records
 review state.
 
-GitHub enforces the rule: the bootstrap ruleset requires one approving review,
-dismisses stale approvals on push, and requires the most recent push to be
-approved by someone other than its pusher. `merge_pr.py` reads the same evidence
+GitHub enforces the rule: the bootstrap ruleset requires one approving review
+and dismisses stale approvals on push. `require_last_push_approval` is deliberately
+false: the approving account must differ from the PR author, but need not differ
+from the latest pusher. `merge_pr.py` reads the same evidence
 and refuses unless some account other than the author (a GitHub App author
 `app/<slug>` and its `<slug>[bot]` login are one account) has, as its latest
 decisive review (`APPROVED`, `CHANGES_REQUESTED` or `DISMISSED`), approved the
@@ -117,8 +118,9 @@ approval of an earlier commit does not carry forward. A `CHANGES_REQUESTED`
 decision or any unresolved thread still blocks. Agents sharing one GitHub account
 cannot approve each other's pull requests.
 
-The writer owns remediation; a reviewer who pushes a fix becomes the last pusher,
-so someone else must approve. Every applicable finding needs a disposition from
+The writer owns remediation; reviewers stay independent and do not push fixes.
+Every push needs a fresh exact-head approval from a non-author account.
+Every applicable finding needs a disposition from
 the feedback skill, and a real security/correctness defect remains blocking
 regardless of severity wording; a follow-up issue cannot waive it. Resolving a
 thread must reflect its substance.
@@ -223,8 +225,8 @@ checks; its generated starter fails until replaced, and the framework verifier
 runs those checks before reporting success.
 
 The portable bootstrap ruleset has no configured bypass actors, allows merge
-commits only, requires one approving review of the last push with stale approvals
-dismissed, and requires the `aru-governed-pr` context from the GitHub Actions
+commits only, requires one approving review with stale approvals dismissed,
+and requires the `aru-governed-pr` context from the GitHub Actions
 App. Helper-only merge is a Kernel process rule unless the optional
 merge-authority App is configured: with `ARU_MERGE_APP_RUNNER` (an executable
 with the `<runner> --repo OWNER/REPO -- gh ...` interface) and `ARU_MERGE_APP_ID`

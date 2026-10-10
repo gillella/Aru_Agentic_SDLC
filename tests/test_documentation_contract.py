@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import init_project
@@ -216,3 +217,41 @@ def test_documented_scaffold_matches_the_generator():
             documented.add("/".join(stack))
     for profile in init_project.RUNNER_PROFILES:
         assert documented == set(init_project.framework_files(profile)), profile
+
+
+def test_approval_guidance_matches_the_declared_rule():
+    """Active prose must not promise a last-pusher gate absent from the policy."""
+    declared = policy.ruleset_parameters()
+    assert declared["require_last_push_approval"] is False
+    assert declared["dismiss_stale_reviews_on_push"] is True
+    assert declared["required_approving_review_count"] == 1
+    contradictions = (
+        r"(?:approval|review) of the (?:last|most recent) push",
+        r"requires the most recent push",
+        r"by someone other than its pusher",
+        r"becomes (?:its|the) last pusher",
+    )
+    for relative in (
+        "docs/KERNEL-CONTRACT.md", "README.md", "docs/OPERATIONS.md",
+        "skills/address-pr-feedback/SKILL.md", "plugin/agents/aru-reviewer.md",
+        "integrations/adoption/README.md",
+    ):
+        content = " ".join(text(ROOT / relative).split())
+        assert ("account other than the author" in content
+                or "account other than the PR author" in content), relative
+        assert re.search(r"exact (?:current )?head", content), relative
+        for pattern in contradictions:
+            assert not re.search(pattern, content, re.IGNORECASE), (relative, pattern)
+
+
+def test_operations_does_not_reactivate_legacy_reviewer_policy():
+    """The compatibility stub cannot enforce the old eligibility or bypass flow."""
+    operations = text(ROOT / "docs/OPERATIONS.md")
+    approval = operations.split(
+        "### Who may approve, and what to do when nobody can", 1,
+    )[1].split("### Installed agent guidance", 1)[0]
+    assert "have no merge or PR-creation effect" in " ".join(approval.split())
+    for stale in ("`none` requires no approval", "twelve characters", "temporary bypass actor"):
+        assert stale not in approval, stale
+    creation = operations.split("### Step 6:", 1)[1].split("### Step 7:", 1)[0]
+    assert "does not request reviewers" in " ".join(creation.split())

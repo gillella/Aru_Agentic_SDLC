@@ -42,9 +42,9 @@ description: Resolve current unresolved review findings or DIRTY merge conflicts
    distinct from the author and unavailable, leave the PR blocked and report why
    through GitHub.
 3. The writer owns remediation in the existing claimed worktree. The reviewer
-   stays independent and does not commit the fix; a reviewer who pushes to the
-   PR becomes its last pusher, and GitHub then needs an approval from someone
-   else.
+   stays independent and does not commit or push the fix. Every push needs a
+   fresh exact-head approval from an account other than the PR author;
+   the approving account need not differ from the latest pusher.
 4. For a DIRTY merge state, resolve the repository's default branch and merge
    `origin/<default-branch>` into the feature branch (never rebase or force
    push), resolving conflicts within declared `touches:` boundaries.

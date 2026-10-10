@@ -10,11 +10,13 @@ python3 "$ARU_SDLC_HOME/integrations/adoption/check.py" \
 ```
 
 Add `--github` to read the actual repository identity and whether the default
-branch's rules require one fresh approval of the last push (`approval_rule`:
-`enforced`, `not-enforced` or `unknown`). This does not prove that a reviewer
-account exists, runner health, Project correctness, application correctness, or
-completed adoption. Run the normal project-scoped setup checks and a governed
-pilot for that evidence.
+branch's rules require at least one approval and dismiss stale approvals on push
+(`approval_rule`: `enforced`, `not-enforced` or `unknown`). The result does not
+require `require_last_push_approval`: the Kernel requires an exact-head approval
+from an account other than the PR author, not a separate latest-pusher check.
+It does not prove that a reviewer account exists, runner health, Project
+correctness, application correctness, or completed adoption. Run the normal
+project-scoped setup checks and a governed pilot for that evidence.
 
 The JSON report includes canonical and consumer revisions, whether canonical
 source is dirty, hashes and comparison status for managed files, the assigned
@@ -77,8 +79,9 @@ updates; copy new prompts in deliberately if wanted.
 the dispositions in `skills/address-pr-feedback/SKILL.md`. A green check, a
 coding agent source report, or a review comment is not approval: approval is a
 GitHub `APPROVED` review of the exact head by any account other than the author,
-including a GitHub App such as CodeRabbit. A reviewer who pushes a fix becomes
-the last pusher, so someone else must approve.
+including a GitHub App such as CodeRabbit. Reviewers stay independent and do not
+push fixes. Every push needs fresh exact-head approval from a non-author account;
+the approving account need not differ from the latest pusher.
 
 **Maintained lessons.** When the same mistake recurs, record it once as a
 maintained rule (the consumer's `AGENTS.md`, product checks or runbook, or a Kernel

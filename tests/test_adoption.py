@@ -98,7 +98,11 @@ def test_github_readiness_reports_whether_rules_enforce_the_approval_rule(tmp_pa
     monkeypatch.setattr(check, "command", read)
     for inventory, expected in [
         ([{"type": "pull_request", "parameters": fresh}], "enforced"),
-        ([{"type": "pull_request", "parameters": {**fresh, "require_last_push_approval": False}}], "not-enforced"),
+        ([{"type": "pull_request", "parameters": {**fresh, "require_last_push_approval": False}}], "enforced"),
+        ([{"type": "pull_request", "parameters": {k: v for k, v in fresh.items()
+                                                  if k != "require_last_push_approval"}}], "enforced"),
+        ([{"type": "pull_request", "parameters": {**fresh, "required_approving_review_count": 0}}], "not-enforced"),
+        ([{"type": "pull_request", "parameters": {**fresh, "dismiss_stale_reviews_on_push": False}}], "not-enforced"),
         ([{"type": "pull_request", "parameters": {**fresh, "required_approving_review_count": True}}], "not-enforced"),
         ([{"type": "required_status_checks", "parameters": {}}], "not-enforced"),
         (None, "unknown"),
