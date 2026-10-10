@@ -193,8 +193,8 @@ Apple-silicon macOS runners labeled `aru-ci`; register one before admitting
 work. The helper writes the governance scaffold but does not commit or push it.
 
 That portable ruleset authenticates the required check producer, but it cannot
-make the helper the only possible GitHub merge path or condition server-side
-review on Aru's path-derived tier. The helper-only merge rule is therefore a
+make the helper the only possible GitHub merge path. The helper-only merge rule
+is therefore a
 governed process rule. Organizations that need a tamper-resistant boundary can
 add consumer-owned controls supported by their GitHub plan, such as a pinned
 required workflow, a dedicated merge App identity, or team/file-pattern review
