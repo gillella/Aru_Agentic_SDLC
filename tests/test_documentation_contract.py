@@ -111,7 +111,7 @@ def test_optional_driver_source_boundary_is_documented_without_rollout_claims():
 
 def driver_activation_commands(content: str) -> list[str]:
     command = re.compile(
-        r"^\s*(?:\$\s*)?(?:python3?|pip3?|bash|sh|source|\.|launchctl|systemctl)\s+[^\n]*\bdriver/",
+        r"^\s*(?:\$\s*)?(?:python3?|pip3?|bash|sh|source|\.|launchctl|systemctl)\s+[^\n]*\bdriver(?:/|\.)",
         re.MULTILINE,
     )
     return command.findall(content)
@@ -121,8 +121,10 @@ def test_active_guidance_never_instructs_driver_install_or_activation():
     active = ("README.md", "AGENTS.md", "CHANGELOG.md", "docs/KERNEL-CONTRACT.md",
               "docs/ENFORCEMENT-REGISTER.md", "docs/OPERATIONS.md", "docs/DEGRADED-MODE.md")
     assert all(driver_activation_commands(text(ROOT / path)) == [] for path in active)
-    for example in ("python3 driver/monitor.py", "pip install driver/", "bash driver/install.sh"):
+    for example in ("python3 driver/monitor.py", "python3 -m driver.monitor",
+                    "pip install driver/", "bash driver/install.sh"):
         assert driver_activation_commands(example), example
+    assert driver_activation_commands("python3 -m pytest\nThe Driver stays optional.") == []
 
 
 def test_active_release_and_freeze_guidance_agree():

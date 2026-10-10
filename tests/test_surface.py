@@ -153,7 +153,8 @@ def test_nested_docs_are_not_counted_as_operating_documents():
 
 def driver_source_violations(paths: list[Path]) -> list[str]:
     """Driver source may be tracked, but host-local state and job definitions may not."""
-    forbidden_names = {".env", "credentials", "credentials.json", "jobs.json", "receipts.json",
+    forbidden_names = {".env", ".env.production", "credentials", "credentials.json",
+                       "credentials.yaml", "jobs.json", "receipts.json",
                        "binding.json", "coordination.lock"}
     forbidden_suffixes = {".db", ".sqlite", ".sqlite3", ".jsonl", ".plist", ".service"}
     return [path.relative_to(ROOT).as_posix() for path in paths
@@ -168,14 +169,15 @@ def test_optional_driver_source_excludes_tracked_runtime_state():
     allowed = [ROOT / "driver" / "README.md", ROOT / "driver" / "pyproject.toml",
                ROOT / "driver" / "src" / "monitor.py"]
     assert driver_source_violations(allowed) == []
-    for relative in ("driver/.env", "driver/credentials.json", "driver/receipts/run.json",
+    for relative in ("driver/.env", "driver/.env.production", "driver/credentials.json",
+                     "driver/credentials.yaml", "driver/receipts/run.json",
                      "driver/jobs/monitor.json", "driver/monitor.plist", "driver/state.sqlite"):
         assert driver_source_violations([ROOT / relative]) == [relative]
 
 
 def kernel_driver_reference_violations(contents: dict[str, str]) -> list[str]:
     """No executable Kernel or installed-skill surface may load Driver source."""
-    reference = re.compile(r"driver/|\b(?:import|from)\s+driver\b")
+    reference = re.compile(r"driver/|\b(?:import|from)\s+driver\b|[\"']driver(?:\.|[\"'])")
     return [path for path, source in contents.items() if reference.search(source)]
 
 
@@ -192,11 +194,18 @@ def test_kernel_execution_and_installed_skills_do_not_load_driver():
                 for path in runtime if path.is_file() and path.suffix in {".py", ".sh", ".md", ".yml", ".yaml", ".toml"}}
     assert kernel_driver_reference_violations(contents) == []
     for path, source in (("scripts/fetch_next_work.py", "import driver"),
+                         ("scripts/fetch_next_work.py", 'importlib.import_module("driver.monitor")'),
+                         ("scripts/fetch_next_work.py", "import_module('driver.monitor')"),
+                         ("scripts/fetch_next_work.py", '__import__("driver")'),
                          ("scripts/init_project.py", "install driver/"),
                          ("scripts/install_agent_integration.sh", "driver/activate.sh"),
                          ("skills/implement-next-issue/SKILL.md", "run driver/monitor.py"),
                          (".github/workflows/governed-pr.yml", "python3 driver/monitor.py")):
         assert kernel_driver_reference_violations({path: source}) == [path]
+    assert kernel_driver_reference_violations({
+        "scripts/example.py": 'importlib.import_module("policy")',
+        "skills/example/SKILL.md": "An external Driver decides when to invoke the Kernel.",
+    }) == []
 
 
 def test_decision_records_are_not_operating_documents():
