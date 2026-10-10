@@ -5,7 +5,12 @@ description: Validate Backlog issues and promote only complete, unblocked work t
 
 # Triage
 
-Run `python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py"`.
+Select eligible Ready work first with `fetch_next_work.py`. If none is available,
+promote within explicitly authorized issue scope:
+
+`python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --issue 42 --issue 43 --json`
+
+With MCP, use `aru_triage` with `{"issues": [42, 43]}` for the same scope.
 
 The command promotes at most one issue by default. It must refuse an issue
 unless:
@@ -16,13 +21,11 @@ unless:
 - GitHub and Project Board state are readable.
 
 Use `--all` only when an operator deliberately wants multiple Ready issues.
+For deliberate repository-wide operator triage, the legacy command without
+`--issue` remains supported: `python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py"`.
+An automatic caller must supply its authorized issue scope; omitting it in the
+CLI or MCP is not an empty scope and does not establish authorization.
 Never infer that unavailable board state means an empty backlog.
-
-An external caller seeking new work selects eligible Ready issues first with
-`fetch_next_work.py`. When no eligible Ready work is available, it may promote
-one Backlog issue only within explicitly authorized scope:
-
-`python3 "$ARU_SDLC_HOME/scripts/triage_backlog.py" --issue 42 --issue 43 --json`
 
 Repeat `--issue` to name that scope. Only those issues are read as candidates;
 there is no fallback to unrelated Backlog work. The default promotes at most
