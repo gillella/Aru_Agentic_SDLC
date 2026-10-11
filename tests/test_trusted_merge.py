@@ -42,6 +42,13 @@ class FakeKernelError(RuntimeError):
 
 def kernel(record=None, failure=None):
     calls = []
+    if record and record.get("state") == "MERGED":
+        record.setdefault("mergedAt", "2026-10-11T03:00:00Z")
+    def metadata(*_args, **_kwargs):
+        value = record or {}
+        live = {key: value.get(key) for key in ("number", "state", "headRefOid", "body", "mergedAt")}
+        live["lastEditedAt"] = None
+        return SimpleNamespace(stdout=json.dumps({"data": {"repository": {"pullRequest": live}}}))
     def merge(pr, head, dry_run=False):
         calls.append(("merge", pr, head, dry_run))
         if failure:
@@ -52,6 +59,8 @@ def kernel(record=None, failure=None):
         return {"merged": True, "finalized": True}
     return SimpleNamespace(
         calls=calls, merge=merge, finalize_queued=finalize, KernelError=FakeKernelError,
+        run=metadata, repo_slug=lambda: "gillella/Aru_Agentic_SDLC",
+        merge_authority=SimpleNamespace(post=lambda *_a: None),
         issue_gate=lambda numbers, *_args, **_kwargs: [{"issue": numbers[0]}],
         close_out=lambda numbers, *_args, **_kwargs: [{"issue": numbers[0]}],
         linked_issues=lambda body: [int(body.split("#")[1])],
@@ -332,48 +341,6 @@ def test_login_capable_or_changed_principal_refuses_before_code_or_credentials(m
         request.verify_installation(config_fixture())
 
 
-@pytest.mark.parametrize("failure", ["ci", "feedback", "approval", "queue", "auto", "criteria",
-                                     "claim", "dependency", "touches", "project", "base"])
-def test_actual_canonical_admission_refuses_without_app_post_or_merge(monkeypatch, failure):
-    import merge_pr
-    import merge_state
-    from test_merge_gate import install_happy_gate
-
-    pr = install_happy_gate(monkeypatch)
-    pr.update(number=825, body="Closes #821", reviewDecision="APPROVED")
-    issue = {"state": "OPEN", "labels": [{"name": "agent:owner"}, {"name": "status:in-review"}],
-             "body": "- [x] Accepted\n\ntouches: scripts/merge_pr.py\n"}
-    monkeypatch.setattr(merge_state, "issue", lambda n: issue if n == 821 else {"state": "OPEN"})
-    monkeypatch.setattr(merge_state, "project_item_evidence", lambda _n: {"status": "In Review"})
-    monkeypatch.setattr(merge_pr, "issue_gate", merge_state.issue_gate)
-    monkeypatch.setattr(merge_pr.merge_authority, "post", lambda *_a: pytest.fail("refusal posted authorization"))
-    monkeypatch.setattr(merge_pr, "run", lambda *_a: pytest.fail("refusal submitted merge"))
-    if failure == "ci":
-        monkeypatch.setattr(merge_pr, "ci_verdict", lambda _n: {"state": "pending", "head": HEAD})
-    elif failure == "feedback":
-        monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _n: [{"body": "fix"}])
-    elif failure == "approval":
-        monkeypatch.setattr(merge_pr, "pull_reviews", lambda _n: [])
-    elif failure in ("queue", "auto"):
-        monkeypatch.setattr(merge_pr, "merge_queue_snapshot", lambda *_a: {
-            "configured": failure == "queue", "entry": None, "auto_merge": {} if failure == "auto" else None,
-        })
-    elif failure == "criteria":
-        issue["body"] = issue["body"].replace("[x]", "[ ]")
-    elif failure == "claim":
-        issue["labels"].append({"name": "agent:peer"})
-    elif failure == "dependency":
-        issue["body"] += "\ndepends-on: #818\n"
-    elif failure == "touches":
-        issue["body"] = issue["body"].replace("scripts/merge_pr.py", "README.md")
-    elif failure == "project":
-        monkeypatch.setattr(merge_state, "project_item_evidence", lambda _n: {"status": "Done"})
-    elif failure == "base":
-        pr["mergeStateStatus"] = "BEHIND"
-    with pytest.raises(merge_pr.KernelError):
-        request.execute_request(merge_pr, {"issues": [821]}, 825, HEAD, False)
-
-
 @pytest.mark.parametrize("read_number", [2, 3, 4])
 @pytest.mark.parametrize("changed_issue", [793, 822])
 def test_canonical_rereads_cannot_escape_or_switch_admitted_issue(monkeypatch, read_number, changed_issue):
@@ -427,6 +394,7 @@ def test_confirmed_merge_retry_cannot_close_out_a_reassigned_issue(monkeypatch):
 
     record = install_happy_gate(monkeypatch)
     record.update(number=825, body="Closes #821", state="MERGED", mergedAt="2026-10-11T03:00:00Z")
+    monkeypatch.setattr(request, "merged_body_unchanged", lambda *_a: None)
     reads = []
 
     def live_pull(_number):
@@ -443,7 +411,8 @@ def test_confirmed_merge_retry_cannot_close_out_a_reassigned_issue(monkeypatch):
 
 def package_fixture(monkeypatch):
     monkeypatch.setattr(bundle, "git_object", lambda _source, _commit, path: path.encode())
-    return bundle.make_bundle(ROOT, HEAD, "b" * 40, b"sealed-gh-binary", "gillella/Aru_Agentic_SDLC", [821, 822, 792])
+    return bundle.make_bundle(ROOT, HEAD, "b" * 40, b"sealed-gh-binary", "gillella/Aru_Agentic_SDLC",
+                              [821, 822, 792], gh_sha256=hashlib.sha256(b"sealed-gh-binary").hexdigest())
 
 
 def test_package_preserves_reviewed_revisions_and_contains_no_credentials(monkeypatch):

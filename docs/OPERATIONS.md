@@ -459,7 +459,9 @@ install a service, activate a Driver, change schedules or modify a ruleset.
 The optional [restricted merge integration](../integrations/merge-authority/README.md)
 provides one installed PR/head request, a protected copy of an independently
 reviewed canonical helper revision, and a check-only App adapter. Its operator
-package pins the source/helper revisions and CLI bytes. An existing external
+package is reproducible from immutable source/helper objects and independently
+reviewed CLI bytes; operators compare a separate rebuild before installation.
+Commit labels alone do not establish that binding. An existing external
 continuation calls that request after acceptance and review; there is no Kernel
 scheduler, queue or pending-work file. Installation, private credential setup,
 positive preflight and negative host proofs remain operator actions. A source

@@ -83,6 +83,19 @@ unconfirmed success visible until a later helper run supersedes it. After an
 `authority-unavailable` refusal, read back that head's `aru-merge-authorized`
 runs before any further action; never merge that head by hand.
 
+The request installs handlers for catchable SIGINT, SIGTERM and SIGHUP and
+restores them afterward. It tracks attempted success before the adapter call,
+so interruption even in the canonical post/try gap attempts a same-head failure.
+Further catchable signals are deferred during that cancellation; canonical
+revocation is not duplicated after a confirmed failure. Offline regressions
+exercise the real pinned helper and installed handlers, not a live host signal
+relay. SIGKILL, host loss and transport outages cannot guarantee cancellation;
+the existing non-atomic authorization/submission boundary still applies. The
+operator must audit the caller context and prevent coding/CI access to generic
+merge credentials and endpoints. A narrowly scoped caller may share the coding
+account only if that reviewed trust boundary and every live gate are established;
+this does not grant a generic merge credential to that account.
+
 The canonical helper posts authorization only after its final live checks. It
 submits the exact head, verifies GitHub's merged head/commit and closes the issue
 and Project. A retry of a GitHub-confirmed merge performs only canonical
@@ -102,9 +115,21 @@ official CLI provenance before approving the resulting package digest.
 python3 integrations/merge-authority/bundle.py \
   --source <clean-source-checkout> --revision <reviewed-integration-full-SHA> \
   --helper <reviewed-canonical-helper-full-SHA> --gh <reviewed-gh-binary> \
+  --gh-sha256 <independently-reviewed-CLI-SHA256> \
   --repository gillella/Aru_Agentic_SDLC \
   --issue 821 --issue 822 --issue 792 --output <new-package.zip>
 ```
+
+The archive is reproducible: fixed entry timestamps, modes and order, with no
+compression-version dependency. The builder refuses CLI bytes that differ from
+the independently reviewed `--gh-sha256`. Commit labels alone are not proof:
+independently rebuild from the reviewed Git objects and reviewed CLI bytes,
+using the same arguments and `--verify <existing-package.zip>` instead of
+`--output`. Verification compares the complete reproduced archive byte for byte;
+changed source/helper objects, CLI bytes or archive contents refuse. Only approve
+the digest after this independent verification, not from a builder's printed
+commit labels. The per-file hashes detect archive tampering but do not by
+themselves prove those files correspond to the claimed Git commits.
 
 Do not run an unverified mutable checkout installer as root. After independent
 review and explicit operator installation approval, a human Terminal uses this
@@ -151,7 +176,12 @@ closes only interactive login shells and does not prove any other access path;
 the actual host access and denial proof below remains mandatory.
 
 The admitted issue and exact head remain fixed through every canonical PR
-reread, including post-merge retry/finalization. A body change to another issue,
+reread within one request, including its post-merge finalization. A new-process
+retry rechecks GitHub's `lastEditedAt`, merged time, body and exact head on every
+merged reread; a body edited at or after merge, missing evidence or changed
+metadata refuses before close-out. This conservative rule also refuses unrelated
+post-merge body edits and timestamp equality. It uses GitHub evidence, not a
+local receipt or second lifecycle store. A body change to another issue,
 even another installed allowed issue, refuses the request. These refusals also
 have the pinned helper's own error type, so a scope or approval change read
 after authorization was posted still reaches its same-head failure run. GitHub

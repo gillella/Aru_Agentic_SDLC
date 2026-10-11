@@ -8,9 +8,12 @@ import json
 import os
 import pwd
 import re
+import signal
 import stat
 import sys
 from pathlib import Path
+from datetime import datetime
+from contextlib import contextmanager
 
 ROOT = Path("/private/var/db/aru-trusted-merge")
 KERNEL_FILES = (
@@ -224,6 +227,42 @@ def validate_live_record(kernel, record: dict, config: dict, pr: int, head: str)
     return numbers[0]
 
 
+def merged_body_unchanged(kernel, record: dict, pr: int, head: str) -> None:
+    """Use GitHub's body-edit evidence, not a local receipt, for merged retries."""
+    owner, name = kernel.repo_slug().split("/", 1)
+    query = """query($owner:String!,$name:String!,$number:Int!){
+      repository(owner:$owner,name:$name){pullRequest(number:$number){
+        number state headRefOid body mergedAt lastEditedAt
+      }}
+    }"""
+    result = kernel.run([
+        "gh", "api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}",
+        "-F", f"name={name}", "-F", f"number={pr}",
+    ], auth="repository")
+    data = json.loads(result.stdout)
+    repository = (data.get("data") or {}).get("repository") if isinstance(data, dict) else None
+    live = repository.get("pullRequest") if isinstance(repository, dict) else None
+    required = {"number", "state", "headRefOid", "body", "mergedAt", "lastEditedAt"}
+    if (not isinstance(live, dict) or set(live) != required or data.get("errors")
+            or live["number"] != pr or live["state"] != "MERGED" or live["headRefOid"] != head
+            or live["body"] != record.get("body") or live["mergedAt"] != record.get("mergedAt")):
+        raise Refusal("merged-body-evidence")
+    try:
+        merged = datetime.strptime(live["mergedAt"], "%Y-%m-%dT%H:%M:%SZ")
+        edited = live["lastEditedAt"]
+        if edited is not None and datetime.strptime(edited, "%Y-%m-%dT%H:%M:%SZ") >= merged:
+            raise Refusal("merged-body-edited")
+    except (ValueError, TypeError):
+        raise Refusal("merged-body-evidence") from None
+
+
+def admitted_issue(kernel, record: dict, config: dict, pr: int, head: str) -> int:
+    issue = validate_live_record(kernel, record, config, pr, head)
+    if record.get("state") == "MERGED":
+        merged_body_unchanged(kernel, record, pr, head)
+    return issue
+
+
 def scope_refusal(kernel) -> type:
     """Scope guards raise an error that the sealed helper's handlers also catch.
 
@@ -235,6 +274,51 @@ def scope_refusal(kernel) -> type:
     if not isinstance(base, type) or not issubclass(base, Exception) or issubclass(base, Refusal):
         raise Refusal("kernel-error-contract")
     return type("ScopeRefusal", (Refusal, base), {"__module__": __name__})
+
+
+@contextmanager
+def cancellation_guard(kernel, head: str, scope_error):
+    """Cancel attempted authorization on catchable interruption or failure."""
+    original_post = kernel.merge_authority.post
+    authorization_pending = False
+    previous_signals = {}
+
+    def interrupted(_number, _frame):
+        raise scope_error("request-interrupted")
+
+    def scoped_post(post_head, conclusion, summary):
+        nonlocal authorization_pending
+        if post_head != head:
+            raise scope_error("current-head")
+        if conclusion == "success":
+            # Mark before the call: interruption may occur after GitHub records
+            # success but before the adapter or canonical helper returns it.
+            authorization_pending = True
+        result = original_post(post_head, conclusion, summary)
+        if conclusion == "failure":
+            authorization_pending = False
+        return result
+
+    try:
+        kernel.merge_authority.post = scoped_post
+        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            previous_signals[number] = signal.signal(number, interrupted)
+        yield
+    except BaseException:
+        if authorization_pending:
+            # The helper cancels KernelError in its submission block. This also
+            # covers its post/try gap. Defer catchable signals during cancellation.
+            for number in previous_signals:
+                signal.signal(number, signal.SIG_IGN)
+            try:
+                original_post(head, "failure", "Restricted request failed; re-run merge_pr.py")
+            except Exception:
+                raise scope_error("authorization-revocation-unavailable") from None
+        raise
+    finally:
+        kernel.merge_authority.post = original_post
+        for number, handler in previous_signals.items():
+            signal.signal(number, handler)
 
 
 def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> dict:
@@ -251,7 +335,7 @@ def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> di
             raise scope_error("current-head")
         record = original_pull(number)
         try:
-            issue = validate_live_record(kernel, record, config, pr, head)
+            issue = admitted_issue(kernel, record, config, pr, head)
         except Refusal as exc:
             # Same public gate; inside await_unblocked() it now reaches revocation.
             raise scope_error(str(exc)) from None
@@ -279,13 +363,14 @@ def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> di
     kernel.issue_gate = scoped_gate
     kernel.close_out = scoped_close
     try:
-        record = kernel.pull_request(pr)
-        if record.get("state") == "MERGED":
-            if check:
-                raise Refusal("already-merged")
-            # A retried bounded request repairs close-out, never resubmits a merge.
-            return kernel.finalize_queued(pr, head)
-        return kernel.merge(pr, head, dry_run=check)
+        with cancellation_guard(kernel, head, scope_error):
+            record = kernel.pull_request(pr)
+            if record.get("state") == "MERGED":
+                if check:
+                    raise Refusal("already-merged")
+                # GitHub body-edit evidence is rechecked on each merged reread.
+                return kernel.finalize_queued(pr, head)
+            return kernel.merge(pr, head, dry_run=check)
     finally:
         kernel.pull_request = original_pull
         kernel.issue_gate = original_gate
