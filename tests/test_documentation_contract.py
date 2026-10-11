@@ -133,6 +133,7 @@ def test_trusted_merge_request_keeps_authority_outside_coding_and_ci():
     assert "passing an agent these variables is not that route" in operations
     assert "Do not expose this session, its credentials or its generic App runner" in operations
     assert "an operator-controlled session alone runs" not in operations
+    assert "operator alone invokes" not in operations
 
 
 def test_trusted_mechanical_merge_retains_live_gates_and_close_out():
@@ -177,6 +178,20 @@ def test_operator_merge_evidence_does_not_claim_unattended_delivery():
     assert "interactive operator route, not unattended delivery" in boundary
     assert "automatic merging remains unavailable until that boundary is proven" in boundary
     assert "does not install a service, activate a Driver, change schedules or modify a ruleset" in boundary
+
+
+def test_restricted_package_requires_installation_and_actual_runtime_proof():
+    integration = text(ROOT / "integrations/merge-authority/README.md")
+    for requirement in (
+        "GitHub Issues/Project remain the authority", "separate execution user",
+        "does **not** establish that the capability is installed", "independently reviewed canonical",
+        "Checks write and Metadata read only", "not** in sudoers", "No admin bypass",
+        "verified in-memory", "Existing installation, sudo policy and staging paths are preserved",
+        "Never send a PEM/token to an agent", "a generic shell, interpreter command or App runner",
+        "one actual unattended governed merge", "changes no power settings or scheduled jobs",
+    ):
+        assert requirement in " ".join(integration.split()), requirement
+    assert "restricted merge integration" in text(ROOT / "docs/OPERATIONS.md")
 
 
 def driver_activation_commands(content: str) -> list[str]:

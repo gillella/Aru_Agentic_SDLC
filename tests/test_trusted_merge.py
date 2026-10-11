@@ -1,0 +1,427 @@
+from __future__ import annotations
+
+import importlib.util
+import hashlib
+import io
+import os
+import stat
+import zipfile
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location(
+    "trusted_merge_request", ROOT / "integrations/merge-authority/request.py",
+)
+request = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(request)
+HEAD = "a" * 40
+
+
+@pytest.mark.parametrize("arguments", [
+    [], ["--pr", "825"], ["--pr", "0", "--expected-head", HEAD],
+    ["--pr", "825;sh", "--expected-head", HEAD],
+    ["--pr", "825", "--expected-head", "0" * 40],
+    ["--pr", "825", "--expected-head", "A" * 40],
+    ["--pr", "825", "--expected-head", HEAD, "--repo=other/repo"],
+    ["--pr", "825", "--expected-head", HEAD, "--check", "--admin"],
+    ["--pr", "825", "--expected-head", HEAD, "--finalize"],
+    ["--expected-head", HEAD, "--pr", "825"],
+])
+def test_caller_cannot_expand_the_fixed_request(arguments):
+    with pytest.raises(request.Refusal):
+        request.parse_request(arguments)
+
+
+def kernel(record=None, failure=None):
+    calls = []
+    def merge(pr, head, dry_run=False):
+        calls.append(("merge", pr, head, dry_run))
+        if failure:
+            raise failure
+        return {"merged": not dry_run, "finalized": not dry_run}
+    def finalize(pr, head):
+        calls.append(("finalize", pr, head))
+        return {"merged": True, "finalized": True}
+    return SimpleNamespace(
+        calls=calls, merge=merge, finalize_queued=finalize,
+        linked_issues=lambda body: [int(body.split("#")[1])],
+        pull_request=lambda pr: record or {
+            "number": pr, "headRefOid": HEAD, "body": "Closes #821",
+            "state": "OPEN", "isDraft": False, "reviewDecision": "APPROVED",
+        },
+    )
+
+
+def test_trusted_request_delegates_merge_and_check_to_canonical_helper():
+    for check in (False, True):
+        helper = kernel()
+        result = request.execute_request(helper, {"issues": [821]}, 825, HEAD, check)
+        assert helper.calls == [("merge", 825, HEAD, check)]
+        assert result["merged"] is not check
+    assert request.parse_request(["--pr", "825", "--expected-head", HEAD, "--check"]) == (825, HEAD, True)
+
+
+@pytest.mark.parametrize("change,gate", [
+    ({"headRefOid": "b" * 40}, "current-head"),
+    ({"number": 999}, "current-head"),
+    ({"body": "Closes #793"}, "authorized-issue-scope"),
+    ({"reviewDecision": "REVIEW_REQUIRED"}, "github-counted-approval"),
+    ({"reviewDecision": "CHANGES_REQUESTED"}, "github-counted-approval"),
+    ({"isDraft": True}, "open-ready-pr"),
+    ({"state": "CLOSED"}, "open-ready-pr"),
+])
+def test_untrusted_live_authority_never_reaches_submission(change, gate):
+    record = kernel().pull_request(825)
+    record.update(change)
+    helper = kernel(record)
+    with pytest.raises(request.Refusal, match=gate):
+        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+    assert helper.calls == []
+
+
+@pytest.mark.parametrize("gate", [
+    "exact-head-consumer-verification", "unresolved-findings", "acceptance-criteria",
+    "exclusive-claim", "live-touches", "dependencies", "base-head-race",
+    "unsupported-merge-queue", "unsupported-auto-merge",
+])
+def test_request_propagates_canonical_gate_refusals_without_fallback(gate):
+    helper = kernel(failure=RuntimeError(gate))
+    with pytest.raises(RuntimeError, match=gate):
+        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+    assert helper.calls == [("merge", 825, HEAD, False)]
+
+
+def test_confirmed_merge_retry_only_finalizes_exact_head():
+    record = kernel().pull_request(825)
+    record["state"] = "MERGED"
+    helper = kernel(record)
+    assert request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)["finalized"]
+    assert helper.calls == [("finalize", 825, HEAD)]
+    with pytest.raises(request.Refusal, match="already-merged"):
+        request.execute_request(helper, {"issues": [821]}, 825, HEAD, True)
+
+
+def test_authority_environment_has_no_caller_credentials_or_executable_inputs(monkeypatch):
+    monkeypatch.setenv("GH_TOKEN", "caller-secret")
+    monkeypatch.setenv("PYTHONPATH", "/caller/module")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    env = request.authority_environment({"principal_home": "/merge", "repository": "owner/repo",
+                                         "authority_app_id": 42, "authority_runner": "/protected/runner"})
+    assert "caller-secret" not in env.values()
+    assert not {"GH_TOKEN", "PYTHONPATH", "ARU_GITHUB_APP_RUNNER"} & env.keys()
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
+    assert env["GIT_CONFIG_VALUE_0"] == str(request.ROOT / "checkout")
+    assert env["GH_REPO"] == "owner/repo"
+    assert env["GIT_CONFIG_GLOBAL"] == "/dev/null"
+
+
+def test_overlapping_requests_refuse_instead_of_queue(tmp_path, monkeypatch):
+    monkeypatch.setattr(request, "ROOT", tmp_path)
+    (tmp_path / "runtime").mkdir(mode=0o700)
+    first = request.execution_lock(os.getuid())
+    try:
+        with pytest.raises(request.Refusal, match="merge-context-busy"):
+            request.execution_lock(os.getuid())
+    finally:
+        os.close(first)
+
+
+def test_uninstalled_program_refuses_without_importing_privileged_helper(capsys):
+    assert request.main(["--pr", "825", "--expected-head", HEAD]) == 2
+    assert '"gate": "not-installed"' in capsys.readouterr().out
+
+
+def integration_module(name):
+    spec = importlib.util.spec_from_file_location("merge_integration_" + name,
+                                                 ROOT / f"integrations/merge-authority/{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+app = integration_module("app")
+bundle = integration_module("bundle")
+installer = integration_module("install")
+
+
+def config_fixture():
+    files = {name: "a" * 64 for name in (
+        "request.py", "app.py", "bin/authority", "bin/gh", "checkout/.git/config", "checkout/.git/HEAD",
+        *("lib/" + name for name in request.KERNEL_FILES),
+    )}
+    return {"version": 1, "repository": "gillella/Aru_Agentic_SDLC", "issues": [821, 822, 792],
+            "principal_uid": 502, "principal_gid": 502, "principal_home": "/Users/aru-merge",
+            "helper_commit": HEAD, "files": files, "authority_app_id": 4921120,
+            "authority_installation_id": 123, "authority_runner": str(request.ROOT / "bin/authority"),
+            "authority_files": {str(request.ROOT / name): files[name] for name in ("app.py", "bin/authority")},
+            "python": "/Library/Developer/CommandLineTools/usr/bin/python3", "python_sha256": "c" * 64}
+
+
+@pytest.mark.parametrize("name,value", [
+    ("version", True), ("repository", "owner/../other"), ("issues", [821, 821]),
+    ("issues", [True]), ("principal_uid", 0), ("principal_home", "/Users/../coding"),
+    ("authority_runner", "/generic/runner"), ("authority_files", {}),
+    ("files", {"../request.py": "a" * 64}), ("python_sha256", "wrong"),
+])
+def test_invalid_or_expanded_operator_config_refuses(name, value):
+    config = config_fixture()
+    config[name] = value
+    with pytest.raises(request.Refusal):
+        request.validate_config(config)
+
+
+def test_valid_config_seals_complete_authority_inventory():
+    config = config_fixture()
+    assert request.validate_config(config) == config
+    config["authority_files"][str(request.ROOT / "app.py")] = "b" * 64
+    with pytest.raises(request.Refusal, match="authority-file-inventory"):
+        request.validate_config(config)
+
+
+def protected_fixture(tmp_path, monkeypatch):
+    path = tmp_path / "guarded"
+    path.write_bytes(b"reviewed-code")
+    path.chmod(0o644)
+    original = Path.lstat
+    ancestors = set(path.parents)
+    def metadata(item):
+        if item in ancestors:
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=0)
+        return original(item)
+    monkeypatch.setattr(Path, "lstat", metadata)
+    return path
+
+
+def test_protected_file_rejects_writable_or_linked_code(tmp_path, monkeypatch):
+    path = protected_fixture(tmp_path, monkeypatch)
+    assert request.protected_bytes(path, {0, os.getuid()}) == b"reviewed-code"
+    path.chmod(0o666)
+    with pytest.raises(request.Refusal, match="mutable-installation-file"):
+        request.protected_bytes(path, {0, os.getuid()})
+    path.unlink()
+    path.symlink_to(tmp_path / "unreviewed")
+    with pytest.raises(OSError):
+        request.protected_bytes(path, {0, os.getuid()})
+
+
+def test_mutable_ancestor_is_rejected_before_read(tmp_path, monkeypatch):
+    path = protected_fixture(tmp_path, monkeypatch)
+    original = Path.lstat
+    def metadata(item):
+        if item == path.parent:
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o777, st_uid=0)
+        return original(item)
+    monkeypatch.setattr(Path, "lstat", metadata)
+    with pytest.raises(request.Refusal, match="mutable-installation-chain"):
+        request.protected_bytes(path, {0, os.getuid()})
+
+
+def test_changed_content_or_wrong_principal_is_rejected(monkeypatch):
+    config = config_fixture()
+    monkeypatch.setattr(request.sys, "flags", SimpleNamespace(isolated=1))
+    monkeypatch.setattr(request.os, "geteuid", lambda: 501)
+    with pytest.raises(request.Refusal, match="wrong-execution-principal"):
+        request.verify_installation(config)
+    monkeypatch.setattr(request.os, "geteuid", lambda: 502)
+    monkeypatch.setattr(request.os, "getegid", lambda: 502)
+    monkeypatch.setattr(request, "protected_bytes", lambda *_args: b"tampered")
+    with pytest.raises(request.Refusal, match="installation-content-changed"):
+        request.verify_installation(config)
+
+
+@pytest.mark.parametrize("failure", ["ci", "feedback", "approval", "queue", "auto", "criteria",
+                                     "claim", "dependency", "touches", "project", "base"])
+def test_actual_canonical_admission_refuses_without_app_post_or_merge(monkeypatch, failure):
+    import merge_pr
+    import merge_state
+    from test_merge_gate import install_happy_gate
+
+    pr = install_happy_gate(monkeypatch)
+    pr.update(number=825, body="Closes #821", reviewDecision="APPROVED")
+    issue = {"state": "OPEN", "labels": [{"name": "agent:owner"}, {"name": "status:in-review"}],
+             "body": "- [x] Accepted\n\ntouches: scripts/merge_pr.py\n"}
+    monkeypatch.setattr(merge_state, "issue", lambda n: issue if n == 821 else {"state": "OPEN"})
+    monkeypatch.setattr(merge_state, "project_item_evidence", lambda _n: {"status": "In Review"})
+    monkeypatch.setattr(merge_pr, "issue_gate", merge_state.issue_gate)
+    monkeypatch.setattr(merge_pr.merge_authority, "post", lambda *_a: pytest.fail("refusal posted authorization"))
+    monkeypatch.setattr(merge_pr, "run", lambda *_a: pytest.fail("refusal submitted merge"))
+    if failure == "ci":
+        monkeypatch.setattr(merge_pr, "ci_verdict", lambda _n: {"state": "pending", "head": HEAD})
+    elif failure == "feedback":
+        monkeypatch.setattr(merge_pr, "fetch_feedback", lambda _n: [{"body": "fix"}])
+    elif failure == "approval":
+        monkeypatch.setattr(merge_pr, "pull_reviews", lambda _n: [])
+    elif failure in ("queue", "auto"):
+        monkeypatch.setattr(merge_pr, "merge_queue_snapshot", lambda *_a: {
+            "configured": failure == "queue", "entry": None, "auto_merge": {} if failure == "auto" else None,
+        })
+    elif failure == "criteria":
+        issue["body"] = issue["body"].replace("[x]", "[ ]")
+    elif failure == "claim":
+        issue["labels"].append({"name": "agent:peer"})
+    elif failure == "dependency":
+        issue["body"] += "\ndepends-on: #818\n"
+    elif failure == "touches":
+        issue["body"] = issue["body"].replace("scripts/merge_pr.py", "README.md")
+    elif failure == "project":
+        monkeypatch.setattr(merge_state, "project_item_evidence", lambda _n: {"status": "Done"})
+    elif failure == "base":
+        pr["mergeStateStatus"] = "BEHIND"
+    with pytest.raises(merge_pr.KernelError):
+        request.execute_request(merge_pr, {"issues": [821]}, 825, HEAD, False)
+
+
+def package_fixture(monkeypatch):
+    monkeypatch.setattr(bundle, "git_object", lambda _source, _commit, path: path.encode())
+    return bundle.make_bundle(ROOT, HEAD, "b" * 40, b"sealed-gh-binary", "gillella/Aru_Agentic_SDLC", [821, 822, 792])
+
+
+def test_package_preserves_reviewed_revisions_and_contains_no_credentials(monkeypatch):
+    manifest, payload = installer.unpack(package_fixture(monkeypatch))
+    assert manifest["source_commit"] == HEAD
+    assert manifest["helper_commit"] == "b" * 40
+    assert manifest["issues"] == [821, 822, 792]
+    assert not any("credentials" in name or name.endswith(".pem") for name in payload)
+    assert manifest["files"]["bin/gh"] == hashlib.sha256(b"sealed-gh-binary").hexdigest()
+
+
+@pytest.mark.parametrize("malformation", ["tamper", "extra", "duplicate", "symlink"])
+def test_package_rejects_tampering_and_archive_traversal(monkeypatch, malformation):
+    raw = package_fixture(monkeypatch)
+    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+        payload = {name: archive.read(name) for name in archive.namelist()}
+    if malformation == "tamper":
+        payload["request.py"] = b"unreviewed-code"
+    if malformation == "extra":
+        payload["../escape"] = b"escape"
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w") as archive:
+        for name, data in payload.items():
+            if malformation == "symlink" and name == "request.py":
+                entry = zipfile.ZipInfo(name)
+                entry.external_attr = (stat.S_IFLNK | 0o777) << 16
+                archive.writestr(entry, data)
+            else:
+                archive.writestr(name, data)
+        if malformation == "duplicate":
+            with pytest.warns(UserWarning, match="Duplicate"):
+                archive.writestr("request.py", b"replacement")
+    with pytest.raises(ValueError):
+        installer.unpack(stream.getvalue())
+
+
+def test_sudo_capability_has_no_generic_runner_shell_or_environment():
+    policy = installer.policy_text("gillella", "aru-merge", "a" * 64)
+    assert "NOPASSWD: NOSETENV: sha256:" in policy
+    assert f"/usr/bin/python3 -I {request.ROOT}/request.py --pr * --expected-head *" in policy
+    assert "app.py" not in policy and "authority-run" not in policy
+    with pytest.raises(ValueError):
+        installer.policy_text("gillella;ALL", "aru-merge", "a" * 64)
+
+
+def test_app_adapter_only_accepts_exact_head_authorization_check():
+    repository = "gillella/Aru_Agentic_SDLC"
+    args = ["--repo", repository, "--", "gh", "api", "--method", "POST",
+            f"repos/{repository}/check-runs", "--input", "-"]
+    payload = {"name": "aru-merge-authorized", "head_sha": HEAD, "status": "completed",
+               "conclusion": "success", "output": {"title": "Passed", "summary": "Passed"}}
+    assert app.operation(args, repository, HEAD, payload) == "check"
+    for name, value in [("head_sha", "b" * 40), ("name", "other"), ("conclusion", "neutral")]:
+        changed = {**payload, name: value}
+        with pytest.raises(app.Refusal):
+            app.operation(args, repository, HEAD, changed)
+    for endpoint in (f"repos/{repository}/pulls/825/merge", "user", "installation/repositories"):
+        with pytest.raises(app.Refusal):
+            app.operation(["--repo", repository, "--", "gh", "api", endpoint], repository, HEAD, None)
+
+
+@pytest.mark.parametrize("wrong_scope", [False, True])
+def test_app_uses_single_repo_minimal_token_and_revokes_without_returning_secret(monkeypatch, wrong_scope):
+    config = config_fixture()
+    calls = []
+    monkeypatch.setattr(app, "jwt", lambda _c: "jwt-secret")
+    def api(method, endpoint, token, payload=None):
+        calls.append((method, endpoint, token, payload))
+        if endpoint == "app":
+            return {"id": 4921120}
+        if endpoint == "app/installations/123":
+            return {"app_id": 4921120, "account": {"login": "gillella"}}
+        if endpoint.endswith("/access_tokens"):
+            return {"token": "installation-secret", "permissions": payload["permissions"],
+                    "repositories": [{"full_name": "other/repo" if wrong_scope else config["repository"]}]}
+        if endpoint.startswith("repos/"):
+            return {"id": 1, "full_name": config["repository"], "private-data": "ignored"}
+        return None
+    monkeypatch.setattr(app, "api", api)
+    if wrong_scope:
+        with pytest.raises(app.Refusal, match="app-token-scope"):
+            app.perform(config, "repository", None)
+    else:
+        assert app.perform(config, "repository", None) == {"id": 1, "full_name": config["repository"]}
+    assert calls[-1][:2] == ("DELETE", "installation/token")
+    assert calls[2][3] == {"repositories": ["Aru_Agentic_SDLC"],
+                            "permissions": {"checks": "write", "metadata": "read"}}
+
+
+def test_installation_never_executes_from_agent_or_unverified_mutable_source():
+    with pytest.raises(ValueError, match="human root TTY"):
+        installer.main()
+
+
+@pytest.mark.parametrize("invalid_policy", [False, True])
+def test_installation_transaction_seals_payload_before_publishing_capability(tmp_path, monkeypatch, invalid_policy):
+    manifest, payload = installer.unpack(package_fixture(monkeypatch))
+    destination = tmp_path / "installation"
+    policy_dir = tmp_path / "policies"
+    policy_dir.mkdir()
+    policy = policy_dir / "aru-trusted-merge"
+    monkeypatch.setattr(installer, "ROOT", destination)
+    monkeypatch.setattr(installer, "POLICY", policy)
+    monkeypatch.setattr(installer.os, "chown", lambda *_a: None)
+    # The transaction is exercised without root. Ownership refusal itself has
+    # separate metadata tests; this fixture never edits a system location.
+    monkeypatch.setattr(installer, "root_chain", lambda _p: None)
+    principal = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_name="aru-merge", pw_dir="/merge")
+    calls = []
+    def validate_policy(argv, **_kwargs):
+        assert not policy.exists()
+        assert (destination / "config.json").is_file()
+        assert (destination / "bin/authority").is_file()
+        calls.append(argv)
+        if invalid_policy:
+            raise ValueError("invalid policy")
+    monkeypatch.setattr(installer.subprocess, "run", validate_policy)
+    if invalid_policy:
+        with pytest.raises(ValueError, match="invalid policy"):
+            installer.install_payload(manifest, payload, "gillella", principal, 123, b"fixture-only-key")
+        assert not destination.exists() and not policy.exists()
+        assert list(policy_dir.iterdir()) == []
+    else:
+        installer.install_payload(manifest, payload, "gillella", principal, 123, b"fixture-only-key")
+        assert policy.is_file() and policy.stat().st_mode & 0o777 == 0o440
+        assert (destination / "credentials").stat().st_mode & 0o777 == 0o700
+        assert (destination / "credentials/merge-app.pem").stat().st_mode & 0o777 == 0o600
+        assert not (destination / "install.py").exists()
+        for name, digest in manifest["files"].items():
+            if name != "install.py":
+                assert hashlib.sha256((destination / name).read_bytes()).hexdigest() == digest
+        with pytest.raises(ValueError, match="Existing installation"):
+            installer.install_payload(manifest, payload, "gillella", principal, 123, b"other-fixture")
+        assert policy.is_file()
+    assert calls[0][:2] == ["/usr/sbin/visudo", "-cf"]
+
+
+def test_installation_preserves_existing_operator_staging(tmp_path, monkeypatch):
+    manifest, payload = installer.unpack(package_fixture(monkeypatch))
+    monkeypatch.setattr(installer, "ROOT", tmp_path / "new-installation")
+    monkeypatch.setattr(installer, "POLICY", tmp_path / "aru-trusted-merge")
+    staging = tmp_path / ".aru-trusted-merge-candidate"
+    staging.write_bytes(b"another-operator")
+    with pytest.raises(ValueError, match="staging file is preserved"):
+        installer.install_payload(manifest, payload, "gillella", SimpleNamespace(), 123, b"fixture")
+    assert staging.read_bytes() == b"another-operator"
+    assert not installer.ROOT.exists()

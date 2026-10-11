@@ -49,7 +49,8 @@ rollout, and existing scheduler jobs are unchanged.
 A Driver may receive only the authoring and Project Board permissions needed
 to invoke bounded Kernel commands. It cannot hold reviewer or merge-authority
 credentials; another GitHub account supplies the exact-head approval and an
-operator alone invokes `merge_pr.py --expected-head`. GitHub and Git remain
+operator or proven restricted trusted-caller context invokes
+`merge_pr.py --expected-head`. GitHub and Git remain
 the lifecycle authority. Keep live configuration, credentials, processes,
 scheduler job definitions and receipts outside Git.
 
@@ -327,7 +328,9 @@ board, criteria and queue gates.
    App agents use for ordinary commands.
 2. Store its App id and private key in their own credentials directory, and give
    it a runner with the `<runner> --repo OWNER/REPO -- gh ...` interface. **No
-   runner ships with Aru**. On the Mac Mini, the working operator-provided runner
+   generic runner ships with Aru**. The optional check-only adapter under
+   `integrations/merge-authority/` belongs to the restricted installation described
+   below; it is not a generic App endpoint. On the Mac Mini, the working operator-provided runner
    is the root-owned `/usr/local/bin/aru-merge-authority-run` wrapper. It uses
    `sudo -u aru-merge` to run as the separate `aru-merge` user, with credentials
    in `/Users/aru-merge/.aru-merge-authority/`. The operator may receive a sudo
@@ -442,6 +445,15 @@ operator route, not unattended delivery. A reviewed restricted automation entry
 point and its denial/continuity proofs are not yet recorded; automatic merging
 remains unavailable until that boundary is proven. This documentation does not
 install a service, activate a Driver, change schedules or modify a ruleset.
+
+The optional [restricted merge integration](../integrations/merge-authority/README.md)
+provides one installed PR/head request, a protected copy of an independently
+reviewed canonical helper revision, and a check-only App adapter. Its operator
+package pins the source/helper revisions and CLI bytes. An existing external
+continuation calls that request after acceptance and review; there is no Kernel
+scheduler, queue or pending-work file. Installation, private credential setup,
+positive preflight and negative host proofs remain operator actions. A source
+package or passing offline tests never establishes installed authority.
 
 ### Bounded external continuation
 
