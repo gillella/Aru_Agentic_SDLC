@@ -75,14 +75,21 @@ words do not create a persistent loop or route to an unlisted skill.
 - **Kernel:** the issue-to-safe-merge rules and helpers in this repository.
 - **External Driver:** optional human, any agent, or scheduled/event-driven
   continuation. It may surface PRs waiting for an approval or start a reviewer
-  under another account; it owns no lifecycle state.
+  under another account; it owns no lifecycle state. Optional, separately packaged
+  maintained source may live under `driver/`; the Kernel remains independently
+  usable and does not import, install, schedule or activate it. A future Driver
+  owns its own explicit package/install entry points and uses only its bounded
+  authoring and Project permissions. Reviewer and operator merge credentials,
+  live configuration, processes, job definitions and receipts stay outside Git.
+  The installed monitor has no verified maintained source or installer yet.
 - **Consumer policy:** product acceptance, additional risk controls, wider
   engineering or release checks, human/domain approvals, deployment,
   production, and SRE.
 
 Do not turn consumer policy into universal kernel ceremony. Do not put a
 scheduler, daemon, queue, handoff system, dashboard, release/deploy system,
-provider fleet, or repository-owned runtime in this project.
+provider fleet, or repository-owned runtime in the Kernel. Existing scheduler
+jobs are not changed by this source allowance.
 
 ## Review policy
 

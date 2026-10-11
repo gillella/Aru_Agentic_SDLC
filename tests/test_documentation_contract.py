@@ -94,6 +94,44 @@ def test_version_and_layer_truth_are_explicit():
     assert "Every pull request, whatever it changes, needs one approval" in " ".join(contract.split())
 
 
+def test_optional_driver_source_boundary_is_documented_without_rollout_claims():
+    contract = " ".join(text(ROOT / "docs" / "KERNEL-CONTRACT.md").split())
+    agents = " ".join(text(ROOT / "AGENTS.md").split())
+    readme = " ".join(text(ROOT / "README.md").split())
+    operations = " ".join(text(ROOT / "docs" / "OPERATIONS.md").split())
+    for content in (contract, agents, readme, operations):
+        assert "driver/" in content
+        assert "separately packaged" in content
+        assert "outside Git" in content
+    assert "Kernel remains independently usable" in contract
+    assert "no verified maintained source or installer" in contract
+    assert "operator-only `merge_pr.py --expected-head`" in contract
+    assert "#794" in operations
+
+
+def driver_activation_commands(content: str) -> list[str]:
+    command = re.compile(
+        r"^\s*(?:\$\s*)?(?:"
+        r"python3?\s+(?:-\S+\s+)*(?:-m\s+driver(?:\.|\b)|[^\s]*\bdriver/)"
+        r"|(?:pip3?|bash|sh|source|\.|launchctl|systemctl)\s+[^\n]*\bdriver(?:/|\.))",
+        re.MULTILINE,
+    )
+    return command.findall(content)
+
+
+def test_active_guidance_never_instructs_driver_install_or_activation():
+    active = ("README.md", "AGENTS.md", "CHANGELOG.md", "docs/KERNEL-CONTRACT.md",
+              "docs/ENFORCEMENT-REGISTER.md", "docs/OPERATIONS.md", "docs/DEGRADED-MODE.md")
+    assert all(driver_activation_commands(text(ROOT / path)) == [] for path in active)
+    for example in ("python3 driver/monitor.py", "python3 -m driver.monitor",
+                    "python3 -u driver/monitor.py", "python3 -I -m driver.monitor",
+                    "pip install driver/", "bash driver/install.sh"):
+        assert driver_activation_commands(example), example
+    assert driver_activation_commands("python3 -m pytest\nThe Driver stays optional.") == []
+    assert driver_activation_commands("python3 -m pytest driver/tests/") == []
+    assert driver_activation_commands("$ python3 -I -m pytest driver/tests/test_monitor.py") == []
+
+
 def test_active_release_and_freeze_guidance_agree():
     agents = text(ROOT / "AGENTS.md")
     readme = text(ROOT / "README.md")

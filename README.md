@@ -35,9 +35,14 @@ summary. It separates the **Kernel** (issue to safe merge), an optional
 release, deploy, and production).
 
 Aru is agent-independent. Any agent in any framework, a person or a scheduled
-task can act as the optional external Driver by calling the same kernel commands
-from outside this repository. The kernel and consumer bootstrap do not install
-or run one.
+task can act as the optional external Driver by calling the same kernel commands.
+Optional, separately packaged maintained Driver source may live under `driver/`
+in this monorepo. The Kernel remains independently usable and neither it nor
+consumer bootstrap imports, installs, schedules or activates the Driver. A
+future Driver package must own explicit package/install entry points under
+`driver/`; the installed monitor has no verified maintained source or installer
+yet. Its live configuration, credentials, processes, scheduler jobs and receipts
+stay outside Git. Existing scheduler jobs are unaffected.
 
 ## See the whole system in one minute
 
