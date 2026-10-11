@@ -76,20 +76,44 @@ def canonical_effect_flow(monkeypatch, mutate=None, at=1):
     "Fixes octo-org/octo-repo#821", "Closes https://github.com/other/repo/issues/793",
     "Closes: #822", "<!-- closes #793 -->", "`fixes #793`", "Closes\n#793",
     "Closes #821\n#793", "Closes #821\nhttps://github.com/other/repo/issues/793",
+    "Fixes GH-793", "CLOSES: gh-793", "Resolved (GH-793).", "Closes GH-821",
+    "Fixes other/repo#793", "Fixes https://github.com/other/repo/pull/793",
+    "Fixes https://github.com/other/repo/issues/793#issuecomment-1",
+    "Fixes [target](https://github.com/other/repo/issues/793)",
+    "Fixes <https://github.com/other/repo/issues/793>",
+    "Fixes GH\n-793", "Closes #821\nGH-793", "Fixes 793", "Fixes: (793)",
+    "Fixes &#35;793", "Fixes GH-%37%39%33", "Fixes GH-７９３", "Fixes GH-٧٩٣",
+    "Closes #821, GH-793", "Closes #821\n, GH-793", "Fixes\\nGH-793",
 ])
-@pytest.mark.parametrize("field", ["body", "title", "commit"])
+@pytest.mark.parametrize("field", ["body", "title", "headRefName", "commit", "head-commit", "merge-message"])
 def test_additional_closing_effects_never_authorize_submit_or_close(monkeypatch, extra, field):
     helper, record, posts, submissions, closures, _reads = canonical_effect_flow(monkeypatch)
-    if field == "commit":
+    if field in ("commit", "head-commit", "merge-message"):
         def mutate(live):
-            live["commits"]["nodes"].insert(0, {"commit": {"oid": "d" * 40, "message": extra}})
-            live["commits"]["totalCount"] = 2
+            if field == "commit":
+                live["commits"]["nodes"].insert(0, {"commit": {"oid": "d" * 40, "message": extra}})
+                live["commits"]["totalCount"] = 2
+            elif field == "head-commit":
+                live["commits"]["nodes"][0]["commit"]["message"] = extra
+            else:
+                live["mergeCommit"]["message"] += "\n\n" + extra
         helper, record, posts, submissions, closures, _reads = canonical_effect_flow(monkeypatch, mutate)
+        if field == "merge-message":
+            record.update(state="MERGED", mergedAt="2026-10-11T03:00:00Z", mergeCommit={"oid": "c" * 40})
     else:
         record[field] = "Closes #821\n\n" + extra if field == "body" else extra
     with pytest.raises(request.Refusal, match="authorized-(closing|issue)-scope"):
         request.execute_request(helper, SCOPE_CONFIG, 825, HEAD, False)
     assert not posts and not submissions and not closures
+
+
+@pytest.mark.parametrize("branch", ["Fixes", "feat/requests"])
+def test_generated_merge_text_cannot_hide_keyword_or_target_across_fields(monkeypatch, branch):
+    helper, record, posts, submissions, closures, reads = canonical_effect_flow(monkeypatch)
+    record.update(title="GH-793", headRefName=branch)
+    with pytest.raises(request.Refusal, match="authorized-closing-scope"):
+        request.execute_request(helper, SCOPE_CONFIG, 825, HEAD, False)
+    assert len(reads) == 1 and not posts and not submissions and not closures
 
 
 def corrupt_effect_evidence(live, defect):
@@ -159,13 +183,14 @@ def test_unreadable_effect_lookup_refuses_without_fallback(monkeypatch, failure)
 
 
 @pytest.mark.parametrize("at", range(2, 11))
-@pytest.mark.parametrize("source", ["linked", "commit"])
+@pytest.mark.parametrize("source", ["linked", "commit", "gh-commit"])
 def test_effect_scope_drift_on_each_reread_and_action_boundary_refuses(monkeypatch, at, source):
     def mutate(live):
         if source == "linked":
             corrupt_effect_evidence(live, "extra-link")
         else:
-            live["commits"]["nodes"][0]["commit"]["message"] = "CLOSES: #793"
+            live["commits"]["nodes"][0]["commit"]["message"] = (
+                "Fixes GH-793" if source == "gh-commit" else "CLOSES: #793")
     helper, _record, posts, submissions, closures, reads = canonical_effect_flow(monkeypatch, mutate, at)
     originals = (helper.pull_request, helper.run, helper.issue_gate, helper.close_out, helper.merge_authority.post)
     with pytest.raises(request.Refusal, match="authorized-closing-scope"):
@@ -182,9 +207,17 @@ def test_effect_scope_drift_on_each_reread_and_action_boundary_refuses(monkeypat
 
 
 @pytest.mark.parametrize("check", [False, True])
-def test_complete_single_issue_effect_proof_preserves_legitimate_canonical_flow(monkeypatch, check):
-    helper, record, posts, submissions, closures, reads = canonical_effect_flow(monkeypatch)
-    record.update(title="fix: protect requests", body="## Implementation\n\nProtect requests.\n\nCloses #821")
+@pytest.mark.parametrize("keyword", ["close", "closes", "closed", "fix", "fixes", "fixed",
+                                     "resolve", "resolves", "resolved"])
+def test_complete_single_issue_effect_proof_preserves_legitimate_canonical_flow(monkeypatch, check, keyword):
+    def mutate(live):
+        live["commits"]["nodes"][0]["commit"]["message"] = "fix: protect requests\n\n" + keyword.upper() + "\t#821"
+        if live["mergeCommit"] is not None:
+            live["mergeCommit"]["message"] += "\n\n" + live["body"]
+    helper, record, posts, submissions, closures, reads = canonical_effect_flow(monkeypatch, mutate)
+    record.update(title="fix: protect requests", body=(
+        "## Implementation\n\nProtect requests (including `request.py`).\n\n"
+        "touches: integrations/merge-authority/**\n\nCloses #821"))
     result = request.execute_request(helper, SCOPE_CONFIG, 825, HEAD, check)
     assert result["merged"] is not check
     assert posts == ([] if check else [(HEAD, "success")])

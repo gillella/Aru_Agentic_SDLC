@@ -300,20 +300,23 @@ def read_closing_effects(kernel, record: dict, pr: int) -> dict:
 def restricted_closing_text(text: str, issue: int) -> None:
     """Admit simple whole-line directives only; do not emulate GitHub's parser.
 
-    Remove exact same-issue local directives and Markdown heading markers, then
-    deny any remaining reference when closing vocabulary occurs in the text.
-    This rejects prose/code examples and ambiguous syntax as well as closures;
-    removing a directive must never hide a possible continuation target.
-    Conventional 'fix:' messages without references remain usable. Substring
-    matching is conservative even around punctuation, Markdown and Unicode.
+    When closing vocabulary occurs anywhere, residual text must be ASCII prose:
+    letters, ordinary whitespace and the fixed punctuation alphabet below.
+    No numerals or reference/encoding delimiters can remain. Every GitHub issue
+    or PR reference needs a number, regardless of prefix, qualification or URL;
+    this closed grammar does not depend on enumerating those reference forms.
+    Only exact same-issue local directive lines and Markdown heading markers
+    are removed. A continuation target must still pass the residual grammar.
+    Conventional 'fix:' prose and simple Markdown/path descriptions remain
+    usable. Keyword substring matching deliberately over-refuses ambiguous text.
     """
     keywords = r"close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved"
     directive = re.compile(rf"(?i:{keywords})[ \t]+#{issue}")
     residual = "\n".join(re.sub(r"^[ \t]*#{1,6}[ \t]+", "", line)
                          for line in text.splitlines()
                          if not directive.fullmatch(line.strip(" \t\r")))
-    if re.search(keywords, text, re.I) and (
-        "#" in residual or "github.com" in residual.lower()
+    if re.search(keywords, text, re.I) and not re.fullmatch(
+        r"[A-Za-z \t\r\n.,:;!?'\"()_/*`-]*", residual,
     ):
         raise Refusal("authorized-closing-scope")
 
@@ -330,6 +333,12 @@ def validate_closing_effects(kernel, record: dict, config: dict, pr: int, issue:
         if not isinstance(live[field], str):
             raise Refusal("closing-effect-evidence")
         restricted_closing_text(live[field], issue)
+    # Check generated text before authorization, including field boundaries.
+    # The later mechanical header exemption must not hide closing vocabulary
+    # from a branch/owner that could consume a target in the following title.
+    header = f"Merge pull request #{pr} from {config['repository'].split('/')[0]}/{live['headRefName']}\n\n"
+    restricted_closing_text(header, issue)
+    restricted_closing_text(live["title"] + "\n\n" + live["body"], issue)
     targets = bounded_nodes(live.get("closingIssuesReferences"))
     if (len(targets) != 1 or not isinstance(targets[0], dict)
             or type(targets[0].get("number")) is not int

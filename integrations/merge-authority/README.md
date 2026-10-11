@@ -246,14 +246,28 @@ message and require its oid to match the canonical PR record.
 
 Closing text is deliberately restricted instead of attempting to duplicate
 GitHub's keyword parser. Only whole-line local directives for the admitted issue
-are accepted. After removing those directives and Markdown heading markers,
-text containing closing vocabulary and any remaining `#` or `github.com`
-reference refuses. This includes colon/compound/qualified forms, extra targets
-in commit messages, and ambiguous examples or unrelated references in the same
-text, even when the extra issue is in the installation allowlist. Conventional
-`fix:` text without references remains usable. The fixed GitHub merge header's
+are accepted: one closing keyword, spaces or tabs, and `#` plus the admitted
+decimal issue number, with no colon, suffix or additional target. If closing
+vocabulary occurs anywhere in a text, removing those exact directive lines and
+Markdown heading markers must leave only ASCII letters, spaces/tabs/line breaks
+and this fixed punctuation alphabet: `. , : ; ! ? ' " ( ) _ / *` plus backtick
+and hyphen. Numerals and every other character refuse. All GitHub issue/PR
+reference forms require a number, so this closed grammar excludes number,
+`GH-`, qualified and URL references without enumerating prefixes or URL hosts.
+It also refuses encoding delimiters and ambiguous punctuation, examples,
+unrelated references, versions and test counts, even when a referenced issue is
+in the installation allowlist. Text with no closing vocabulary is unrestricted;
+keyword substring matching deliberately over-refuses words such as `fixed` and
+`close-out`. Conventional `fix:` prose and simple Markdown/path descriptions
+remain usable. Keep eligible bodies straightforward; retain detailed numbered
+validation/history in existing review or issue evidence rather than rewriting
+commit history or bypassing refusal. A body edit needs explicit review and live
+gate rereads; this package never edits PR metadata. The fixed GitHub merge header's
 reference to this PR is removed before checking the generated message; the
-branch, title and body are checked separately.
+branch, title and body are checked separately. Before authorization, the
+generated header and the combined title/body also pass the grammar. A header
+containing closing vocabulary (including in its owner or branch) refuses rather
+than hiding a possible continuation target when the header is later removed.
 
 The complete effect proof is reread on every canonical PR read and immediately
 before posting success authorization, submitting the merge command, and calling
