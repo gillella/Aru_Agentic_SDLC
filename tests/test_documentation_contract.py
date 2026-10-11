@@ -109,6 +109,71 @@ def test_optional_driver_source_boundary_is_documented_without_rollout_claims():
     assert "#794" in operations
 
 
+def operations_section(heading: str) -> str:
+    content = text(ROOT / "docs" / "OPERATIONS.md")
+    return " ".join(content.split(f"### {heading}\n", 1)[1].split("\n### ", 1)[0].split())
+
+
+def test_trusted_merge_request_keeps_authority_outside_coding_and_ci():
+    boundary = operations_section("Trusted callers and mechanical merge")
+    for requirement in (
+        "outside PR worktrees", "protected from coding/CI writes",
+        "separate merge principal", "Strip caller-controlled tokens",
+        "Never check out, import or execute PR-controlled code, verifier, hook or runtime",
+        "approved repository, issue scope, PR and full expected SHA",
+        "Reject extra arguments, caller-supplied paths, commands, environment",
+        "raw keys, installation tokens, the generic App runner",
+        "arbitrary API/check-posting endpoints inaccessible",
+    ):
+        assert requirement in boundary, requirement
+    operations = " ".join(text(ROOT / "docs" / "OPERATIONS.md").split())
+    assert "A proven restricted mechanical-merge route is the only automation exception" in operations
+    assert "passing an agent these variables is not that route" in operations
+    assert "Do not expose this session, its credentials or its generic App runner" in operations
+    assert "an operator-controlled session alone runs" not in operations
+
+
+def test_trusted_mechanical_merge_retains_live_gates_and_close_out():
+    boundary = operations_section("Trusted callers and mechanical merge")
+    for requirement in (
+        "canonical `merge_pr.py --expected-head`", "exact-head checks",
+        "eligible non-author approval", "every finding/thread", "accepted criteria",
+        "exclusive claim", "live touches", "dependency and base checks",
+        "refusal of configured queues or pending queue/auto-merge requests",
+        "changed or unreadable authority refuses", "Do not replace this route with GitHub auto-merge",
+        "expected head", "merge commit", "linked issue CLOSED and Project Done",
+        "`--finalize` recovery", "never submit the head again",
+    ):
+        assert requirement in boundary, requirement
+    step = operations_section("Step 8: merge the exact head")
+    assert "Apply **Trusted callers and mechanical merge** before unattended execution" in step
+    assert '--expected-head "$head_sha"' in step
+
+
+def test_external_continuation_is_owned_ready_first_and_explicitly_scoped():
+    cycle = operations_section("Bounded external continuation")
+    for requirement in (
+        "Resume actionable work owned by that actual worker first",
+        "only one exclusive active issue", "`fetch_next_work.py` for valid Ready work",
+        "`triage_backlog.py --issue <authorized-number>`",
+        "explicit authorized Backlog subset", "re-read the picker before claim",
+        "another live read, never an unrelated fallback",
+        "once per activation", "never poll inside a skill",
+        "duplicate an accepted pending review", "inaccessible merge authority and genuine idle",
+        "GitHub Issues/Project as the only lifecycle authority",
+        "do not create a scheduler, private queue, handoff file or second lifecycle store in the Kernel",
+    ):
+        assert requirement in cycle, requirement
+
+
+def test_operator_merge_evidence_does_not_claim_unattended_delivery():
+    boundary = operations_section("Trusted callers and mechanical merge")
+    assert "App **4921120**" in boundary
+    assert "interactive operator route, not unattended delivery" in boundary
+    assert "automatic merging remains unavailable until that boundary is proven" in boundary
+    assert "does not install a service, activate a Driver, change schedules or modify a ruleset" in boundary
+
+
 def driver_activation_commands(content: str) -> list[str]:
     command = re.compile(
         r"^\s*(?:\$\s*)?(?:"
