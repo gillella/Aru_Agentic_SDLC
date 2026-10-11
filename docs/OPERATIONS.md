@@ -36,6 +36,23 @@ The kernel is useful when a team wants coding agents and human developers to
 follow the same visible process without introducing another project database or
 agent-control platform.
 
+Optional, separately packaged maintained Driver source may live under `driver/`
+in this monorepo. The Kernel remains independently usable: Kernel commands,
+the six installed skills, bootstrap and governed workflows neither import nor
+install, schedule or activate that package. The Driver package would own its
+own explicit package/install entry points under `driver/`, with installation
+chosen separately by an operator. The installed monitor has no verified
+maintained source or installer at present; #794 owns the live baseline,
+provenance, installer and rollback evidence. This source allowance is not a
+rollout, and existing scheduler jobs are unchanged.
+
+A Driver may receive only the authoring and Project Board permissions needed
+to invoke bounded Kernel commands. It cannot hold reviewer or merge-authority
+credentials; another GitHub account supplies the exact-head approval and an
+operator alone invokes `merge_pr.py --expected-head`. GitHub and Git remain
+the lifecycle authority. Keep live configuration, credentials, processes,
+scheduler job definitions and receipts outside Git.
+
 ### The promise
 
 For every governed change, Aru makes the following chain observable:

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Permit optional, separately packaged Driver source under `driver/` while
+  preserving independent Kernel use, the six skills, eleven commands, seven
+  operating documents and all governed merge gates (#818). No Driver source,
+  installer, runtime, scheduler change or rollout is included.
 - A review summary raised by the PR author can now be confirmed by any non-author
   account after the fix, while findings from other reviewers still require their
   original reviewer (#787).

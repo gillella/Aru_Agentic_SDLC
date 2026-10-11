@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -30,15 +31,18 @@ def surface_budget_violations(max_file: int) -> list[str]:
     return ["file"] if max_file > FILE_LINE_BUDGET else []
 
 
-def test_hard_surface_budgets():
-    tracked = [path for path in tracked_paths() if not path.is_relative_to(ROOT / "integrations")]
-    production = [
-        path
-        for path in tracked
-        if path.suffix == ".py" and path.parent.name in {"scripts", "hooks"}
+def budgeted_python_paths(paths: list[Path]) -> list[Path]:
+    return [
+        path for path in paths
+        if path.suffix == ".py"
+        and not path.is_relative_to(ROOT / "integrations")
+        and (path.parent.name in {"scripts", "hooks", "tests"}
+             or path.is_relative_to(ROOT / "driver"))
     ]
-    tests = [path for path in tracked if path.suffix == ".py" and path.parent.name == "tests"]
-    max_file = max((lines(path) for path in production + tests), default=0)
+
+
+def test_hard_surface_budgets():
+    max_file = max((lines(path) for path in budgeted_python_paths(tracked_paths())), default=0)
     assert surface_budget_violations(max_file) == []
 
 
@@ -47,26 +51,38 @@ def test_hard_surface_budgets_deny_over_limit():
     assert surface_budget_violations(FILE_LINE_BUDGET) == []
 
 
+def test_optional_driver_python_has_the_same_file_budget(tmp_path):
+    source = tmp_path / "driver" / "src" / "monitor.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("pass\n" * FILE_LINE_BUDGET, encoding="utf-8")
+    driver_source = ROOT / "driver" / "src" / "monitor.py"
+    assert budgeted_python_paths([driver_source]) == [driver_source]
+    assert surface_budget_violations(lines(source)) == []
+    source.write_text("pass\n" * (FILE_LINE_BUDGET + 1), encoding="utf-8")
+    assert surface_budget_violations(lines(source)) == ["file"]
+
+
 def test_supported_command_and_skill_budgets():
     commands = supported_command_paths()
-    skills = [
-        path
-        for path in tracked_paths()
-        if path.name == "SKILL.md" and path.parent.parent.name == "skills"
-    ]
+    skills = installed_skill_paths(tracked_paths())
     assert 12 <= len(commands) <= 14
     assert len(skills) == 6
 
 
-def supported_command_paths() -> list[Path]:
+def installed_skill_paths(paths: list[Path]) -> list[Path]:
+    return [path for path in paths
+            if path.name == "SKILL.md" and path.parent.parent == ROOT / "skills"]
+
+
+def supported_command_paths(paths: list[Path] | None = None) -> list[Path]:
     # `verify_consumer.sh` is the governed-pr action's verifier, not an operator
     # command: it is the former `templates/verify.sh`, which this budget never
     # counted either. Moving a script into scripts/ must not read as new surface.
     internal_helpers = {"common.py", "local_verification.py", "verify_consumer.sh", "test_scope.py"}
     return [
         path
-        for path in tracked_paths()
-        if path.parent.name == "scripts"
+        for path in (tracked_paths() if paths is None else paths)
+        if path.parent == ROOT / "scripts"
         and path.name not in internal_helpers
         and path.suffix in {".py", ".sh"}
         and (
@@ -87,6 +103,12 @@ def test_library_modules_do_not_count_as_supported_commands():
     assert all(helper.exists() for helper in helpers)
     assert helpers.isdisjoint(supported_command_paths())
     assert len(supported_command_paths()) <= 14
+
+
+def test_driver_package_does_not_expand_kernel_commands_or_skills():
+    command = ROOT / "driver" / "run.py"
+    assert supported_command_paths([command]) == []
+    assert installed_skill_paths([ROOT / "driver" / "skills" / "monitor" / "SKILL.md"]) == []
 
 
 OPERATING_DOCUMENTS = {
@@ -127,6 +149,84 @@ def test_nested_docs_are_not_counted_as_operating_documents():
     assert counted_operating_documents([ROOT / "docs" / "KERNEL-CONTRACT.md"]) == {
         "docs/KERNEL-CONTRACT.md"
     }
+    assert counted_operating_documents([ROOT / "driver" / "README.md"]) == set()
+
+
+def driver_source_violations(paths: list[Path]) -> list[str]:
+    """Driver source may be tracked, but host-local state and job definitions may not."""
+    forbidden_names = {".env", ".env.production", "credentials", "credentials.json",
+                       "credentials.yaml", "jobs.json", "receipts.json",
+                       "binding.json", "coordination.lock"}
+    forbidden_suffixes = {".db", ".sqlite", ".sqlite3", ".jsonl", ".plist", ".service"}
+    return [path.relative_to(ROOT).as_posix() for path in paths
+            if path.is_relative_to(ROOT / "driver")
+            and (path.name in forbidden_names or path.suffix.lower() in forbidden_suffixes
+                 or any(part in {"receipts", "credentials", "runtime", "jobs"}
+                        for part in path.relative_to(ROOT / "driver").parts[:-1]))]
+
+
+def test_optional_driver_source_excludes_tracked_runtime_state():
+    assert driver_source_violations(tracked_paths()) == []
+    allowed = [ROOT / "driver" / "README.md", ROOT / "driver" / "pyproject.toml",
+               ROOT / "driver" / "src" / "monitor.py"]
+    assert driver_source_violations(allowed) == []
+    for relative in ("driver/.env", "driver/.env.production", "driver/credentials.json",
+                     "driver/credentials.yaml", "driver/receipts/run.json",
+                     "driver/jobs/monitor.json", "driver/monitor.plist", "driver/state.sqlite"):
+        assert driver_source_violations([ROOT / relative]) == [relative]
+
+
+def kernel_driver_reference_violations(contents: dict[str, str]) -> list[str]:
+    """No executable Kernel or installed-skill surface may load Driver source."""
+    reference = re.compile(
+        r"driver/|\b(?:import|from)\s+driver\b|[\"']driver(?:\.|[\"'])|-m\s+driver(?:\.|\b)"
+    )
+    return [path for path, source in contents.items() if reference.search(source)]
+
+
+def kernel_runtime_contents(paths: list[Path]) -> dict[str, str]:
+    runtime = [path for path in paths if path.is_relative_to(ROOT / "scripts")
+               or path.is_relative_to(ROOT / "hooks")
+               or path.is_relative_to(ROOT / "skills")
+               or path.is_relative_to(ROOT / "templates")
+               or path.is_relative_to(ROOT / ".github" / "workflows")
+               or path.is_relative_to(ROOT / ".github" / "actions")
+               or path == ROOT / "Makefile"]
+    return {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
+            for path in runtime if path.is_file() and (
+                path.name == "Makefile"
+                or path.suffix in {".py", ".sh", ".md", ".yml", ".yaml", ".toml"})}
+
+
+def test_kernel_execution_and_installed_skills_do_not_load_driver():
+    contents = kernel_runtime_contents(tracked_paths())
+    assert kernel_driver_reference_violations(contents) == []
+    for path, source in (("scripts/fetch_next_work.py", "import driver"),
+                         ("scripts/fetch_next_work.py", 'importlib.import_module("driver.monitor")'),
+                         ("scripts/fetch_next_work.py", "import_module('driver.monitor')"),
+                         ("scripts/fetch_next_work.py", '__import__("driver")'),
+                         ("scripts/init_project.py", "install driver/"),
+                         ("scripts/install_agent_integration.sh", "driver/activate.sh"),
+                         ("skills/implement-next-issue/SKILL.md", "run driver/monitor.py"),
+                         (".github/workflows/governed-pr.yml", "python3 driver/monitor.py"),
+                         (".github/workflows/governed-pr.yml", "run: python3 -m driver.monitor")):
+        assert kernel_driver_reference_violations({path: source}) == [path]
+    assert kernel_driver_reference_violations({
+        "scripts/example.py": 'importlib.import_module("policy")',
+        "skills/example/SKILL.md": "An external Driver decides when to invoke the Kernel.",
+    }) == []
+
+
+def test_makefile_content_is_scanned_for_driver_activation(tmp_path, monkeypatch):
+    monkeypatch.setitem(kernel_runtime_contents.__globals__, "ROOT", tmp_path)
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("verify:\n\tpython3 -m pytest tests/\n", encoding="utf-8")
+    contents = kernel_runtime_contents([makefile])
+    assert contents == {"Makefile": makefile.read_text(encoding="utf-8")}
+    assert kernel_driver_reference_violations(contents) == []
+    for command in ("python3 driver/monitor.py", "python3 -m driver.monitor"):
+        makefile.write_text(f"verify:\n\t{command}\n", encoding="utf-8")
+        assert kernel_driver_reference_violations(kernel_runtime_contents([makefile])) == ["Makefile"]
 
 
 def test_decision_records_are_not_operating_documents():
