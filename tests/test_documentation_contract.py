@@ -111,7 +111,9 @@ def test_optional_driver_source_boundary_is_documented_without_rollout_claims():
 
 def operations_section(heading: str) -> str:
     content = text(ROOT / "docs" / "OPERATIONS.md")
-    return " ".join(content.split(f"### {heading}\n", 1)[1].split("\n### ", 1)[0].split())
+    marker = f"### {heading}\n"
+    assert marker in content, f"missing OPERATIONS.md section: {heading}"
+    return " ".join(content.split(marker, 1)[1].split("\n### ", 1)[0].split())
 
 
 def test_trusted_merge_request_keeps_authority_outside_coding_and_ci():
@@ -155,6 +157,9 @@ def test_external_continuation_is_owned_ready_first_and_explicitly_scoped():
     for requirement in (
         "Resume actionable work owned by that actual worker first",
         "only one exclusive active issue", "`fetch_next_work.py` for valid Ready work",
+        "repository-wide candidates and has no scope flag",
+        "restrict the live Ready candidate set", "canonical validation and ordering",
+        "reject any out-of-scope result before claim", "report a scope block",
         "`triage_backlog.py --issue <authorized-number>`",
         "explicit authorized Backlog subset", "re-read the picker before claim",
         "another live read, never an unrelated fallback",

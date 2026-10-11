@@ -449,7 +449,11 @@ The external Driver owns when to invoke one bounded command, not lifecycle state
 On each activation, refresh GitHub Issues/Project, Git, head/check/review evidence
 and authority availability. Resume actionable work owned by that actual worker
 first; one worker may hold only one exclusive active issue. Otherwise use
-`fetch_next_work.py` for valid Ready work inside the owner's authorized scope.
+`fetch_next_work.py` for valid Ready work. It reports repository-wide candidates
+and has no scope flag. The Driver must restrict the live Ready candidate set to
+the owner's authorized subset before applying canonical validation and ordering,
+and reject any out-of-scope result before claim. If safe scoped selection is
+unavailable, report a scope block rather than claim unrelated work.
 If none is executable, run `triage_backlog.py --issue <authorized-number>` only
 for an explicit authorized Backlog subset, then re-read the picker before claim.
 Promotion/claim conflicts require another live read, never an unrelated fallback.
