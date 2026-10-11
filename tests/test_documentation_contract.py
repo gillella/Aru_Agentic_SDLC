@@ -224,6 +224,33 @@ def test_import_chain_proof_is_limited_to_hashed_files_and_operator_audit():
     assert "runtime import-chain proof remains unresolved" in integration
 
 
+def test_human_enablement_is_config_bound_and_not_lifecycle_authority():
+    boundary = operations_section("Trusted callers and mechanical merge")
+    contract = " ".join(text(ROOT / "docs/KERNEL-CONTRACT.md").split())
+    integration = " ".join(text(ROOT / "integrations/merge-authority/README.md").split())
+    for requirement in ("submissions disabled", "root-owned", "installed configuration",
+                        "before authority use", "host configuration, not lifecycle",
+                        "human acceptance", "`--check`"):
+        assert requirement in boundary, requirement
+    for requirement in ("submissions disabled", "check-only evaluation available", "root-owned marker",
+                        "denials, eligible preflight", "not lifecycle state or canonical gate evidence"):
+        assert requirement in contract, requirement
+    for requirement in ("installer never creates `enabled.json`", "separate human enablement",
+                        "os.O_EXCL | os.O_NOFOLLOW", "config_sha256", "Existing markers are never overwritten",
+                        "Rollback first removes", "keeping `--check` available", "already admitted/in-flight"):
+        assert requirement in integration, requirement
+
+
+def test_signal_documentation_describes_unwind_masking_and_pending_delivery_limits():
+    integration = " ".join(text(ROOT / "integrations/merge-authority/README.md").split())
+    for requirement in ("pthread_sigmask(SIG_BLOCK)", "reentrant Python handler delivery returns",
+                        "blocked through unwind", "Ordinary exceptions also enter compensation",
+                        "Original handlers are restored while blocked", "original mask is restored",
+                        "pending signals", "SIGKILL/SIGSTOP", "host loss and transport outages",
+                        "non-atomic authorization/submission boundary"):
+        assert requirement in integration, requirement
+
+
 def test_adapter_documents_compensation_and_its_honest_limit():
     integration = " ".join(text(ROOT / "integrations/merge-authority/README.md").split())
     for requirement in (

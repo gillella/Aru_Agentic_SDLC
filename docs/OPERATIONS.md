@@ -466,6 +466,17 @@ continuation calls that request after acceptance and review; there is no Kernel
 scheduler, queue or pending-work file. Installation, private credential setup,
 positive preflight and negative host proofs remain operator actions. A source
 package or passing offline tests never establishes installed authority.
+Installation leaves submissions disabled while `--check` remains available.
+Every non-check request requires a separately human-created, root-owned
+`enabled.json` marker bound to the exact installed configuration bytes; absent,
+malformed, mutable or mismatched evidence refuses before authority use.
+Only after access/import audits, real denials, eligible preflight and explicit
+human acceptance does the operator enable that configuration as described in
+the integration guide. This marker is fixed host configuration, not lifecycle
+state, and supplies no canonical gate evidence. Rollback first removes the
+marker to disable new submissions while retaining `--check`, then removes the
+narrow sudo rule if all requests must stop. Removal cannot undo a request
+already admitted; refresh GitHub for any in-flight submission and close-out.
 
 ### Bounded external continuation
 

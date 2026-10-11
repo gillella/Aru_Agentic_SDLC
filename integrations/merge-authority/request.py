@@ -197,6 +197,22 @@ def verify_installation(config: dict) -> None:
             raise Refusal("private-directory-access")
 
 
+def verify_enablement(config_bytes: bytes) -> None:
+    """A human's protected host switch, bound to this exact installed config.
+
+    It supplies no issue, review or merge evidence. The canonical helper still
+    rereads every live gate. Installation never creates this marker.
+    """
+    try:
+        marker = json.loads(protected_bytes(ROOT / "enabled.json", {0}))
+        if (not isinstance(marker, dict) or set(marker) != {"version", "config_sha256"}
+                or type(marker["version"]) is not int or marker["version"] != 1
+                or marker["config_sha256"] != hashlib.sha256(config_bytes).hexdigest()):
+            raise Refusal("submissions-disabled")
+    except (OSError, ValueError, Refusal):
+        raise Refusal("submissions-disabled") from None
+
+
 def execution_lock(uid: int) -> int:
     """Reject overlapping submissions immediately; no queue or lifecycle store."""
     fd = os.open(ROOT / "runtime" / "request.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -322,10 +338,8 @@ def public_failure(exc: Exception, kernel=None) -> str:
         return "kernel-refused"
     return "authority-unavailable"
 
-def cancel_pending(original_post, head, previous_signals, scope_error):
-    # Defer catchable signals while attempting the same-head cancellation.
-    for number in previous_signals:
-        signal.signal(number, signal.SIG_IGN)
+def cancel_pending(original_post, head, scope_error):
+    # cancellation_guard blocks the complete signal set before reaching here.
     try:
         original_post(head, "failure", "Restricted request failed; re-run merge_pr.py")
     except Exception:
@@ -343,8 +357,18 @@ def cancellation_guard(kernel, head: str, scope_error):
     original_post = kernel.merge_authority.post
     authorization_pending = False
     previous_signals = {}
+    signals = catchable_signals()
+    interrupted_once = False
+    cleaning = False
 
     def interrupted(_number, _frame):
+        nonlocal interrupted_once
+        # Another Python handler may already be queued when SIG_BLOCK takes
+        # effect. It must return, even if dispatched reentrantly inside that call.
+        if interrupted_once or cleaning:
+            return
+        interrupted_once = True
+        signal.pthread_sigmask(signal.SIG_BLOCK, signals)
         raise scope_error("request-interrupted")
 
     def scoped_post(post_head, conclusion, summary):
@@ -364,21 +388,37 @@ def cancellation_guard(kernel, head: str, scope_error):
         nonlocal authorization_pending
         authorization_pending = False
 
+    # Install and restore handlers under one mask, never a sequential SIG_IGN
+    # window. Save the caller's mask once; the first interruption only adds blocks.
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
     try:
-        kernel.merge_authority.post = scoped_post
-        for number in sorted(catchable_signals()):
-            previous_signals[number] = signal.signal(number, interrupted)
-        yield merge_confirmed
-    except BaseException:
-        if authorization_pending:
-            # The helper cancels KernelError in its submission block. This also
-            # covers its post/try gap. Defer catchable signals during cancellation.
-            cancel_pending(original_post, head, previous_signals, scope_error)
-        raise
+        try:
+            kernel.merge_authority.post = scoped_post
+            for number in sorted(signals):
+                previous_signals[number] = signal.signal(number, interrupted)
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+            yield merge_confirmed
+        finally:
+            # If the FIRST signal interrupts this assignment itself, its handler
+            # has set interrupted_once and blocked delivery. The outer finally
+            # still runs, so compensation cannot be skipped at cleanup entry.
+            cleaning = True
     finally:
-        kernel.merge_authority.post = original_post
-        for number, handler in previous_signals.items():
-            signal.signal(number, handler)
+        # Also cover ordinary exceptions: a signal dispatched while entering
+        # cleanup cannot raise out of the compensation path. After this flag,
+        # queued Python handlers return; OS delivery is blocked as a single set.
+        signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+        try:
+            if authorization_pending:
+                cancel_pending(original_post, head, scope_error)
+        finally:
+            kernel.merge_authority.post = original_post
+            try:
+                for number, handler in previous_signals.items():
+                    signal.signal(number, handler)
+            finally:
+                # Pending signals now use the originals, after compensation.
+                signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
 
 
@@ -451,8 +491,11 @@ def main(argv: list[str]) -> int:
         if sys.platform != "darwin" or Path(__file__).absolute() != ROOT / "request.py":
             raise Refusal("not-installed")
         verify_resource_limits()
-        config = validate_config(json.loads(protected_bytes(ROOT / "config.json", {0})))
+        config_bytes = protected_bytes(ROOT / "config.json", {0})
+        config = validate_config(json.loads(config_bytes))
         verify_installation(config)
+        if not check:
+            verify_enablement(config_bytes)
         lock = execution_lock(config["principal_uid"])
         os.environ.clear()
         os.environ.update(authority_environment(config))

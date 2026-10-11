@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import signal
+import stat
 import sys
 import zipfile
 from types import SimpleNamespace
 
 import pytest
 
-from test_trusted_merge import HEAD, ROOT, bundle, installer, kernel, request
+from test_trusted_merge import HEAD, ROOT, bundle, config_fixture, installer, kernel, request
 
 
 @pytest.mark.parametrize("failure", ["ci", "feedback", "approval", "queue", "auto", "criteria",
@@ -118,6 +120,179 @@ def test_keyboard_interrupt_after_post_is_also_canceled(monkeypatch):
         request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
     assert posts == [(HEAD, "success"), (HEAD, "failure")]
     assert helper.merge_authority.post is post
+
+
+@pytest.mark.parametrize("stage", ["post", "before-submit", "ordinary-error", "ordinary-unwind"])
+def test_second_signal_during_unwind_and_compensation_cannot_skip_cancellation(monkeypatch, stage):
+    import merge_pr
+    from test_merge_gate import install_happy_gate
+
+    record = install_happy_gate(monkeypatch)
+    record.update(number=825, body="Closes #821", reviewDecision="APPROVED")
+    signals = request.catchable_signals()
+    old_handlers = {number: signal.getsignal(number) for number in signals}
+    old_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGWINCH})
+    delivered, posts, reads = [], [], []
+    signal.signal(signal.SIGUSR1, lambda number, _frame: delivered.append(number))
+    signal.signal(signal.SIGUSR2, lambda number, _frame: delivered.append(number))
+    handlers = {number: signal.getsignal(number) for number in signals}
+    mask = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+
+    def interrupted_operation():
+        try:
+            os.kill(os.getpid(), signal.SIGUSR1)
+            pytest.fail("first interruption returned")
+        finally:
+            # A second OS signal arrives while the original exception unwinds.
+            os.kill(os.getpid(), signal.SIGUSR2)
+
+    def pull(_number):
+        reads.append(True)
+        if stage == "before-submit" and len(reads) == 5:
+            interrupted_operation()
+        if stage == "ordinary-unwind" and len(reads) == 5:
+            raise OSError("ordinary metadata exception")
+        return record
+
+    def post(head, conclusion, _summary):
+        posts.append((head, conclusion))
+        if conclusion == "success":
+            if stage == "post":
+                interrupted_operation()
+            if stage == "ordinary-error":
+                raise RuntimeError("ordinary adapter exception")
+        else:
+            assert signals <= signal.pthread_sigmask(signal.SIG_BLOCK, set())
+            os.kill(os.getpid(), signal.SIGUSR1)
+            os.kill(os.getpid(), signal.SIGUSR2)
+        return len(posts)
+
+    monkeypatch.setattr(merge_pr, "pull_request", pull)
+    monkeypatch.setattr(merge_pr, "issue_gate", lambda numbers, *_a, **_k: [{"issue": numbers[0], "criteria": 1}])
+    monkeypatch.setattr(merge_pr.merge_authority, "post", post)
+    monkeypatch.setattr(merge_pr, "run", lambda *_a, **_k: pytest.fail("submitted after interruption"))
+    monkeypatch.setattr(merge_pr, "close_out", lambda *_a, **_k: pytest.fail("closed after interruption"))
+    try:
+        gate = {"ordinary-error": "authority-unavailable", "ordinary-unwind": "ordinary metadata exception"}.get(stage, "request-interrupted")
+        with pytest.raises(OSError if stage == "ordinary-unwind" else request.Refusal, match=gate):
+            request.execute_request(merge_pr, {"issues": [821]}, 825, HEAD, False)
+        assert posts == [(HEAD, "success"), (HEAD, "failure")]
+        assert merge_pr.pull_request is pull and merge_pr.merge_authority.post is post
+        assert all(signal.getsignal(number) is handler for number, handler in handlers.items())
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == mask
+        # Pending signals reach the original handlers only after compensation.
+        assert signal.SIGUSR1 in delivered and signal.SIGUSR2 in delivered
+    finally:
+        for number, handler in old_handlers.items():
+            signal.signal(number, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, old_mask)
+
+
+def test_reentrant_python_delivery_while_first_signal_blocks_does_not_raise_twice(monkeypatch):
+    helper = kernel()
+    posts, reentered = [], []
+    original_mask = signal.pthread_sigmask
+    before = original_mask(signal.SIG_BLOCK, set())
+    handlers = {number: signal.getsignal(number) for number in request.catchable_signals()}
+
+    def mask(how, numbers):
+        # Python may already have queued another handler before SIG_BLOCK takes
+        # effect. Simulate its dispatch inside the first handler's mask call.
+        if how == signal.SIG_BLOCK and posts == [(HEAD, "success")] and not reentered:
+            reentered.append(True)
+            signal.getsignal(signal.SIGUSR2)(signal.SIGUSR2, None)
+        return original_mask(how, numbers)
+
+    def post(head, conclusion, _summary):
+        posts.append((head, conclusion))
+        if conclusion == "success":
+            signal.getsignal(signal.SIGUSR1)(signal.SIGUSR1, None)
+        return 1
+
+    monkeypatch.setattr(signal, "pthread_sigmask", mask)
+    helper.merge_authority.post = post
+    helper.merge = lambda *_a, **_k: helper.merge_authority.post(HEAD, "success", "valid")
+    with pytest.raises(request.Refusal, match="request-interrupted"):
+        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+    assert reentered == [True] and posts == [(HEAD, "success"), (HEAD, "failure")]
+    assert original_mask(signal.SIG_BLOCK, set()) == before
+    assert all(signal.getsignal(number) is handler for number, handler in handlers.items())
+
+
+def test_signal_at_ordinary_exception_cleanup_entry_and_failed_compensation_restores_state(monkeypatch):
+    helper = kernel()
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    handlers = {number: signal.getsignal(number) for number in request.catchable_signals()}
+    original_mask = signal.pthread_sigmask
+    posts, cleanup_delivery = [], []
+
+    def mask(how, numbers):
+        if how == signal.SIG_BLOCK and posts == ["success"] and not cleanup_delivery:
+            cleanup_delivery.append(True)
+            signal.getsignal(signal.SIGUSR1)(signal.SIGUSR1, None)
+        return original_mask(how, numbers)
+
+    def post(_head, conclusion, _summary):
+        posts.append(conclusion)
+        if conclusion == "failure":
+            assert request.catchable_signals() <= original_mask(signal.SIG_BLOCK, set())
+            raise OSError("transport unavailable")
+
+    def merge(*_a, **_k):
+        helper.merge_authority.post(HEAD, "success", "valid")
+        raise ValueError("ordinary helper exception")
+
+    helper.merge_authority.post, helper.merge = post, merge
+    monkeypatch.setattr(signal, "pthread_sigmask", mask)
+    with pytest.raises(request.Refusal, match="authorization-revocation-unavailable"):
+        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+    assert cleanup_delivery == [True] and posts == ["success", "failure"]
+    assert helper.merge_authority.post is post
+    assert original_mask(signal.SIG_BLOCK, set()) == before
+    assert all(signal.getsignal(number) is handler for number, handler in handlers.items())
+
+
+def test_first_signal_before_cleanup_flag_cannot_escape_compensation():
+    helper = kernel()
+    posts = []
+    before = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    handlers = {number: signal.getsignal(number) for number in request.catchable_signals()}
+    guard = request.cancellation_guard.__wrapped__
+    source, first_line = inspect.getsourcelines(guard)
+    cleanup_line = first_line + next(i for i, line in enumerate(source) if line.strip() == "cleaning = True")
+    interrupted = []
+    old_trace = sys.gettrace()
+
+    def trace(frame, event, _arg):
+        if frame.f_code is guard.__code__ and event == "line" and frame.f_lineno == cleanup_line and not interrupted:
+            interrupted.append(True)
+            # Dispatch just before the first cleanup flag assignment, rather
+            # than after it inside pthread_sigmask as the other regression does.
+            signal.getsignal(signal.SIGUSR1)(signal.SIGUSR1, None)
+        return trace
+
+    def post(head, conclusion, _summary):
+        posts.append((head, conclusion))
+
+    def merge(*_a, **_k):
+        helper.merge_authority.post(HEAD, "success", "valid")
+        raise ValueError("ordinary helper exception")
+
+    helper.merge_authority.post, helper.merge = post, merge
+    try:
+        sys.settrace(trace)
+        with pytest.raises(request.Refusal, match="request-interrupted"):
+            request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+        sys.settrace(old_trace)
+        assert posts == [(HEAD, "success"), (HEAD, "failure")]
+        assert helper.merge_authority.post is post
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, set()) == before
+        assert all(signal.getsignal(number) is handler for number, handler in handlers.items())
+    finally:
+        sys.settrace(old_trace)
+        for number, handler in handlers.items():
+            signal.signal(number, handler)
+        signal.pthread_sigmask(signal.SIG_SETMASK, before)
 
 
 @pytest.mark.parametrize("edited", ["2026-10-11T03:00:00Z", "2026-10-11T03:00:01Z", "invalid"])
@@ -280,3 +455,106 @@ def test_private_adapter_failure_has_authority_label_and_attempts_revocation():
         with request.cancellation_guard(helper, HEAD, request.scope_refusal(helper)):
             helper.merge_authority.post(HEAD, "success", "valid")
     assert posts == ["success", "failure"]
+
+
+@pytest.mark.parametrize("evidence", ["absent", "malformed", "array", "version", "extra",
+                                      "digest", "mismatched", "mutable", "parent", "owner", "symlink", "valid"])
+def test_noncheck_requires_protected_config_bound_enablement_before_authority(tmp_path, monkeypatch, capsys, evidence):
+    root = tmp_path / "installed"
+    root.mkdir(mode=0o755)
+    (root / "runtime").mkdir(mode=0o700)
+    monkeypatch.setattr(request, "ROOT", root)
+    monkeypatch.setattr(request, "__file__", str(root / "request.py"))
+    monkeypatch.setattr(request.sys, "platform", "darwin")
+    monkeypatch.setattr(request.sys, "path", list(request.sys.path))
+    config = config_fixture()
+    config["principal_uid"] = os.getuid()
+    raw = json.dumps(config, sort_keys=True).encode()
+    (root / "config.json").write_bytes(raw)
+    marker = root / "enabled.json"
+    enabled = {"version": 1, "config_sha256": hashlib.sha256(raw).hexdigest()}
+    if evidence == "version":
+        enabled["version"] = True
+    elif evidence == "extra":
+        enabled["accepted_issue"] = 821
+    elif evidence == "digest":
+        enabled["config_sha256"] = "not-a-digest"
+    elif evidence == "mismatched":
+        # Same allowlist but a changed installed App/CLI/helper configuration.
+        enabled["config_sha256"] = hashlib.sha256(raw + b"\n").hexdigest()
+    if evidence != "absent":
+        marker.write_bytes(b"not-json" if evidence == "malformed" else b"[]" if evidence == "array"
+                           else json.dumps(enabled).encode())
+        marker.chmod(0o666 if evidence == "mutable" else 0o644)
+    if evidence == "symlink":
+        target = root / "other.json"
+        marker.rename(target)
+        marker.symlink_to(target)
+    original_lstat, original_fstat = request.Path.lstat, os.fstat
+
+    def metadata(path):
+        info = original_lstat(path)
+        mode = stat.S_IFDIR | 0o755 if stat.S_ISDIR(info.st_mode) else info.st_mode
+        if path == root and evidence == "parent":
+            mode = stat.S_IFDIR | 0o777
+        return SimpleNamespace(st_uid=0, st_mode=mode)
+
+    def file_metadata(fd):
+        info = original_fstat(fd)
+        if info.st_mode & 0o777 == 0o600:
+            return info  # The real ephemeral lock remains owned by the test user.
+        return SimpleNamespace(st_uid=os.getuid() if evidence == "owner" and info.st_ino == marker.stat().st_ino else 0,
+                               st_mode=info.st_mode, st_nlink=info.st_nlink)
+
+    monkeypatch.setattr(request.Path, "lstat", metadata)
+    monkeypatch.setattr(request.os, "fstat", file_metadata)
+    # Config loading is independent of marker ancestor denials in this fixture.
+    original_bytes = request.protected_bytes
+    monkeypatch.setattr(request, "protected_bytes", lambda path, owners, **kwargs:
+                        raw if path == root / "config.json" else original_bytes(path, owners, **kwargs))
+    monkeypatch.setattr(request, "verify_resource_limits", lambda: None)
+    monkeypatch.setattr(request, "verify_installation", lambda _c: None)
+    helper = kernel()
+    monkeypatch.setitem(sys.modules, "merge_pr", helper)
+    authority = []
+    monkeypatch.setattr(request, "authority_environment", lambda _c: authority.append("environment") or {})
+    monkeypatch.setattr(request.os, "environ", {})
+    monkeypatch.setattr(request.os, "chdir", lambda _p: None)
+    args = ["--pr", "825", "--expected-head", HEAD]
+    if evidence == "valid":
+        assert request.main(args) == 0
+        assert helper.calls == [("merge", 825, HEAD, False)]
+        assert authority == ["environment"]
+    else:
+        assert request.main(args) == 2
+        assert json.loads(capsys.readouterr().out)["gate"] == "submissions-disabled"
+        assert not authority and not helper.calls
+        assert not (root / "runtime/request.lock").exists()
+    # Check-only remains available regardless of enablement evidence.
+    helper.calls.clear()
+    assert request.main([*args, "--check"]) == 0
+    assert helper.calls == [("merge", 825, HEAD, True)]
+
+
+def test_installer_publishes_only_disabled_request_routing(tmp_path, monkeypatch):
+    from test_trusted_merge import package_fixture, principal_account
+
+    root, policy = tmp_path / "installed", tmp_path / "sudoers"
+    python = tmp_path / "python"
+    python.write_bytes(b"reviewed-interpreter")
+    monkeypatch.setattr(installer, "ROOT", root)
+    monkeypatch.setattr(installer, "POLICY", policy)
+    monkeypatch.setattr(installer, "root_chain", lambda _p: None)
+    monkeypatch.setattr(installer, "system_interpreter", lambda: python)
+    monkeypatch.setattr(installer.os, "fchown", lambda *_a: None)
+    monkeypatch.setattr(installer, "install_credentials", lambda *_a: None)
+    validated = []
+    monkeypatch.setattr(installer.subprocess, "run", lambda argv, **_k: validated.append(argv))
+    manifest, payload = installer.unpack(package_fixture(monkeypatch))
+    installer.install_payload(manifest, payload, "gillella", principal_account(), 123, b"fixture-only")
+    config = json.loads((root / "config.json").read_bytes())
+    assert config["repository"] == "gillella/Aru_Agentic_SDLC"
+    assert config["issues"] == [821, 822, 792]
+    assert policy.is_file() and validated == [["/usr/sbin/visudo", "-cf", str(policy.with_name(".aru-trusted-merge-candidate"))]]
+    assert not (root / "enabled.json").exists()
+    assert "--check" not in policy.read_text()  # Both shapes route; request enforces enablement.

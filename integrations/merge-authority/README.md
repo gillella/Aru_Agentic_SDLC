@@ -15,7 +15,14 @@ sudo -n -u aru-merge /usr/bin/python3 -I \
   --pr <number> --expected-head <full-current-SHA>
 ```
 
-Add a final `--check` for canonical read-only gate evaluation. Arguments cannot
+Installation leaves submissions disabled. Add a final `--check` for canonical
+read-only gate evaluation, available while disabled. Every non-check request
+requires the human-created root-owned `enabled.json` marker bound to the exact
+installed `config.json` bytes. Missing, malformed, mutable, linked or mismatched
+evidence refuses with `submissions-disabled` before authority use, helper import
+or lock creation. The marker is fixed host configuration, not lifecycle state,
+and never supplies acceptance, claim, check, review or close-out evidence.
+Arguments cannot
 select a repository, issue, interpreter, path, environment, endpoint, decision or
 helper. Sudo's argument wildcard is only routing; the program validates exact
 argument count, order and grammar before reading configuration or accessing
@@ -90,13 +97,19 @@ not claim a narrower diagnosis: refresh GitHub to distinguish those outcomes.
 Neither label grants permission to retry or use another merge route.
 
 The request handles every catchable default-terminating/stopping signal on
-the installed OS, including quit, user, alarm and job-control signals, restoring
-previous handlers afterward. It tracks attempted success before the adapter call,
-so interruption even in the canonical post/try gap attempts a same-head failure.
-Further catchable signals are deferred during that cancellation; canonical
-revocation is not duplicated after a confirmed failure. Offline regressions
-exercise the real pinned helper and installed handlers, not a live host signal
-relay. Uncatchable SIGKILL/SIGSTOP, native faults, host loss and transport outages
+the installed OS, including quit, user, alarm and job-control signals. The first
+interruption uses `pthread_sigmask(SIG_BLOCK)` to block the entire catchable set
+before raising; reentrant Python handler delivery returns without raising again.
+The set stays blocked through unwind and same-head failure compensation. Ordinary
+exceptions also enter compensation with the full set blocked and queued Python
+handlers unable to raise out of cleanup. It tracks attempted success before the
+adapter call, so interruption even in the canonical post/try gap attempts a
+same-head failure. Canonical revocation is not duplicated after a confirmed
+failure. Original handlers are restored while blocked, then the original mask
+is restored; pending signals can invoke those original handlers afterward.
+Offline regressions exercise second OS signals during unwind and compensation,
+reentrant delivery and the real pinned helper, not a live host signal relay.
+Uncatchable SIGKILL/SIGSTOP, native faults, host loss and transport outages
 cannot guarantee cancellation;
 the existing non-atomic authorization/submission boundary still applies. The
 sudo policy pins all supported CPU, file-size, memory, stack, descriptor and
@@ -184,6 +197,9 @@ publishing the narrowly scoped `NOPASSWD: NOSETENV` entry. File ownership
 and permissions are set through the open descriptor, and credential parents
 stay root-owned until the key is staged, so path replacement cannot redirect
 root ownership changes.
+The installer never creates `enabled.json`: publishing sudo routing permits
+`--check` but leaves every real submission mechanically disabled. Human host
+proof and enablement below are separate from installation approval.
 
 Before reading the PEM or writing any file or policy, the installer reads the
 live `aru-merge` account and refuses unless its shell is exactly `/usr/bin/false`.
@@ -265,11 +281,61 @@ review and denials in the GitHub issue. Do not mark criteria from an installer
 exit code alone. If effective sudo policy, CLI/Project authorization, App token
 scope or immutable dependencies are unproven, automatic merge stays unavailable.
 Once proven and accepted, the existing external continuation invokes the bounded
-request without a per-PR human click. Verify one actual unattended governed merge
+request without a per-PR human click **only after separate human enablement**.
+Verify one actual unattended governed merge
 and GitHub/issue/Project close-out before calling the release delivered.
+
+## Human enablement and rollback
+
+After the access/import audits, real denials, authentication and eligible
+current-head `--check` are recorded, and the human explicitly accepts the
+expanded live issue criteria and this exact installed configuration, the human
+operator creates the marker from a root Terminal. This is a one-time host switch,
+not a per-PR approval or lifecycle receipt. Do not enable from a coding/CI agent,
+shared operator TTY or cached sudo authority. The narrow request sudo rule does
+not authorize this command. Inspect the displayed repository, issue allowlist
+and configuration digest against the accepted installation before typing ENABLE:
+
+```sh
+sudo /usr/bin/python3 -I -c '
+import hashlib, json, os, stat, sys
+from pathlib import Path
+if os.geteuid() != 0 or not sys.stdin.isatty():
+    raise SystemExit("Human root Terminal required")
+root = Path("/private/var/db/aru-trusted-merge")
+config = root / "config.json"
+for path in [*reversed(config.parents), config]:
+    info = path.lstat()
+    expected = stat.S_ISREG if path == config else stat.S_ISDIR
+    if info.st_uid != 0 or info.st_mode & 0o022 or not expected(info.st_mode):
+        raise SystemExit("Unprotected configuration")
+raw = config.read_bytes()
+value = json.loads(raw)
+digest = hashlib.sha256(raw).hexdigest()
+print("Repository:", value["repository"], "Issues:", value["issues"], "Config SHA256:", digest)
+if input("Audits, denials, preflight and explicit acceptance complete? Type ENABLE: ") != "ENABLE":
+    raise SystemExit("Not enabled")
+fd = os.open(root / "enabled.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+with os.fdopen(fd, "w") as stream:
+    os.fchmod(stream.fileno(), 0o644)
+    os.fchown(stream.fileno(), 0, 0)
+    json.dump({"version": 1, "config_sha256": digest}, stream, sort_keys=True)
+'
+```
+
+No credential is read by this enablement step. Existing markers are never
+overwritten. Any change to installed configuration invalidates the binding and
+requires renewed proof and human acceptance; enabled requests still verify the
+protected payload and every live canonical gate. Record the nonsecret enablement
+outcome in the issue; GitHub remains the sole lifecycle authority.
+
+Rollback first removes `/private/var/db/aru-trusted-merge/enabled.json` from the
+operator context, disabling new submissions while keeping `--check` available.
+Then remove only the installed narrow sudo rule to disable future requests
+entirely; retain credentials and installation files for deliberate operator
+cleanup. An already admitted/in-flight request is not undone by marker removal;
+coordinate with the caller and check GitHub for submission/close-out evidence.
 
 The computer must remain on and the external caller must actually run. A sleeping
 human is compatible with this route; a sleeping/offline host cannot progress.
-This package changes no power settings or scheduled jobs. Operator rollback
-first removes only the installed narrow sudo rule, disabling future requests;
-credentials and installation files are retained for deliberate operator cleanup.
+This package changes no power settings or scheduled jobs.

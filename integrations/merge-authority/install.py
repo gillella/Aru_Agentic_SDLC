@@ -174,7 +174,8 @@ def install_payload(manifest: dict, payload: dict[str, bytes], caller: str, prin
         write_file(ROOT / "config.json", json.dumps(config, sort_keys=True).encode(), 0o644)
         write_file(staging, policy, 0o440)
         subprocess.run(["/usr/sbin/visudo", "-cf", str(staging)], check=True, capture_output=True)
-        # Install the capability only after validating every public payload hash.
+        # Publish routing only after validating every public payload hash. Real
+        # submissions stay disabled: no enabled.json is created by installation.
         for name, digest in config["files"].items():
             root_chain(ROOT / name)
             if hashlib.sha256((ROOT / name).read_bytes()).hexdigest() != digest:
@@ -222,7 +223,9 @@ def main() -> None:
     # an agent; no credential material is printed or included in the package.
     key = private_key(Path(input("Private local merge-App PEM path: ").strip()))
     install_payload(manifest, payload, caller, principal, int(number), key)
-    print("Installed bounded request. Configure the protected gh login and prove preflight/denials before use.")
+    print("Installed bounded request with submissions DISABLED; --check remains available.")
+    print("After host audits, denials, eligible preflight and explicit human acceptance,")
+    print("the operator separately creates the protected config-bound enabled.json marker.")
 
 
 if __name__ == "__main__":

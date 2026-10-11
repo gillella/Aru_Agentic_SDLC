@@ -47,7 +47,14 @@ execution remain outside the Driver. Only a proven, operator-installed
 protected entry point scoped to an approved repository and issue set may accept
 a Driver's PR and expected-head request; a separate operator-controlled
 principal then executes the canonical helper with every gate. It exposes no
-generic endpoint and never runs PR code. An unproven entry point refuses and
+generic endpoint and never runs PR code. The optional restricted integration
+installs with submissions disabled and check-only evaluation available. A human
+operator enables it only after host audits, denials, eligible preflight and
+explicit acceptance, using a protected root-owned marker bound to the exact
+installed configuration. Missing, malformed, mutable or mismatched enablement
+refuses before authority use. The marker is fixed host configuration, not
+lifecycle state or canonical gate evidence; removing it disables new submissions
+but cannot undo an already admitted request. An unproven entry point refuses and
 leaves the operator route as the only merge path. Live configuration,
 credentials, processes, scheduler job definitions,
 and operational receipts stay outside Git. Existing scheduler jobs are not
