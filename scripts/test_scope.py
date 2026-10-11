@@ -122,6 +122,34 @@ def ordinary(path: str, roots: tuple[str, ...]) -> bool:
     )
 
 
+def dynamic_imports(tree: ast.AST) -> set[str]:
+    """Resolve named and imported-alias loaders, or refuse unknown targets."""
+    imports: set[str] = set()
+    dynamic_names = {name: name for name in (
+        "__import__", "import_module", "run_path", "spec_from_file_location",
+    )}
+    # Imported aliases still name dynamic loaders. A runtime target through
+    # an alias cannot establish a complete caller map for focused testing.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name in dynamic_names:
+                    dynamic_names[alias.asname or alias.name] = alias.name
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            name = node.func.id if isinstance(node.func, ast.Name) else (
+                node.func.attr if isinstance(node.func, ast.Attribute) else ""
+            )
+            loader = dynamic_names.get(name)
+            if loader:
+                if (not node.args or not isinstance(node.args[0], ast.Constant)
+                        or not isinstance(node.args[0].value, str) or not node.args[0].value):
+                    raise ValueError("dynamic dependency target cannot be determined")
+                if loader in {"__import__", "import_module"}:
+                    imports.add(str(node.args[0].value))
+    return imports
+
+
 def python_graph(root: Path) -> tuple[dict[str, set[str]], set[str]]:
     # Inventory source trees without importing or depending on any optional adapter.
     # Hidden runtime/environment/worktree directories are never repository source.
@@ -140,16 +168,8 @@ def python_graph(root: Path) -> tuple[dict[str, set[str]], set[str]]:
         imports = set()
         references = {node.value for node in ast.walk(tree)
                       if isinstance(node, ast.Constant) and isinstance(node.value, str)}
+        imports.update(dynamic_imports(tree))
         for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                name = node.func.id if isinstance(node.func, ast.Name) else (
-                    node.func.attr if isinstance(node.func, ast.Attribute) else ""
-                )
-                if name in {"__import__", "import_module", "run_path", "spec_from_file_location"}:
-                    if not node.args or not isinstance(node.args[0], ast.Constant):
-                        raise ValueError("dynamic dependency target cannot be determined")
-                    if name in {"__import__", "import_module"}:
-                        imports.add(str(node.args[0].value))
             if isinstance(node, ast.Import):
                 imports.update(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom):

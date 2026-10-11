@@ -21,7 +21,7 @@ verify: prerequisites lint test
 # Compatibility: verify remains the full preflight; stories opt into actual-diff selection.
 verify-story: prerequisites lint test-story
 
-# Release candidates retain every test, including consumer forward/rollback coverage.
+# Release candidates run the entire suite; release-specific migration rehearsals are separate.
 verify-release: verify
 
 prerequisites:

@@ -358,3 +358,25 @@ def test_cli_rejects_wrong_ci_environment_head(repository, monkeypatch, capsys, 
         test_scope.main([])
     assert exc.value.code == 2
     assert "exact-head checkout evidence failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("source", [
+    "from importlib import import_module as load\nload(target)\n",
+    "from runpy import run_path as execute\nexecute(target)\n",
+    "from importlib.util import spec_from_file_location as load\nload(target, path)\n",
+    "from importlib import import_module as load\nload(None)\n",
+])
+def test_unknown_aliased_loader_requires_full_regression(tree, source):
+    write(tree, "scripts/dynamic.py", source)
+    result = test_scope.select(tree, {"scripts/reporting.py"})
+    assert result["mode"] == "full"
+    assert "unreadable dependency" in result["rationale"][0]
+
+
+def test_literal_aliased_module_loader_selects_its_callers(tree):
+    write(tree, "scripts/alias_caller.py",
+          'from importlib import import_module as load\nmodule = load("scripts.reporting")\n')
+    write(tree, "tests/test_alias_caller.py", "import alias_caller\n")
+    result = test_scope.select(tree, {"scripts/reporting.py"})
+    assert result["mode"] == "focused"
+    assert "tests/test_alias_caller.py" in result["tests"]
