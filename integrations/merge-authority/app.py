@@ -13,6 +13,8 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path("/private/var/db/aru-trusted-merge")
+# Same-head failure attempts after an unconfirmed authorization POST.
+COMPENSATION_ATTEMPTS = 2
 
 
 class Refusal(RuntimeError):
@@ -80,6 +82,46 @@ def jwt(config: dict) -> str:
     return (unsigned + b"." + base64.urlsafe_b64encode(result.stdout).rstrip(b"=")).decode()
 
 
+def verified_check(result: object, config: dict, payload: dict) -> dict:
+    """Return only a check GitHub confirmably recorded exactly as requested."""
+    app = result.get("app") if isinstance(result, dict) else None
+    if (
+        not isinstance(app, dict) or type(result.get("id")) is not int or result["id"] <= 0
+        or type(app.get("id")) is not int or app["id"] != config["authority_app_id"]
+        or result.get("head_sha") != payload["head_sha"] or result.get("name") != payload["name"]
+        or result.get("conclusion") != payload["conclusion"]
+    ):
+        raise Refusal("app-check-result")
+    return {"id": result["id"], "app": {"id": app["id"]}, "head_sha": result["head_sha"],
+            "name": result["name"], "conclusion": result["conclusion"]}
+
+
+def compensate(config: dict, token: str, payload: dict) -> bool:
+    """After an unconfirmed POST, post a bounded same-head failure; never a success."""
+    failure = {**payload, "conclusion": "failure", "output": {
+        "title": "Merge authorization unconfirmed",
+        "summary": "Authorization response was uncertain; re-run merge_pr.py",
+    }}
+    for _attempt in range(COMPENSATION_ATTEMPTS):
+        try:
+            verified_check(api("POST", f"repos/{config['repository']}/check-runs", token, failure),
+                           config, failure)
+            return True
+        except Exception:
+            continue
+    # An outage can outlast this bound; the README records that honest limit.
+    return False
+
+
+def revoke(token: str) -> None:
+    """Best-effort token cleanup; GitHub's bounded expiry otherwise applies."""
+    try:
+        api("DELETE", "installation/token", token)
+    except Exception:
+        # Never mask a confirmed result or the primary refusal; expose nothing.
+        pass
+
+
 def perform(config: dict, kind: str, payload):
     bearer = jwt(config)
     repository = config["repository"]
@@ -103,10 +145,16 @@ def perform(config: dict, kind: str, payload):
         if kind == "repository":
             result = api("GET", "repos/" + repository, token)
             return {"id": result["id"], "full_name": result["full_name"]}
-        result = api("POST", "repos/" + repository + "/check-runs", token, payload)
-        return {key: result[key] for key in ("id", "app", "head_sha", "name", "conclusion")}
+        try:
+            return verified_check(api("POST", "repos/" + repository + "/check-runs", token, payload),
+                                  config, payload)
+        except Exception:
+            # GitHub may have recorded it, but canonical post() sees only a refusal
+            # and cannot revoke. Supersede at this head, then refuse.
+            compensate(config, token, payload)
+            raise Refusal("app-check-unconfirmed") from None
     finally:
-        api("DELETE", "installation/token", token)
+        revoke(token)
 
 
 def main(argv: list[str]) -> int:

@@ -224,8 +224,22 @@ def validate_live_record(kernel, record: dict, config: dict, pr: int, head: str)
     return numbers[0]
 
 
+def scope_refusal(kernel) -> type:
+    """Scope guards raise an error that the sealed helper's handlers also catch.
+
+    Canonical merge() supersedes a posted authorization only for KernelError, so
+    a refusal inside its rereads must be one. The class derives from the imported,
+    already sealed helper's KernelError; nothing is imported here.
+    """
+    base = getattr(kernel, "KernelError", None)
+    if not isinstance(base, type) or not issubclass(base, Exception) or issubclass(base, Refusal):
+        raise Refusal("kernel-error-contract")
+    return type("ScopeRefusal", (Refusal, base), {"__module__": __name__})
+
+
 def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> dict:
     """Bind every canonical reread to this request's admitted issue and head."""
+    scope_error = scope_refusal(kernel)
     original_pull = kernel.pull_request
     original_gate = kernel.issue_gate
     original_close = kernel.close_out
@@ -234,25 +248,29 @@ def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> di
     def scoped_pull(number):
         nonlocal admitted
         if number != pr:
-            raise Refusal("current-head")
+            raise scope_error("current-head")
         record = original_pull(number)
-        issue = validate_live_record(kernel, record, config, pr, head)
+        try:
+            issue = validate_live_record(kernel, record, config, pr, head)
+        except Refusal as exc:
+            # Same public gate; inside await_unblocked() it now reaches revocation.
+            raise scope_error(str(exc)) from None
         if admitted is None:
             admitted = issue
         elif issue != admitted:
-            raise Refusal("authorized-issue-changed")
+            raise scope_error("authorized-issue-changed")
         return record
 
     def scoped_gate(numbers, *args, **kwargs):
         if admitted is None or numbers != [admitted]:
-            raise Refusal("authorized-issue-changed")
+            raise scope_error("authorized-issue-changed")
         return original_gate(numbers, *args, **kwargs)
 
     def scoped_close(numbers, *args, **kwargs):
         # The pinned helper passes the admitted issue; refuse any other set
         # before canonical close-out reads or changes issue/Project status.
         if admitted is None or numbers != [admitted]:
-            raise Refusal("authorized-issue-changed")
+            raise scope_error("authorized-issue-changed")
         return original_close(numbers, *args, **kwargs)
 
     # The process lock admits one request. Temporary wrappers add the external

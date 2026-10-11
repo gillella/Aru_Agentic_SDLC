@@ -47,10 +47,13 @@ provenance, installer and rollback evidence. This source allowance is not a
 rollout, and existing scheduler jobs are unchanged.
 
 A Driver may receive only the authoring and Project Board permissions needed
-to invoke bounded Kernel commands. It cannot hold reviewer or merge-authority
-credentials; another GitHub account supplies the exact-head approval and an
-operator or proven restricted trusted-caller context invokes
-`merge_pr.py --expected-head`. GitHub and Git remain
+to invoke bounded Kernel commands. It cannot hold reviewer credentials or the
+raw merge-authority credential; another GitHub account supplies the exact-head
+approval. An operator invokes `merge_pr.py --expected-head`, or a proven,
+operator-installed protected entry point accepts the Driver's scoped PR and
+expected-head request and a separate operator-controlled principal executes the
+canonical helper with every gate. It exposes no generic endpoint and never runs
+PR code. An unproven entry point refuses. GitHub and Git remain
 the lifecycle authority. Keep live configuration, credentials, processes,
 scheduler job definitions and receipts outside Git.
 
@@ -414,9 +417,16 @@ route means **merge authority unavailable**, not permission to use a generic run
 Before allowing unattended requests, prove all of these execution constraints:
 
 - Use an installed, independently reviewed canonical helper revision outside PR
-  worktrees. Its imports, interpreter, CLI dependencies and merge runner are
-  protected from coding/CI writes; verify their identities before execution.
-  A clean checkout alone is insufficient, and updates require renewed review.
+  worktrees. The bundled helper modules, request/adapter code, sealed CLI and
+  interpreter binary are protected from coding/CI writes and hashed before
+  execution. The OS standard library and system site-packages, including `.pth`
+  files, are trusted operating-system dependencies that are not individually
+  inventoried; `python3 -I` and directory ownership narrow the import path but
+  do not prove the whole import chain. The operator must audit that coding, CI
+  and caller identities cannot write those OS dependency locations; until that
+  audit is recorded, the runtime import chain remains unproven and automatic
+  merging stays unavailable. A clean checkout alone is insufficient, and
+  updates require renewed review.
 - Start in a clean authority environment under a separate merge principal. Strip
   caller-controlled tokens, Python import paths, Git configuration, hooks and
   executable search paths; load only approved operator configuration. Never

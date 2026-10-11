@@ -105,8 +105,24 @@ def test_optional_driver_source_boundary_is_documented_without_rollout_claims():
         assert "outside Git" in content
     assert "Kernel remains independently usable" in contract
     assert "no verified maintained source or installer" in contract
-    assert "operator-only `merge_pr.py --expected-head`" in contract
+    assert "operator-only `merge_pr.py --expected-head`" not in contract
     assert "#794" in operations
+
+
+def test_driver_merge_boundary_agrees_between_contract_and_operations():
+    """Both documents admit only a proven scoped entry point, never the raw key."""
+    contract = " ".join(text(ROOT / "docs" / "KERNEL-CONTRACT.md").split())
+    operations = " ".join(text(ROOT / "docs" / "OPERATIONS.md").split())
+    for content in (contract, operations):
+        for requirement in (
+            "raw merge-authority credential", "proven, operator-installed protected entry point",
+            "separate operator-controlled principal", "canonical helper with every gate",
+            "no generic endpoint and never runs PR code", "An unproven entry point refuses",
+        ):
+            assert requirement in content, requirement
+    assert ("its generic App runner and direct `merge_pr.py --expected-head` execution remain "
+            "outside the Driver") in contract
+    assert "merge-authority credential and operator-only" not in contract
 
 
 def operations_section(heading: str) -> str:
@@ -192,6 +208,31 @@ def test_restricted_package_requires_installation_and_actual_runtime_proof():
     ):
         assert requirement in " ".join(integration.split()), requirement
     assert "restricted merge integration" in text(ROOT / "docs/OPERATIONS.md")
+
+
+def test_import_chain_proof_is_limited_to_hashed_files_and_operator_audit():
+    boundary = operations_section("Trusted callers and mechanical merge")
+    for requirement in (
+        "bundled helper modules, request/adapter code, sealed CLI and interpreter binary",
+        "not individually inventoried", "`.pth`", "do not prove the whole import chain",
+        "operator must audit", "runtime import chain remains unproven",
+    ):
+        assert requirement in boundary, requirement
+    assert "verify their identities before execution" not in boundary
+    integration = " ".join(text(ROOT / "integrations/merge-authority/README.md").split())
+    assert "not individually inventoried" in integration
+    assert "runtime import-chain proof remains unresolved" in integration
+
+
+def test_adapter_documents_compensation_and_its_honest_limit():
+    integration = " ".join(text(ROOT / "integrations/merge-authority/README.md").split())
+    for requirement in (
+        "positive integer id, App id, head, name and conclusion",
+        "at most two same-head `failure` runs through the same scoped token and check endpoint",
+        "never repeats a success", "not an atomic revocation guarantee",
+        "Token revocation is best effort", "never merge that head by hand",
+    ):
+        assert requirement in integration, requirement
 
 
 def driver_activation_commands(content: str) -> list[str]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import hashlib
 import io
+import json
 import os
 import stat
 import zipfile
@@ -35,6 +36,10 @@ def test_caller_cannot_expand_the_fixed_request(arguments):
         request.parse_request(arguments)
 
 
+class FakeKernelError(RuntimeError):
+    """Stands in for the sealed helper's KernelError in fake-kernel tests."""
+
+
 def kernel(record=None, failure=None):
     calls = []
     def merge(pr, head, dry_run=False):
@@ -46,7 +51,7 @@ def kernel(record=None, failure=None):
         calls.append(("finalize", pr, head))
         return {"merged": True, "finalized": True}
     return SimpleNamespace(
-        calls=calls, merge=merge, finalize_queued=finalize,
+        calls=calls, merge=merge, finalize_queued=finalize, KernelError=FakeKernelError,
         issue_gate=lambda numbers, *_args, **_kwargs: [{"issue": numbers[0]}],
         close_out=lambda numbers, *_args, **_kwargs: [{"issue": numbers[0]}],
         linked_issues=lambda body: [int(body.split("#")[1])],
@@ -80,6 +85,30 @@ def test_untrusted_live_authority_never_reaches_submission(change, gate):
     record.update(change)
     helper = kernel(record)
     with pytest.raises(request.Refusal, match=gate):
+        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+    assert helper.calls == []
+
+
+def test_scope_refusals_are_also_the_sealed_helpers_error_type():
+    record = dict(kernel().pull_request(825), reviewDecision="REVIEW_REQUIRED")
+    helper = kernel(record)
+    with pytest.raises(FakeKernelError) as refused:
+        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+    # The public gate is unchanged while canonical KernelError handlers catch it.
+    assert isinstance(refused.value, request.Refusal)
+    assert str(refused.value) == "github-counted-approval"
+    assert refused.value.__cause__ is None
+
+
+@pytest.mark.parametrize("contract", [None, object, BaseException, "KernelError", request.Refusal])
+def test_helper_without_verified_kernel_error_refuses_before_any_read(contract):
+    helper = kernel()
+    helper.pull_request = lambda _pr: pytest.fail("read without a verified KernelError")
+    if contract is None:
+        del helper.KernelError
+    else:
+        helper.KernelError = contract
+    with pytest.raises(request.Refusal, match="kernel-error-contract"):
         request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
     assert helper.calls == []
 
@@ -622,3 +651,137 @@ def test_os_interpreter_alias_seals_resolved_binary_without_allowing_application
     monkeypatch.setattr(Path, "lstat", lambda _p: SimpleNamespace(st_uid=501, st_mode=stat.S_IFLNK | 0o777))
     with pytest.raises((request.Refusal, ValueError), match="alias"):
         module.system_interpreter()
+
+
+@pytest.mark.parametrize("change,gate", [
+    ({"body": "Closes #822"}, "authorized-issue-changed"),
+    ({"body": "Closes #793"}, "authorized-issue-scope"),
+    ({"reviewDecision": "REVIEW_REQUIRED"}, "github-counted-approval"),
+])
+def test_drift_after_posted_authorization_supersedes_it_in_the_pinned_helper(monkeypatch, change, gate):
+    """Read 5 is canonical await_unblocked(): outer 1, evaluate 2/3, final 4."""
+    import merge_pr
+    from test_merge_gate import install_happy_gate
+
+    record = install_happy_gate(monkeypatch)
+    record.update(number=825, body="Closes #821", reviewDecision="APPROVED")
+    reads, posts = [], []
+
+    def live_pull(_number):
+        reads.append(True)
+        return dict(record, **(change if len(reads) >= 5 else {}))
+
+    def gate_evidence(numbers, *_args, **_kwargs):
+        return [{"issue": numbers[0], "criteria": 1}]
+
+    def post(head, conclusion, _summary):
+        posts.append((head, conclusion))
+        return len(posts)
+
+    def no_close_out(*_args, **_kwargs):
+        pytest.fail("refused request closed out an issue")
+
+    monkeypatch.setattr(merge_pr, "pull_request", live_pull)
+    monkeypatch.setattr(merge_pr, "issue_gate", gate_evidence)
+    monkeypatch.setattr(merge_pr, "close_out", no_close_out)
+    monkeypatch.setattr(merge_pr.merge_authority, "post", post)
+    monkeypatch.setattr(merge_pr, "run", lambda *_a, **_k: pytest.fail("refused request submitted a merge"))
+    with pytest.raises(request.Refusal, match=gate) as refused:
+        request.execute_request(merge_pr, {"issues": [821, 822]}, 825, HEAD, False)
+    # Canonical merge() caught it as KernelError and posted the same-head failure.
+    assert isinstance(refused.value, merge_pr.KernelError)
+    assert len(reads) == 5
+    assert posts == [(HEAD, "success"), (HEAD, "failure")]
+    assert merge_pr.pull_request is live_pull
+    assert merge_pr.issue_gate is gate_evidence
+    assert merge_pr.close_out is no_close_out
+
+
+def check_payload(conclusion):
+    return {"name": "aru-merge-authorized", "head_sha": HEAD, "status": "completed",
+            "conclusion": conclusion, "output": {"title": "Verdict", "summary": "Verdict"}}
+
+
+def recorded(body):
+    return {"id": 7, "app": {"id": 4921120, "slug": "merge-authority"}, "head_sha": body["head_sha"],
+            "name": body["name"], "conclusion": body["conclusion"], "output": body["output"]}
+
+
+def app_authority(monkeypatch, respond, *, revoke_fails=False):
+    config = config_fixture()
+    calls = []
+    monkeypatch.setattr(app, "jwt", lambda _c: "jwt-secret")
+
+    def api(method, endpoint, token, payload=None):
+        calls.append((method, endpoint, token, payload))
+        if endpoint == "app":
+            return {"id": 4921120}
+        if endpoint == "app/installations/123":
+            return {"app_id": 4921120, "account": {"login": "gillella"}}
+        if endpoint.endswith("/access_tokens"):
+            return {"token": "installation-secret", "permissions": payload["permissions"],
+                    "repositories": [{"full_name": config["repository"]}]}
+        if endpoint == f"repos/{config['repository']}/check-runs":
+            return respond(payload)
+        if revoke_fails:
+            raise OSError("revocation failed for installation-secret")
+        return None
+
+    monkeypatch.setattr(app, "api", api)
+    return config, calls
+
+
+@pytest.mark.parametrize("conclusion", ["success", "failure"])
+def test_token_cleanup_failure_never_masks_a_confirmed_check(monkeypatch, conclusion):
+    config, calls = app_authority(monkeypatch, recorded, revoke_fails=True)
+    result = app.perform(config, "check", check_payload(conclusion))
+    assert result == {"id": 7, "app": {"id": 4921120}, "head_sha": HEAD,
+                      "name": "aru-merge-authorized", "conclusion": conclusion}
+    assert [call[:2] for call in calls[3:]] == [
+        ("POST", f"repos/{config['repository']}/check-runs"), ("DELETE", "installation/token"),
+    ]
+    assert "secret" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("response", [
+    {"id": True}, {"id": 0}, {"id": "7"}, {"app": {"id": 4740358}}, {"app": None},
+    {"head_sha": "b" * 40}, {"name": "other"}, {"conclusion": "failure"}, "timeout", "list",
+])
+def test_unconfirmed_success_is_superseded_at_same_head_then_refused(monkeypatch, response):
+    posts = []
+
+    def respond(body):
+        posts.append(body)
+        if len(posts) > 1:
+            return recorded(body)
+        if response == "timeout":
+            raise TimeoutError("read timed out after installation-secret was sent")
+        if response == "list":
+            return [recorded(body)]
+        return {**recorded(body), **response}
+
+    config, calls = app_authority(monkeypatch, respond)
+    with pytest.raises(app.Refusal, match="app-check-unconfirmed") as refused:
+        app.perform(config, "check", check_payload("success"))
+    # No transport detail or token reaches the refusal; canonical post() sees only it.
+    assert "secret" not in str(refused.value) and refused.value.__cause__ is None
+    assert [body["conclusion"] for body in posts] == ["success", "failure"]
+    assert all(body["head_sha"] == HEAD and body["name"] == "aru-merge-authorized" for body in posts)
+    assert {call[:3] for call in calls[3:-1]} == {
+        ("POST", f"repos/{config['repository']}/check-runs", "installation-secret"),
+    }
+    assert calls[-1][:3] == ("DELETE", "installation/token", "installation-secret")
+
+
+def test_failed_compensation_is_bounded_and_still_refuses(monkeypatch):
+    conclusions = []
+
+    def respond(body):
+        conclusions.append(body["conclusion"])
+        raise OSError("connection reset")
+
+    config, calls = app_authority(monkeypatch, respond, revoke_fails=True)
+    with pytest.raises(app.Refusal, match="app-check-unconfirmed"):
+        app.perform(config, "check", check_payload("success"))
+    assert conclusions == ["success"] + ["failure"] * app.COMPENSATION_ATTEMPTS
+    assert calls[-1][:2] == ("DELETE", "installation/token")

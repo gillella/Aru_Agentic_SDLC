@@ -35,6 +35,15 @@ before importing the canonical helper. A root/OS update
 or changed sealed component can require a separately reviewed reinstallation;
 there is no automatic helper upgrade or overwrite option.
 
+Those hashes cover only the bundled request/adapter code, helper modules, `gh`
+binary, Git stub and the interpreter binary. The OS standard library and system
+site-packages, including `.pth` files, are trusted operating-system dependencies
+and are not individually inventoried. `python3 -I` and directory ownership narrow
+the import path but do not prove the whole import chain, so the operator host
+audit below must also show that coding, CI and caller identities cannot write
+those OS locations. Until that audit is recorded, runtime import-chain proof
+remains unresolved and automatic merge stays unavailable.
+
 The operator configures the approved repository and issue allowlist at package
 build time, not in request arguments. Resolve the current PR's one `Closes`
 directive against that scope, require GitHub-counted `APPROVED`, then call the
@@ -55,12 +64,24 @@ coding process. This package does not manufacture a reviewer identity.
 The new private App adapter exposes no generic App API: only the fixed repository
 metadata read and `aru-merge-authorized` check at the request's exact head, with
 canonical success/failure conclusions. It uses App **4921120**, a single approved
-installation/repository token with **Checks write and Metadata read only**, and
-revokes the token on completion when GitHub is reachable. GitHub tokens otherwise
-retain GitHub's bounded expiration. Signing material, tokens, HTTP errors and
+installation/repository token with **Checks write and Metadata read only**. Token
+revocation is best effort: a failed revocation never replaces a confirmed check
+or the primary refusal, and GitHub's bounded token expiration otherwise applies.
+Signing material, tokens, HTTP errors and
 command diagnostics never reach the caller. The adapter is **not** in sudoers;
 only the request program can be invoked without an operator password. The
 existing generic operator runner is not reused, modified or exposed.
+
+The adapter returns a check only after verifying its positive integer id, App id,
+head, name and conclusion against the request. A malformed or uncertain POST
+response may still have been recorded by GitHub, and the canonical helper cannot
+revoke a post it saw refused. The adapter then posts at most two same-head
+`failure` runs through the same scoped token and check endpoint, and refuses. It
+never repeats a success, merges or waives a gate. This is not an atomic
+revocation guarantee: a transport outage outlasting those attempts can leave an
+unconfirmed success visible until a later helper run supersedes it. After an
+`authority-unavailable` refusal, read back that head's `aru-merge-authorized`
+runs before any further action; never merge that head by hand.
 
 The canonical helper posts authorization only after its final live checks. It
 submits the exact head, verifies GitHub's merged head/commit and closes the issue
@@ -131,8 +152,10 @@ the actual host access and denial proof below remains mandatory.
 
 The admitted issue and exact head remain fixed through every canonical PR
 reread, including post-merge retry/finalization. A body change to another issue,
-even another installed allowed issue, refuses the request. GitHub reads and the
-merge operation remain separate; this adds scope enforcement to the canonical
+even another installed allowed issue, refuses the request. These refusals also
+have the pinned helper's own error type, so a scope or approval change read
+after authorization was posted still reaches its same-head failure run. GitHub
+reads and the merge operation remain separate; this adds scope enforcement to the canonical
 semantic rereads rather than claiming an atomic GitHub transaction. Canonical
 close-out is likewise accepted only for exactly the admitted issue; any other
 issue set refuses before status or close changes. The pinned helper already
@@ -179,8 +202,9 @@ Separately prove the host access audit the installer only confirms: coding, CI
 and caller contexts cannot authenticate as `aru-merge` by password, SSH or other
 remote access; `sudo -l -U <identity>` for those identities shows no unrestricted
 passwordless route to it; and no operator credential, cached sudo authority or
-TTY is shared. Neither the typed `AUDITED` confirmation nor the false shell is
-that proof.
+TTY is shared. Also prove those identities cannot write the OS standard library,
+system site-packages or `.pth` locations the interpreter loads. Neither the
+typed `AUDITED` confirmation nor the false shell is that proof.
 
 Record nonsecret outcomes, exact installed hashes, scope, current head/checks/
 review and denials in the GitHub issue. Do not mark criteria from an installer
