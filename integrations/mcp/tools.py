@@ -43,10 +43,14 @@ TOOLS: dict[str, dict[str, Any]] = {
         "script": "triage_backlog.py",
         "description": (
             "Validate Backlog issues and promote complete, unblocked ones to Ready. "
-            "Promotes one issue per run."
+            "After selecting Ready work first, supply issues as the explicitly authorized "
+            "Backlog subset; no unrelated candidate is selected as a fallback. Promotes "
+            "one issue per run by default. Omitting issues retains operator-wide triage."
         ),
-        "schema": _schema({"all": BOOL}, []),
-        "args": {"all": "--all"},
+        "schema": _schema({"all": BOOL, "issues": {
+            "type": "array", "items": {**INT, "minimum": 1}, "minItems": 1,
+        }}, []),
+        "args": {"all": "--all", "issues": "--issue"},
         "json": True,
     },
     "aru_claim": {
@@ -158,6 +162,7 @@ _TYPE_PREDICATES = {
     "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
     "string": lambda value: isinstance(value, str),
     "boolean": lambda value: isinstance(value, bool),
+    "array": lambda value: isinstance(value, list),
 }
 
 
@@ -177,6 +182,13 @@ def _check_value(name: str, key: str, value: Any, declared: dict[str, Any]) -> N
         raise ValueError(f"{name}.{key} declares unsupported type {expected!r}")
     if not predicate(value):
         raise ValueError(f"{name}.{key} must be {expected}, got {type(value).__name__}")
+    if expected == "array":
+        if len(value) < declared.get("minItems", 0):
+            raise ValueError(f"{name}.{key} must contain at least {declared['minItems']} item(s)")
+        for index, item in enumerate(value):
+            _check_value(name, f"{key}[{index}]", item, declared["items"])
+    if expected == "integer" and "minimum" in declared and value < declared["minimum"]:
+        raise ValueError(f"{name}.{key} must be at least {declared['minimum']}")
     choices = declared.get("enum")
     if choices is not None and value not in choices:
         raise ValueError(f"{name}.{key} must be one of {sorted(choices)}, got {value!r}")
@@ -209,6 +221,10 @@ def build_argv(name: str, arguments: dict[str, Any]) -> list[str]:
         if isinstance(value, bool):
             if value:
                 argv.append(flag)
+            continue
+        if isinstance(value, list):
+            for item in value:
+                argv += [flag, str(item)]
             continue
         argv += [flag, str(value)]
     if spec["json"]:

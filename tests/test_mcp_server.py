@@ -75,6 +75,48 @@ def test_false_booleans_do_not_emit_a_flag():
     assert tool_table.build_argv("aru_merge", {"pr": 1, "expected_head": "abc", "dry_run": True}).count("--dry-run") == 1
 
 
+def test_triage_exposes_explicit_scope_and_preserves_operator_calls():
+    schema = next(item["inputSchema"] for item in call("tools/list")["result"]["tools"]
+                  if item["name"] == "aru_triage")
+    assert schema["properties"]["issues"] == {
+        "type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 1,
+    }
+    assert tool_table.build_argv("aru_triage", {"issues": [42, 43]}) == [
+        "--issue", "42", "--issue", "43", "--json"]
+    assert tool_table.build_argv("aru_triage", {"issues": [42, 43], "all": True}) == [
+        "--all", "--issue", "42", "--issue", "43", "--json"]
+    assert tool_table.build_argv("aru_triage", {}) == ["--json"]
+    assert tool_table.build_argv("aru_triage", {"all": True}) == ["--all", "--json"]
+
+
+@pytest.mark.parametrize("scope", [[], None, 42, "42", [True], ["42"], [0], [-1],
+                                 [42, None], [42, []], ["42; --all"]])
+def test_invalid_triage_scope_never_invokes_a_helper(monkeypatch, scope):
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid scope must be refused before any helper invocation")
+
+    monkeypatch.setattr(server.subprocess, "run", unexpected)
+    response = call("tools/call", {"name": "aru_triage", "arguments": {"issues": scope}})
+    assert response["error"]["code"] == server.INVALID_PARAMS
+
+
+def test_mcp_triage_passes_the_entire_scope_to_the_existing_helper(monkeypatch):
+    import subprocess as sp
+
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        return sp.CompletedProcess(argv, 0, stdout='{"promoted": [42]}', stderr="")
+
+    monkeypatch.setattr(server.subprocess, "run", run)
+    response = call("tools/call", {"name": "aru_triage", "arguments": {"issues": [42, 43]}})
+    assert payload(response)["result"] == {"promoted": [42]}
+    assert len(calls) == 1
+    assert Path(calls[0][1]).name == "triage_backlog.py"
+    assert calls[0][2:] == ["--issue", "42", "--issue", "43", "--json"]
+
+
 def test_unknown_arguments_are_refused_not_dropped():
     # Silently dropping an argument the caller believed it passed is how you
     # merge the wrong pull request.
