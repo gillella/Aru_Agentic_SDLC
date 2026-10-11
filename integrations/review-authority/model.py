@@ -34,6 +34,17 @@ def prepare(connection, record, files, reviews):
     if not paths or len(paths) != len(set(paths)):
         raise Refusal('incomplete-source')
     sources, patches = {}, []
+    used = len(json.dumps(reviews).encode())
+    if used > 2 * 1024 * 1024:
+        raise Refusal('oversized-review-context')
+
+    def source(path, revision):
+        nonlocal used
+        value = connection.source(path, revision)
+        used += len(value.encode())
+        if used > 2 * 1024 * 1024:
+            raise Refusal('oversized-review-context')
+        return value
     for value in files:
         path = value['filename']
         patch = value.get('patch')
@@ -41,15 +52,18 @@ def prepare(connection, record, files, reviews):
             raise Refusal('incomplete-source')
         # Removed source is read from the base for review coverage. It is never executed.
         revision = record['base']['sha'] if value.get('status') == 'removed' else record['head']['sha']
-        sources[path] = connection.source(path, revision)
+        used += len(patch.encode())
+        sources[path] = source(path, revision)
         patches.append({'path': path, 'status': value.get('status'), 'patch': patch})
     # Relevant shared contract context is supplied as data. Missing context is explicit.
     missing = []
     for path in ('docs/KERNEL-CONTRACT.md', 'scripts/merge_pr.py', 'scripts/merge_reviews.py'):
         if path not in sources:
             try:
-                sources[path] = connection.source(path, record['head']['sha'])
-            except Refusal:
+                sources[path] = source(path, record['head']['sha'])
+            except Refusal as error:
+                if str(error) == 'oversized-review-context':
+                    raise
                 missing.append(path)
     issue = connection.api(f'/repos/{connection.repository}/issues/{connection.issue}', connection.token)
     bundle = {'repository': connection.repository, 'pr': connection.pr, 'head': record['head']['sha'],

@@ -3,6 +3,7 @@
 import fcntl
 import json
 import os
+import signal
 import stat
 import sys
 from pathlib import Path
@@ -78,10 +79,25 @@ def run(argv):
         os.close(descriptor)
 
 
+def bounded_run(argv):
+    # Bound authentication, pagination, source collection and publishing as well
+    # as the model; a disconnected caller must not leave an unbounded request.
+    def expired(_signal, _frame):
+        from security import Refusal
+        raise Refusal('review-timeout')
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.alarm(950)
+    try:
+        return run(argv)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def main(argv=None):
     try:
         bootstrap()
-        result = run(sys.argv[1:] if argv is None else argv)
+        result = bounded_run(sys.argv[1:] if argv is None else argv)
     except Exception:
         # Private HTTP/model/credential diagnostics must never reach coding callers.
         error = sys.exc_info()[1]

@@ -78,7 +78,10 @@ the Kernel's `Resolves review: ID` convention. Other reviewers' findings and
 unresolved threads remain GitHub merge gates; this package cannot waive them.
 
 Model output and stderr have bounded storage; the session has a 900-second wall
-deadline and its process group is stopped when it ends. One nonblocking lock
+deadline and its process group is stopped when it ends. The complete request
+(authentication, pagination, context collection and publication included) has a
+950-second deadline; token cleanup is one additional bounded API call. Context
+size is enforced during collection, not only after accumulating every file. One nonblocking lock
 rejects overlapping requests immediately. Requests are not queued. An existing
 latest decisive App review of this head is returned rather than duplicated.
 Provider caches/scratch belong to the model account, not a lifecycle database.

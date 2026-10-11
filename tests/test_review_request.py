@@ -312,3 +312,31 @@ def test_inline_findings_use_changed_source_side(modules):
     assert modules.app.inline_findings(bundle, [finding])[0]['side'] == 'LEFT'
     finding['line'] = 99
     assert modules.app.inline_findings(bundle, [finding]) == []
+
+
+def test_complete_request_deadline_covers_nonmodel_work_and_restores_alarm(modules, monkeypatch):
+    calls = []
+    monkeypatch.setattr(modules.request.signal, 'signal', lambda *args: calls.append(('handler', args)) or 'old')
+    monkeypatch.setattr(modules.request.signal, 'alarm', lambda value: calls.append(('alarm', value)))
+    monkeypatch.setattr(modules.request, 'run', lambda argv: 'bounded result')
+    assert modules.request.bounded_run([]) == 'bounded result'
+    assert ('alarm', 950) in calls and calls[-2] == ('alarm', 0)
+    def unavailable(argv):
+        raise modules.security.Refusal('authority-unavailable')
+    monkeypatch.setattr(modules.request, 'run', unavailable)
+    with pytest.raises(modules.security.Refusal):
+        modules.request.bounded_run([])
+    assert calls[-2] == ('alarm', 0)
+
+
+def test_context_is_bounded_before_fetching_every_file(modules):
+    calls = []
+    def source(path, revision):
+        calls.append(path)
+        return 'x' * (1024 * 1024)
+    connection = SimpleNamespace(source=source)
+    files = [{'filename': 'one.py', 'patch': 'x' * (1024 * 1024), 'status': 'modified'},
+             {'filename': 'two.py', 'patch': 'x', 'status': 'modified'}]
+    with pytest.raises(modules.security.Refusal, match='oversized-review-context'):
+        modules.model.prepare(connection, record(), files, [])
+    assert calls == ['one.py']
