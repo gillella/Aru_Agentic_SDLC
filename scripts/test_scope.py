@@ -122,31 +122,119 @@ def ordinary(path: str, roots: tuple[str, ...]) -> bool:
     )
 
 
+def literal_file_targets(value: ast.AST, definitions: dict, active: set[str]) -> set[str] | None:
+    """Bound final filename components without evaluating source or a path root."""
+    if isinstance(value, ast.Constant) and isinstance(value.value, str) and value.value:
+        return {value.value}
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Div):
+        return literal_file_targets(value.right, definitions, active)
+    if isinstance(value, ast.BinOp) and isinstance(value.op, ast.Add):
+        if isinstance(value.right, ast.Constant) and isinstance(value.right.value, str) and value.right.value.startswith("/"):
+            return {value.right.value}
+    if isinstance(value, ast.Name) and value.id in definitions and value.id not in active:
+        return joined_file_targets(definitions[value.id], definitions, active | {value.id})
+    if isinstance(value, (ast.List, ast.Tuple)):
+        return joined_file_targets(value.elts, definitions, active)
+    if isinstance(value, ast.Call) and len(value.args) == 1 and not value.keywords:
+        if isinstance(value.func, ast.Name) and value.func.id == "str" and "str" not in definitions:
+            return literal_file_targets(value.args[0], definitions, active)
+        if isinstance(value.func, ast.Attribute) and value.func.attr == "with_name":
+            return literal_file_targets(value.args[0], definitions, active)
+    return None
+
+
+def joined_file_targets(values: list, definitions: dict, active: set[str]) -> set[str] | None:
+    targets: set[str] = set()
+    for value in values:
+        resolved = literal_file_targets(value, definitions, active)
+        if resolved is None:
+            return None
+        targets.update(resolved)
+    return targets or None
+
+
+def scope_nodes(scope: ast.AST):
+    """Do not let another function's assignments stand in for a local target."""
+    pending = list(ast.iter_child_nodes(scope))
+    while pending:
+        node = pending.pop()
+        yield node
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            pending.extend(ast.iter_child_nodes(node))
+
+
+def file_binding(node: ast.AST) -> tuple[list, ast.AST | None]:
+    if isinstance(node, ast.Assign):
+        return node.targets, node.value
+    if isinstance(node, ast.NamedExpr):
+        return [node.target], node.value
+    if isinstance(node, ast.AnnAssign):
+        return [node.target], node.value
+    if isinstance(node, ast.For):
+        return [node.target], node.iter
+    if isinstance(node, ast.AugAssign):
+        return [node.target], None
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.attr in {"append", "extend", "insert", "pop", "remove", "clear"}):
+        value = node.args[0] if node.func.attr in {"append", "extend"} and len(node.args) == 1 else None
+        return [node.func.value], value
+    return [], None
+
+
+def file_definitions(scope: ast.AST, inherited: dict) -> dict:
+    local: dict[str, list] = {}
+    for node in scope_nodes(scope):
+        targets, value = file_binding(node)
+        for target in targets:
+            if isinstance(target, ast.Name):
+                local.setdefault(target.id, []).append(value)
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        for argument in ast.walk(scope.args):
+            if isinstance(argument, ast.arg):
+                local.setdefault(argument.arg, []).append(None)
+    return inherited | local
+
+
+def loader_targets(node: ast.Call, loader: str, definitions: dict) -> set[str]:
+    index = 1 if loader in {"SourceFileLoader", "spec_from_file_location"} else 0
+    if loader == "spec_from_loader" or len(node.args) <= index:
+        raise ValueError("dynamic dependency target cannot be determined")
+    target = node.args[index]
+    if loader in {"run_path", "SourceFileLoader", "spec_from_file_location"}:
+        files = literal_file_targets(target, definitions, set())
+        if files is not None:
+            return {PurePosixPath(name).stem for name in files}
+    elif isinstance(target, ast.Constant) and isinstance(target.value, str) and target.value:
+        return {target.value}
+    raise ValueError("dynamic dependency target cannot be determined")
+
+
 def dynamic_imports(tree: ast.AST) -> set[str]:
     """Resolve named and imported-alias loaders, or refuse unknown targets."""
     imports: set[str] = set()
     dynamic_names = {name: name for name in (
-        "__import__", "import_module", "run_path", "spec_from_file_location",
+        "__import__", "import_module", "run_path", "run_module",
+        "spec_from_file_location", "spec_from_loader", "SourceFileLoader",
     )}
-    # Imported aliases still name dynamic loaders. A runtime target through
-    # an alias cannot establish a complete caller map for focused testing.
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name in dynamic_names:
                     dynamic_names[alias.asname or alias.name] = alias.name
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            name = node.func.id if isinstance(node.func, ast.Name) else (
-                node.func.attr if isinstance(node.func, ast.Attribute) else ""
-            )
-            loader = dynamic_names.get(name)
-            if loader:
-                if (not node.args or not isinstance(node.args[0], ast.Constant)
-                        or not isinstance(node.args[0].value, str) or not node.args[0].value):
-                    raise ValueError("dynamic dependency target cannot be determined")
-                if loader in {"__import__", "import_module"}:
-                    imports.add(str(node.args[0].value))
+    pending = [(tree, {})]
+    while pending:
+        scope, inherited = pending.pop()
+        definitions = file_definitions(scope, inherited)
+        for node in scope_nodes(scope):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                pending.append((node, definitions))
+            elif isinstance(node, ast.Call):
+                name = node.func.id if isinstance(node.func, ast.Name) else (
+                    node.func.attr if isinstance(node.func, ast.Attribute) else ""
+                )
+                if name in dynamic_names:
+                    imports.update(loader_targets(node, dynamic_names[name], definitions))
     return imports
 
 
@@ -202,7 +290,7 @@ def caller_closure(graph: dict[str, set[str]], paths: set[str]) -> set[str]:
 
 def select(root: Path, paths: set[str], *, release: bool = False) -> dict:
     if release:
-        return full(paths, "release verification always runs full regression and migration/rollback coverage")
+        return full(paths, "release verification always runs full regression; migration/rollback rehearsals remain separate")
     if not paths or not all(safe_path(path) for path in paths):
         return full(paths, "empty or unsafe diff evidence")
     try:

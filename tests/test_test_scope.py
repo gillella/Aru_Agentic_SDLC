@@ -380,3 +380,61 @@ def test_literal_aliased_module_loader_selects_its_callers(tree):
     result = test_scope.select(tree, {"scripts/reporting.py"})
     assert result["mode"] == "focused"
     assert "tests/test_alias_caller.py" in result["tests"]
+
+
+@pytest.mark.parametrize("source", [
+    "from runpy import run_module\nrun_module(target)\n",
+    'from importlib.machinery import SourceFileLoader\nSourceFileLoader("reporting", variable_path)\n',
+    'from importlib.machinery import SourceFileLoader as load\nload("reporting", variable_path)\n',
+    'from importlib.util import spec_from_file_location\nspec_from_file_location("reporting", variable_path)\n',
+    'from importlib.util import spec_from_loader\nspec_from_loader("reporting", custom_loader)\n',
+])
+def test_api_specific_unknown_loader_target_requires_full(tree, source):
+    write(tree, "scripts/dynamic.py", source)
+    assert test_scope.select(tree, {"scripts/reporting.py"})["mode"] == "full"
+
+
+@pytest.mark.parametrize("source", [
+    'from runpy import run_module as load\nload("scripts.reporting")\n',
+    'from importlib.machinery import SourceFileLoader as load\nload("label", "scripts/reporting.py")\n',
+    'from importlib.util import spec_from_file_location as load\nload("label", "scripts/reporting.py")\n',
+])
+def test_api_specific_literal_target_selects_transitive_callers(tree, source):
+    write(tree, "scripts/loaded.py", source)
+    write(tree, "tests/test_loaded.py", "import loaded\n")
+    result = test_scope.select(tree, {"scripts/reporting.py"})
+    assert result["mode"] == "focused"
+    assert "tests/test_loaded.py" in result["tests"]
+
+
+@pytest.mark.parametrize("source", [
+    'location = ROOT / "scripts" / "reporting.py"\nfrom importlib.util import spec_from_file_location\nspec_from_file_location("label", location)\n',
+    'locations = [ROOT / "reporting.py"]\nfrom importlib.machinery import SourceFileLoader\nfor location in locations:\n    SourceFileLoader("label", location)\n',
+])
+def test_literal_filename_composition_preserves_loader_caller_mapping(tree, source):
+    write(tree, "scripts/loaded.py", source)
+    write(tree, "tests/test_loaded.py", "import loaded\n")
+    result = test_scope.select(tree, {"scripts/reporting.py"})
+    assert result["mode"] == "focused" and "tests/test_loaded.py" in result["tests"]
+
+
+def test_filename_binding_with_an_unknown_assignment_requires_full(tree):
+    write(tree, "scripts/loaded.py", 'from importlib.machinery import SourceFileLoader\nlocation = ROOT / "reporting.py"\nif condition: location = external_path\nSourceFileLoader("label", location)\n')
+    assert test_scope.select(tree, {"scripts/reporting.py"})["mode"] == "full"
+
+
+@pytest.mark.parametrize("source", [
+    'locations = [ROOT / "reporting.py"]\nlocations.append(external_path)\nfrom runpy import run_path\nfor location in locations: run_path(location)\n',
+    'location = ROOT / "reporting.py"\nfrom runpy import run_path\ndef caller(location): run_path(location)\n',
+    'location = ROOT / "reporting.py"\nlocation += suffix\nfrom runpy import run_path\nrun_path(location)\n',
+])
+def test_mutated_or_shadowed_filename_binding_requires_full(tree, source):
+    write(tree, "scripts/loaded.py", source)
+    assert test_scope.select(tree, {"scripts/reporting.py"})["mode"] == "full"
+
+
+def test_unrelated_function_binding_does_not_replace_literal_loader_target(tree):
+    write(tree, "scripts/loaded.py", 'from runpy import run_path\ndef unrelated(location): pass\ndef caller():\n    location = ROOT / "reporting.py"\n    run_path(location)\n')
+    write(tree, "tests/test_loaded.py", "import loaded\n")
+    result = test_scope.select(tree, {"scripts/reporting.py"})
+    assert result["mode"] == "focused" and "tests/test_loaded.py" in result["tests"]
