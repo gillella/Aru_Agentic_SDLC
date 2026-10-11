@@ -56,6 +56,22 @@ def protected_bytes(path: Path, owners: set[int], *, secret: bool = False) -> by
         os.close(fd)
 
 
+def system_interpreter() -> Path:
+    """Apple's root-owned alias is allowed only to a protected real binary.
+
+    This exception applies solely to the already running OS interpreter, not
+    configuration, installed code, the CLI, credentials or caller paths.
+    """
+    alias = Path(sys.executable)
+    for path in [*reversed(alias.parents), alias]:
+        info = path.lstat()
+        if info.st_uid != 0 or (not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022):
+            raise Refusal("mutable-interpreter-alias")
+    resolved = alias.resolve(strict=True)
+    protected_bytes(resolved, {0})
+    return resolved
+
+
 def validate_file_inventory(config: dict) -> None:
     required = {"request.py", "app.py", "bin/authority", "bin/gh", "checkout/.git/config", "checkout/.git/HEAD"}
     required.update("lib/" + name for name in KERNEL_FILES)
@@ -127,8 +143,9 @@ def verify_installation(config: dict) -> None:
     for filename, digest in config["authority_files"].items():
         if hashlib.sha256(protected_bytes(Path(filename), {0})).hexdigest() != digest:
             raise Refusal("authority-content-changed")
-    if sys.executable != config["python"] or hashlib.sha256(
-        protected_bytes(Path(sys.executable), {0})
+    interpreter = system_interpreter()
+    if str(interpreter) != config["python"] or hashlib.sha256(
+        protected_bytes(interpreter, {0})
     ).hexdigest() != config["python_sha256"]:
         raise Refusal("interpreter-changed")
     # Only the separate merge identity can read the operator's CLI login. Do

@@ -62,6 +62,19 @@ def root_chain(path: Path) -> None:
             raise ValueError("Protected installation chain is mutable")
 
 
+def system_interpreter() -> Path:
+    # Apple CLT's sys.executable is a root-owned symlink on the target Mini.
+    # Check its logical chain, then the resolved binary's full physical chain.
+    alias = Path(sys.executable)
+    for item in [*reversed(alias.parents), alias]:
+        info = item.lstat()
+        if info.st_uid != 0 or (not stat.S_ISLNK(info.st_mode) and info.st_mode & 0o022):
+            raise ValueError("System interpreter alias is mutable")
+    resolved = alias.resolve(strict=True)
+    root_chain(resolved)
+    return resolved
+
+
 def policy_text(caller: str, principal: str, interpreter_digest: str) -> str:
     if any(not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name) for name in (caller, principal)) or caller == principal:
         raise ValueError("Invalid distinct caller and principal")
@@ -104,8 +117,7 @@ def install_payload(manifest: dict, payload: dict[str, bytes], caller: str, prin
         raise ValueError("Existing policy staging file is preserved")
     root_chain(ROOT.parent)
     root_chain(POLICY.parent)
-    python = Path(sys.executable)
-    root_chain(python)
+    python = system_interpreter()
     root_chain(Path("/usr/bin/python3"))
     root_chain(Path("/usr/bin/openssl"))
     config = {"version": 1, "repository": manifest["repository"], "issues": manifest["issues"],
@@ -156,7 +168,7 @@ def install_payload(manifest: dict, payload: dict[str, bytes], caller: str, prin
 def main() -> None:
     if os.geteuid() != 0 or not sys.flags.isolated or sys.platform != "darwin" or not sys.stdin.isatty():
         raise ValueError("Installation requires human root TTY, Apple Python -I")
-    root_chain(Path(sys.executable))
+    system_interpreter()
     root_chain(Path("/usr/bin/python3"))
     raw = globals().get("_BUNDLE_BYTES")
     if not isinstance(raw, bytes):

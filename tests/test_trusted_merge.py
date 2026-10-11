@@ -385,6 +385,7 @@ def test_installation_transaction_seals_payload_before_publishing_capability(tmp
     # The transaction is exercised without root. Ownership refusal itself has
     # separate metadata tests; this fixture never edits a system location.
     monkeypatch.setattr(installer, "root_chain", lambda _p: None)
+    monkeypatch.setattr(installer, "system_interpreter", lambda: Path(request.sys.executable).resolve())
     principal = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_name="aru-merge", pw_dir="/merge")
     calls = []
     def validate_policy(argv, **_kwargs):
@@ -425,3 +426,27 @@ def test_installation_preserves_existing_operator_staging(tmp_path, monkeypatch)
         installer.install_payload(manifest, payload, "gillella", SimpleNamespace(), 123, b"fixture")
     assert staging.read_bytes() == b"another-operator"
     assert not installer.ROOT.exists()
+
+
+@pytest.mark.parametrize("module", [request, installer])
+def test_os_interpreter_alias_seals_resolved_binary_without_allowing_application_links(tmp_path, monkeypatch, module):
+    binary = tmp_path / "actual-python"
+    binary.write_bytes(b"system-interpreter-fixture")
+    alias = tmp_path / "python3"
+    alias.symlink_to(binary)
+    monkeypatch.setattr(module.sys, "executable", str(alias))
+    def metadata(path):
+        mode = stat.S_IFLNK | 0o777 if path == alias else stat.S_IFDIR | 0o755
+        return SimpleNamespace(st_uid=0, st_mode=mode)
+    monkeypatch.setattr(Path, "lstat", metadata)
+    # resolve() uses stat/readlink; only public metadata validation is replaced.
+    checked = []
+    if module is request:
+        monkeypatch.setattr(module, "protected_bytes", lambda path, owners: checked.append((path, owners)) or b"fixture")
+    else:
+        monkeypatch.setattr(module, "root_chain", lambda path: checked.append((path, {0})))
+    assert module.system_interpreter() == binary
+    assert checked == [(binary, {0})]
+    monkeypatch.setattr(Path, "lstat", lambda _p: SimpleNamespace(st_uid=501, st_mode=stat.S_IFLNK | 0o777))
+    with pytest.raises((request.Refusal, ValueError), match="alias"):
+        module.system_interpreter()
