@@ -247,8 +247,12 @@ def test_signal_documentation_describes_unwind_masking_and_pending_delivery_limi
                         "blocked through unwind", "Ordinary exceptions also enter compensation",
                         "Original handlers are restored while blocked", "original mask is restored",
                         "pending signals", "SIGKILL/SIGSTOP", "host loss and transport outages",
-                        "non-atomic authorization/submission boundary"):
+                        "non-atomic authorization/submission boundary", "asynchronous",
+                        "Intentionally ignored dispositions", "`SIG_IGN`", "`SIGPIPE`", "`SIGXFSZ`",
+                        "`SIGSEGV`", "`SIGBUS`", "`SIGILL`", "`SIGFPE`",
+                        "excluded from handler installation and masking", "faulting native instruction"):
         assert requirement in integration, requirement
+    assert "every catchable" not in integration
 
 
 def test_adapter_documents_compensation_and_its_honest_limit():

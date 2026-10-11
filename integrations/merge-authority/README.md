@@ -96,9 +96,15 @@ for both unmet gates and unreadable GitHub evidence, so the latter label does
 not claim a narrower diagnosis: refresh GitHub to distinguish those outcomes.
 Neither label grants permission to retry or use another merge route.
 
-The request handles every catchable default-terminating/stopping signal on
-the installed OS, including quit, user, alarm and job-control signals. The first
-interruption uses `pthread_sigmask(SIG_BLOCK)` to block the entire catchable set
+The request handles asynchronous termination/stopping signals on the installed
+OS, including quit, user, alarm and job-control signals, unless their disposition
+is already `SIG_IGN`. Intentionally ignored dispositions, including Python's
+ignored `SIGPIPE` and `SIGXFSZ`, remain unchanged so I/O errors take the ordinary
+exception compensation path. `SIGSEGV`, `SIGBUS`, `SIGILL` and `SIGFPE` are
+excluded from handler installation and masking: Python handlers for synchronous
+hardware faults can repeatedly resume the faulting native instruction and hang
+while holding `request.lock`. Their existing dispositions remain unchanged.
+The first handled interruption uses `pthread_sigmask(SIG_BLOCK)` to block the selected set
 before raising; reentrant Python handler delivery returns without raising again.
 The set stays blocked through unwind and same-head failure compensation. Ordinary
 exceptions also enter compensation with the full set blocked and queued Python
@@ -109,7 +115,8 @@ failure. Original handlers are restored while blocked, then the original mask
 is restored; pending signals can invoke those original handlers afterward.
 Offline regressions exercise second OS signals during unwind and compensation,
 reentrant delivery and the real pinned helper, not a live host signal relay.
-Uncatchable SIGKILL/SIGSTOP, native faults, host loss and transport outages
+Uncatchable SIGKILL/SIGSTOP, synchronous hardware faults and other native faults,
+host loss and transport outages
 cannot guarantee cancellation;
 the existing non-atomic authorization/submission boundary still applies. The
 sudo policy pins all supported CPU, file-size, memory, stack, descriptor and

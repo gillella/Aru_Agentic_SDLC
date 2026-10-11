@@ -431,12 +431,17 @@ def scope_refusal(kernel) -> type:
 
 
 def catchable_signals() -> set:
-    """Handle every catchable default-terminating/stopping signal on this OS."""
-    ignored = {signal.SIGKILL, signal.SIGSTOP, signal.SIGCHLD, signal.SIGCONT,
-               signal.SIGWINCH, signal.SIGURG}
+    """Select asynchronous cancellation signals without changing ignored ones."""
+    excluded = {signal.SIGKILL, signal.SIGSTOP, signal.SIGCHLD, signal.SIGCONT,
+                signal.SIGWINCH, signal.SIGURG,
+                # Python handlers can repeatedly resume a faulting C instruction.
+                signal.SIGSEGV, signal.SIGBUS, signal.SIGILL, signal.SIGFPE}
     if hasattr(signal, "SIGINFO"):
-        ignored.add(signal.SIGINFO)
-    return signal.valid_signals() - ignored
+        excluded.add(signal.SIGINFO)
+    # In particular, preserve Python's ignored SIGPIPE/SIGXFSZ so I/O failures
+    # remain ordinary exceptions and take the normal compensation path.
+    return {number for number in signal.valid_signals() - excluded
+            if signal.getsignal(number) != signal.SIG_IGN}
 
 
 def authority_post(original_post, head, conclusion, summary, scope_error):
@@ -458,7 +463,7 @@ def public_failure(exc: Exception, kernel=None) -> str:
     return "authority-unavailable"
 
 def cancel_pending(original_post, head, scope_error):
-    # cancellation_guard blocks the complete signal set before reaching here.
+    # cancellation_guard blocks its selected asynchronous set before reaching here.
     try:
         original_post(head, "failure", "Restricted request failed; re-run merge_pr.py")
     except Exception:
@@ -472,7 +477,7 @@ def confirmed_merge(record: dict, pr: int, head: str) -> bool:
 
 @contextmanager
 def cancellation_guard(kernel, head: str, scope_error, before_success=None):
-    """Cancel attempted authorization on catchable interruption or failure."""
+    """Cancel attempted authorization on selected async interruption or failure."""
     original_post = kernel.merge_authority.post
     authorization_pending = False
     previous_signals = {}

@@ -4,6 +4,7 @@ import hashlib
 import inspect
 import json
 import os
+from runpy import run_path
 import signal
 import stat
 import sys
@@ -17,6 +18,12 @@ from test_trusted_merge import closing_effect_fixture, mock_closing_effects  # n
 
 READ_CLOSING_EFFECTS = request.read_closing_effects
 SCOPE_CONFIG = {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821, 822, 792]}
+SIGNAL_REGRESSIONS = run_path(str(ROOT / "integrations/merge-authority/signal_regressions.py"))
+
+
+@pytest.mark.parametrize("scenario", ["faults", "ignored", "defaults", "pipe", "file-size"])
+def test_signal_dispositions_and_real_io_failures(scenario, tmp_path, monkeypatch):
+    SIGNAL_REGRESSIONS["check_signal_contract"](scenario, request, kernel(), HEAD, tmp_path, monkeypatch)
 
 
 def canonical_effect_flow(monkeypatch, mutate=None, at=1):
