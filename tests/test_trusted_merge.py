@@ -47,6 +47,7 @@ def kernel(record=None, failure=None):
         return {"merged": True, "finalized": True}
     return SimpleNamespace(
         calls=calls, merge=merge, finalize_queued=finalize,
+        issue_gate=lambda numbers, *_args, **_kwargs: [{"issue": numbers[0]}],
         linked_issues=lambda body: [int(body.split("#")[1])],
         pull_request=lambda pr: record or {
             "number": pr, "headRefOid": HEAD, "body": "Closes #821",
@@ -273,6 +274,73 @@ def test_actual_canonical_admission_refuses_without_app_post_or_merge(monkeypatc
         pr["mergeStateStatus"] = "BEHIND"
     with pytest.raises(merge_pr.KernelError):
         request.execute_request(merge_pr, {"issues": [821]}, 825, HEAD, False)
+
+
+@pytest.mark.parametrize("read_number", [2, 3, 4])
+@pytest.mark.parametrize("changed_issue", [793, 822])
+def test_canonical_rereads_cannot_escape_or_switch_admitted_issue(monkeypatch, read_number, changed_issue):
+    import merge_pr
+    from test_merge_gate import install_happy_gate
+
+    record = install_happy_gate(monkeypatch)
+    record.update(number=825, body="Closes #821", reviewDecision="APPROVED")
+    reads = []
+
+    def live_pull(_number):
+        reads.append(True)
+        return dict(record, body=f"Closes #{changed_issue if len(reads) >= read_number else 821}")
+
+    def gate(numbers, *_args, **_kwargs):
+        return [{"issue": numbers[0], "criteria": 1}]
+
+    monkeypatch.setattr(merge_pr, "pull_request", live_pull)
+    monkeypatch.setattr(merge_pr, "issue_gate", gate)
+    monkeypatch.setattr(merge_pr.merge_authority, "post", lambda *_a: pytest.fail("race posted authorization"))
+    monkeypatch.setattr(merge_pr, "run", lambda *_a: pytest.fail("race submitted merge"))
+    with pytest.raises(request.Refusal, match="authorized-issue"):
+        request.execute_request(merge_pr, {"issues": [821, 822]}, 825, HEAD, False)
+    assert len(reads) == read_number
+    assert merge_pr.pull_request is live_pull
+    assert merge_pr.issue_gate is gate
+
+
+def test_counted_approval_withdrawal_on_canonical_reread_refuses(monkeypatch):
+    import merge_pr
+    from test_merge_gate import install_happy_gate
+
+    record = install_happy_gate(monkeypatch)
+    record.update(number=825, body="Closes #821", reviewDecision="APPROVED")
+    reads = []
+
+    def live_pull(_number):
+        reads.append(True)
+        return dict(record, reviewDecision="APPROVED" if len(reads) == 1 else "REVIEW_REQUIRED")
+
+    monkeypatch.setattr(merge_pr, "pull_request", live_pull)
+    monkeypatch.setattr(merge_pr.merge_authority, "post", lambda *_a: pytest.fail("race posted authorization"))
+    monkeypatch.setattr(merge_pr, "run", lambda *_a: pytest.fail("race submitted merge"))
+    with pytest.raises(request.Refusal, match="github-counted-approval"):
+        request.execute_request(merge_pr, {"issues": [821]}, 825, HEAD, False)
+
+
+def test_confirmed_merge_retry_cannot_close_out_a_reassigned_issue(monkeypatch):
+    import merge_pr
+    from test_merge_gate import install_happy_gate
+
+    record = install_happy_gate(monkeypatch)
+    record.update(number=825, body="Closes #821", state="MERGED", mergedAt="2026-10-11T03:00:00Z")
+    reads = []
+
+    def live_pull(_number):
+        reads.append(True)
+        return dict(record, body="Closes #821" if len(reads) == 1 else "Closes #822")
+
+    monkeypatch.setattr(merge_pr, "pull_request", live_pull)
+    monkeypatch.setattr(merge_pr, "close_out", lambda *_a: pytest.fail("retry closed another issue"))
+    monkeypatch.setattr(merge_pr.merge_authority, "post", lambda *_a: pytest.fail("retry posted authorization"))
+    monkeypatch.setattr(merge_pr, "run", lambda *_a: pytest.fail("retry submitted merge"))
+    with pytest.raises(request.Refusal, match="authorized-issue-changed"):
+        request.execute_request(merge_pr, {"issues": [821, 822]}, 825, HEAD, False)
 
 
 def package_fixture(monkeypatch):

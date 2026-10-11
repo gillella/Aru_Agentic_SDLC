@@ -113,6 +113,12 @@ Existing installation, sudo policy and staging paths are preserved rather than
 overwritten. Validate the complete root-owned payload and sudo policy before
 publishing the narrowly scoped `NOPASSWD: NOSETENV` entry.
 
+The admitted issue and exact head remain fixed through every canonical PR
+reread, including post-merge retry/finalization. A body change to another issue,
+even another installed allowed issue, refuses the request. GitHub reads and the
+merge operation remain separate; this adds scope enforcement to the canonical
+semantic rereads rather than claiming an atomic GitHub transaction.
+
 ## Operator proof before automatic use
 
 The human configures a fresh, appropriately authorized CLI login under the
@@ -123,7 +129,7 @@ For example, interactively on the installed host:
 sudo -u aru-merge env -i HOME=/Users/aru-merge \
   PATH=/usr/bin:/bin GH_CONFIG_DIR=/private/var/db/aru-trusted-merge/credentials \
   /private/var/db/aru-trusted-merge/bin/gh auth login \
-  --hostname github.com --git-protocol https --web --insecure-storage
+  --hostname github.com --git-protocol https --web --scopes project --insecure-storage
 ```
 
 The final flag stores the separate CLI login inside the protected directory,

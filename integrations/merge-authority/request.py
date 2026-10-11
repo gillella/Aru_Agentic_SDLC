@@ -188,24 +188,58 @@ def authority_environment(config: dict) -> dict[str, str]:
     }
 
 
-def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> dict:
-    """Resolve live scope first; the canonical helper owns every lifecycle gate."""
-    record = kernel.pull_request(pr)
+def validate_live_record(kernel, record: dict, config: dict, pr: int, head: str) -> int:
     if record.get("headRefOid") != head or record.get("number") != pr:
         raise Refusal("current-head")
     numbers = kernel.linked_issues(str(record.get("body") or ""))
     if len(numbers) != 1 or numbers[0] not in config["issues"]:
         raise Refusal("authorized-issue-scope")
-    if record.get("state") == "MERGED":
-        if check:
-            raise Refusal("already-merged")
-        # A retried bounded request repairs close-out, never resubmits a merge.
-        return kernel.finalize_queued(pr, head)
-    if record.get("state") != "OPEN" or record.get("isDraft") is not False:
-        raise Refusal("open-ready-pr")
-    if record.get("reviewDecision") != "APPROVED":
-        raise Refusal("github-counted-approval")
-    return kernel.merge(pr, head, dry_run=check)
+    if record.get("state") != "MERGED":
+        if record.get("state") != "OPEN" or record.get("isDraft") is not False:
+            raise Refusal("open-ready-pr")
+        if record.get("reviewDecision") != "APPROVED":
+            raise Refusal("github-counted-approval")
+    return numbers[0]
+
+
+def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> dict:
+    """Bind every canonical reread to this request's admitted issue and head."""
+    original_pull = kernel.pull_request
+    original_gate = kernel.issue_gate
+    admitted = None
+
+    def scoped_pull(number):
+        nonlocal admitted
+        if number != pr:
+            raise Refusal("current-head")
+        record = original_pull(number)
+        issue = validate_live_record(kernel, record, config, pr, head)
+        if admitted is None:
+            admitted = issue
+        elif issue != admitted:
+            raise Refusal("authorized-issue-changed")
+        return record
+
+    def scoped_gate(numbers, *args, **kwargs):
+        if admitted is None or numbers != [admitted]:
+            raise Refusal("authorized-issue-changed")
+        return original_gate(numbers, *args, **kwargs)
+
+    # The process lock admits one request. Temporary wrappers add the external
+    # operator scope to each read without replacing any canonical lifecycle gate.
+    kernel.pull_request = scoped_pull
+    kernel.issue_gate = scoped_gate
+    try:
+        record = kernel.pull_request(pr)
+        if record.get("state") == "MERGED":
+            if check:
+                raise Refusal("already-merged")
+            # A retried bounded request repairs close-out, never resubmits a merge.
+            return kernel.finalize_queued(pr, head)
+        return kernel.merge(pr, head, dry_run=check)
+    finally:
+        kernel.pull_request = original_pull
+        kernel.issue_gate = original_gate
 
 
 def main(argv: list[str]) -> int:
