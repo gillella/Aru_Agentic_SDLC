@@ -177,21 +177,28 @@ def test_optional_driver_source_excludes_tracked_runtime_state():
 
 def kernel_driver_reference_violations(contents: dict[str, str]) -> list[str]:
     """No executable Kernel or installed-skill surface may load Driver source."""
-    reference = re.compile(r"driver/|\b(?:import|from)\s+driver\b|[\"']driver(?:\.|[\"'])")
+    reference = re.compile(
+        r"driver/|\b(?:import|from)\s+driver\b|[\"']driver(?:\.|[\"'])|-m\s+driver(?:\.|\b)"
+    )
     return [path for path, source in contents.items() if reference.search(source)]
 
 
-def test_kernel_execution_and_installed_skills_do_not_load_driver():
-    tracked = tracked_paths()
-    runtime = [path for path in tracked if path.is_relative_to(ROOT / "scripts")
+def kernel_runtime_contents(paths: list[Path]) -> dict[str, str]:
+    runtime = [path for path in paths if path.is_relative_to(ROOT / "scripts")
                or path.is_relative_to(ROOT / "hooks")
                or path.is_relative_to(ROOT / "skills")
                or path.is_relative_to(ROOT / "templates")
                or path.is_relative_to(ROOT / ".github" / "workflows")
                or path.is_relative_to(ROOT / ".github" / "actions")
                or path == ROOT / "Makefile"]
-    contents = {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
-                for path in runtime if path.is_file() and path.suffix in {".py", ".sh", ".md", ".yml", ".yaml", ".toml"}}
+    return {path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
+            for path in runtime if path.is_file() and (
+                path.name == "Makefile"
+                or path.suffix in {".py", ".sh", ".md", ".yml", ".yaml", ".toml"})}
+
+
+def test_kernel_execution_and_installed_skills_do_not_load_driver():
+    contents = kernel_runtime_contents(tracked_paths())
     assert kernel_driver_reference_violations(contents) == []
     for path, source in (("scripts/fetch_next_work.py", "import driver"),
                          ("scripts/fetch_next_work.py", 'importlib.import_module("driver.monitor")'),
@@ -200,12 +207,25 @@ def test_kernel_execution_and_installed_skills_do_not_load_driver():
                          ("scripts/init_project.py", "install driver/"),
                          ("scripts/install_agent_integration.sh", "driver/activate.sh"),
                          ("skills/implement-next-issue/SKILL.md", "run driver/monitor.py"),
-                         (".github/workflows/governed-pr.yml", "python3 driver/monitor.py")):
+                         (".github/workflows/governed-pr.yml", "python3 driver/monitor.py"),
+                         (".github/workflows/governed-pr.yml", "run: python3 -m driver.monitor")):
         assert kernel_driver_reference_violations({path: source}) == [path]
     assert kernel_driver_reference_violations({
         "scripts/example.py": 'importlib.import_module("policy")',
         "skills/example/SKILL.md": "An external Driver decides when to invoke the Kernel.",
     }) == []
+
+
+def test_makefile_content_is_scanned_for_driver_activation(tmp_path, monkeypatch):
+    monkeypatch.setitem(kernel_runtime_contents.__globals__, "ROOT", tmp_path)
+    makefile = tmp_path / "Makefile"
+    makefile.write_text("verify:\n\tpython3 -m pytest tests/\n", encoding="utf-8")
+    contents = kernel_runtime_contents([makefile])
+    assert contents == {"Makefile": makefile.read_text(encoding="utf-8")}
+    assert kernel_driver_reference_violations(contents) == []
+    for command in ("python3 driver/monitor.py", "python3 -m driver.monitor"):
+        makefile.write_text(f"verify:\n\t{command}\n", encoding="utf-8")
+        assert kernel_driver_reference_violations(kernel_runtime_contents([makefile])) == ["Makefile"]
 
 
 def test_decision_records_are_not_operating_documents():
