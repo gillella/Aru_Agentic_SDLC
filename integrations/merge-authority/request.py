@@ -9,6 +9,7 @@ import os
 import pwd
 import re
 import signal
+import resource
 import stat
 import sys
 from pathlib import Path
@@ -22,6 +23,10 @@ KERNEL_FILES = (
 )
 PRINCIPAL = "aru-merge"
 LOCKED_SHELL = "/usr/bin/false"
+
+
+LIMITS = {"as": None, "core": 0, "cpu": None, "data": None, "fsize": None,
+          "memlock": None, "nofile": 1024, "nproc": 1024, "rss": None, "stack": 8_388_608}
 
 
 class Refusal(RuntimeError):
@@ -40,6 +45,17 @@ def parse_request(argv: list[str]) -> tuple[int, str, bool]:
         raise Refusal("request-head")
     return int(argv[1]), head, len(argv) == 5
 
+
+
+def verify_resource_limits() -> None:
+    """Sudo must replace every caller-supplied soft and hard resource limit."""
+    try:
+        for name, value in LIMITS.items():
+            expected = resource.RLIM_INFINITY if value is None else value
+            if resource.getrlimit(getattr(resource, "RLIMIT_" + name.upper())) != (expected, expected):
+                raise Refusal("unapproved-resource-limits")
+    except (AttributeError, OSError, ValueError):
+        raise Refusal("unapproved-resource-limits") from None
 
 def protected_bytes(path: Path, owners: set[int], *, secret: bool = False) -> bytes:
     """Refuse links, mutable ancestor chains and races before reading a file."""
@@ -276,6 +292,22 @@ def scope_refusal(kernel) -> type:
     return type("ScopeRefusal", (Refusal, base), {"__module__": __name__})
 
 
+
+def cancel_pending(original_post, head, previous_signals, scope_error):
+    # Defer catchable signals while attempting the same-head cancellation.
+    for number in previous_signals:
+        signal.signal(number, signal.SIG_IGN)
+    try:
+        original_post(head, "failure", "Restricted request failed; re-run merge_pr.py")
+    except Exception:
+        raise scope_error("authorization-revocation-unavailable") from None
+
+
+def confirmed_merge(record: dict, pr: int, head: str) -> bool:
+    return (record.get("number") == pr and record.get("state") == "MERGED"
+            and record.get("headRefOid") == head and bool(record.get("mergedAt")))
+
+
 @contextmanager
 def cancellation_guard(kernel, head: str, scope_error):
     """Cancel attempted authorization on catchable interruption or failure."""
@@ -299,27 +331,34 @@ def cancellation_guard(kernel, head: str, scope_error):
             authorization_pending = False
         return result
 
+    def merge_confirmed():
+        nonlocal authorization_pending
+        authorization_pending = False
+
     try:
         kernel.merge_authority.post = scoped_post
-        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGXCPU, signal.SIGXFSZ):
             previous_signals[number] = signal.signal(number, interrupted)
-        yield
+        yield merge_confirmed
     except BaseException:
         if authorization_pending:
             # The helper cancels KernelError in its submission block. This also
             # covers its post/try gap. Defer catchable signals during cancellation.
-            for number in previous_signals:
-                signal.signal(number, signal.SIG_IGN)
-            try:
-                original_post(head, "failure", "Restricted request failed; re-run merge_pr.py")
-            except Exception:
-                raise scope_error("authorization-revocation-unavailable") from None
+            cancel_pending(original_post, head, previous_signals, scope_error)
         raise
     finally:
         kernel.merge_authority.post = original_post
         for number, handler in previous_signals.items():
             signal.signal(number, handler)
 
+
+
+def checked_admission(kernel, record, config, pr, head, scope_error):
+    try:
+        return admitted_issue(kernel, record, config, pr, head)
+    except Refusal as exc:
+        # Scope changes inside the canonical submission block reach revocation.
+        raise scope_error(str(exc)) from None
 
 def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> dict:
     """Bind every canonical reread to this request's admitted issue and head."""
@@ -334,11 +373,9 @@ def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> di
         if number != pr:
             raise scope_error("current-head")
         record = original_pull(number)
-        try:
-            issue = admitted_issue(kernel, record, config, pr, head)
-        except Refusal as exc:
-            # Same public gate; inside await_unblocked() it now reaches revocation.
-            raise scope_error(str(exc)) from None
+        if confirmed_merge(record, pr, head):
+            confirm_merge()
+        issue = checked_admission(kernel, record, config, pr, head, scope_error)
         if admitted is None:
             admitted = issue
         elif issue != admitted:
@@ -363,7 +400,7 @@ def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> di
     kernel.issue_gate = scoped_gate
     kernel.close_out = scoped_close
     try:
-        with cancellation_guard(kernel, head, scope_error):
+        with cancellation_guard(kernel, head, scope_error) as confirm_merge:
             record = kernel.pull_request(pr)
             if record.get("state") == "MERGED":
                 if check:
@@ -383,6 +420,7 @@ def main(argv: list[str]) -> int:
         pr, head, check = parse_request(argv)
         if sys.platform != "darwin" or Path(__file__).absolute() != ROOT / "request.py":
             raise Refusal("not-installed")
+        verify_resource_limits()
         config = validate_config(json.loads(protected_bytes(ROOT / "config.json", {0})))
         verify_installation(config)
         lock = execution_lock(config["principal_uid"])

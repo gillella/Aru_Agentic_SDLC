@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import signal
 import sys
 import zipfile
@@ -9,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from test_trusted_merge import HEAD, ROOT, bundle, kernel, request
+from test_trusted_merge import HEAD, ROOT, bundle, installer, kernel, request
 
 
 @pytest.mark.parametrize("failure", ["ci", "feedback", "approval", "queue", "auto", "criteria",
@@ -63,7 +64,7 @@ def test_actual_canonical_admission_refuses_without_app_post_or_merge(monkeypatc
 
 
 
-@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP])
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGXCPU, signal.SIGXFSZ])
 @pytest.mark.parametrize("stage", ["post", "await"])
 def test_catchable_interruption_cancels_authorization_and_restores_handlers(monkeypatch, signum, stage):
     import merge_pr
@@ -72,7 +73,7 @@ def test_catchable_interruption_cancels_authorization_and_restores_handlers(monk
     record = install_happy_gate(monkeypatch)
     record.update(number=825, body="Closes #821", reviewDecision="APPROVED")
     reads, posts = [], []
-    handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
+    handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGXCPU, signal.SIGXFSZ)}
 
     def interrupt():
         handler = signal.getsignal(signum)
@@ -166,3 +167,66 @@ def test_operator_package_reproduces_reviewed_objects_and_cli_digest(tmp_path, m
         bundle.main()
     with pytest.raises(ValueError, match="independently reviewed digest"):
         bundle.make_bundle(*args, gh_sha256="0" * 64)
+
+
+@pytest.mark.parametrize("limit", list(request.LIMITS))
+@pytest.mark.parametrize("side", [0, 1])
+def test_caller_controlled_resource_limits_refuse_before_authority(monkeypatch, limit, side):
+    approved = {getattr(request.resource, "RLIMIT_" + name.upper()):
+                (request.resource.RLIM_INFINITY if value is None else value,) * 2
+                for name, value in request.LIMITS.items()}
+    monkeypatch.setattr(request.resource, "getrlimit", lambda number: approved[number])
+    request.verify_resource_limits()
+    number = getattr(request.resource, "RLIMIT_" + limit.upper())
+    bad = list(approved[number])
+    bad[side] = 1 if approved[number][side] != 1 else 2
+    approved[number] = tuple(bad)
+    with pytest.raises(request.Refusal, match="unapproved-resource-limits"):
+        request.verify_resource_limits()
+
+
+def test_resource_policy_pins_limits_for_only_the_digest_sealed_request():
+    policy = installer.policy_text("gillella", "aru-merge", "a" * 64)
+    assert "Defaults!ARU_TRUSTED_MERGE " in policy
+    for name, value in request.LIMITS.items():
+        assert f"rlimit_{name}={value if value is not None else 'infinity'}" in policy
+    assert "Defaults " not in policy and "rlimit_cpu=user" not in policy
+
+
+def test_installer_permissions_use_open_descriptor_despite_path_replacement(tmp_path, monkeypatch):
+    target, moved, victim = (tmp_path / name for name in ("key", "original", "victim"))
+    victim.write_bytes(b"preserve")
+    victim.chmod(0o644)
+    original_mode = victim.stat().st_mode
+    checked = []
+
+    def replace_during_chown(fd, _uid, _gid):
+        target.rename(moved)
+        target.symlink_to(victim)
+        checked.append(os.fstat(fd).st_ino == moved.stat().st_ino)
+
+    monkeypatch.setattr(installer.os, "fchown", replace_during_chown)
+    monkeypatch.setattr(installer.os, "chown", lambda *_a: pytest.fail("path-based chown"))
+    installer.write_file(target, b"fixture-private-key", 0o600, os.getuid(), os.getgid())
+    assert checked == [True] and moved.read_bytes() == b"fixture-private-key"
+    assert moved.stat().st_mode & 0o777 == 0o600
+    assert victim.read_bytes() == b"preserve" and victim.stat().st_mode == original_mode
+
+
+def test_confirmed_merge_closeout_error_preserved_without_authorization_revocation(monkeypatch):
+    record = {"number": 825, "headRefOid": HEAD, "body": "Closes #821",
+              "state": "OPEN", "isDraft": False, "reviewDecision": "APPROVED"}
+    helper = kernel(record)
+    posts = []
+    helper.merge_authority.post = lambda _head, conclusion, _summary: posts.append(conclusion)
+
+    def merge(pr, head, **_kwargs):
+        helper.merge_authority.post(head, "success", "valid")
+        record.update(state="MERGED", mergedAt="2026-10-11T00:00:00Z")
+        helper.pull_request(pr)
+        raise helper.KernelError("close-out-original-error")
+
+    helper.merge = merge
+    with pytest.raises(helper.KernelError, match="close-out-original-error"):
+        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+    assert posts == ["success"]

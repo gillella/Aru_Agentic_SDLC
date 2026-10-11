@@ -451,7 +451,8 @@ def test_package_rejects_tampering_and_archive_traversal(monkeypatch, malformati
 
 def test_sudo_capability_has_no_generic_runner_shell_or_environment():
     policy = installer.policy_text("gillella", "aru-merge", "a" * 64)
-    assert "NOPASSWD: NOSETENV: sha256:" in policy
+    assert "NOPASSWD: NOSETENV: ARU_TRUSTED_MERGE" in policy
+    assert "Cmnd_Alias ARU_TRUSTED_MERGE = sha256:" + "a" * 64 in policy
     assert f"/usr/bin/python3 -I {request.ROOT}/request.py --pr * --expected-head *" in policy
     assert "app.py" not in policy and "authority-run" not in policy
     with pytest.raises(ValueError):
@@ -551,6 +552,7 @@ def test_installation_transaction_seals_payload_before_publishing_capability(tmp
     monkeypatch.setattr(installer, "ROOT", destination)
     monkeypatch.setattr(installer, "POLICY", policy)
     monkeypatch.setattr(installer.os, "chown", lambda *_a: None)
+    monkeypatch.setattr(installer.os, "fchown", lambda *_a: None)
     # The transaction is exercised without root. Ownership refusal itself has
     # separate metadata tests; this fixture never edits a system location.
     monkeypatch.setattr(installer, "root_chain", lambda _p: None)

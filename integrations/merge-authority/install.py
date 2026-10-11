@@ -84,6 +84,10 @@ def require_locked_principal(principal) -> None:
                          f"{LOCKED_SHELL}; accounts are never changed here")
 
 
+LIMITS = {"as": None, "core": 0, "cpu": None, "data": None, "fsize": None,
+          "memlock": None, "nofile": 1024, "nproc": 1024, "rss": None, "stack": 8_388_608}
+
+
 def policy_text(caller: str, principal: str, interpreter_digest: str) -> str:
     if any(not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name) for name in (caller, principal)) or caller == principal:
         raise ValueError("Invalid distinct caller and principal")
@@ -91,8 +95,12 @@ def policy_text(caller: str, principal: str, interpreter_digest: str) -> str:
         raise ValueError("Invalid interpreter digest")
     # Wildcards are sudo syntax, not an input validator. request.py accepts only
     # exactly four arguments plus optional --check before any authority access.
-    return (f"{caller} ALL=({principal}) NOPASSWD: NOSETENV: sha256:{interpreter_digest} "
-            f"/usr/bin/python3 -I {ROOT}/request.py --pr * --expected-head *\n")
+    options = ", ".join(f"rlimit_{name}={value if value is not None else 'infinity'}"
+                        for name, value in LIMITS.items())
+    return (f"Cmnd_Alias ARU_TRUSTED_MERGE = sha256:{interpreter_digest} "
+            f"/usr/bin/python3 -I {ROOT}/request.py --pr * --expected-head *\n"
+            f"Defaults!ARU_TRUSTED_MERGE {options}\n"
+            f"{caller} ALL=({principal}) NOPASSWD: NOSETENV: ARU_TRUSTED_MERGE\n")
 
 
 def private_key(path: Path) -> bytes:
@@ -113,9 +121,18 @@ def private_key(path: Path) -> bytes:
 def write_file(path: Path, data: bytes, mode: int, uid: int = 0, gid: int = 0) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("xb") as stream:
+        os.fchmod(stream.fileno(), mode)
         stream.write(data)
-    os.chown(path, uid, gid)
-    path.chmod(mode)
+        os.fchown(stream.fileno(), uid, gid)
+
+
+def install_credentials(principal, key: bytes) -> None:
+    # Keep parents root-owned until the private key has been staged safely.
+    for directory in (ROOT / "credentials", ROOT / "runtime"):
+        directory.mkdir(mode=0o700)
+    write_file(ROOT / "credentials/merge-app.pem", key, 0o600, principal.pw_uid, principal.pw_gid)
+    for directory in (ROOT / "credentials", ROOT / "runtime"):
+        os.chown(directory, principal.pw_uid, principal.pw_gid)
 
 
 def install_payload(manifest: dict, payload: dict[str, bytes], caller: str, principal, installation: int, key: bytes) -> None:
@@ -152,10 +169,7 @@ def install_payload(manifest: dict, payload: dict[str, bytes], caller: str, prin
         for directory in (ROOT / "checkout/.git/objects", ROOT / "checkout/.git/refs"):
             directory.mkdir(mode=0o755)
             directory.chmod(0o755)
-        for directory in (ROOT / "credentials", ROOT / "runtime"):
-            directory.mkdir(mode=0o700)
-            os.chown(directory, principal.pw_uid, principal.pw_gid)
-        write_file(ROOT / "credentials/merge-app.pem", key, 0o600, principal.pw_uid, principal.pw_gid)
+        install_credentials(principal, key)
         write_file(ROOT / "config.json", json.dumps(config, sort_keys=True).encode(), 0o644)
         write_file(staging, policy, 0o440)
         subprocess.run(["/usr/sbin/visudo", "-cf", str(staging)], check=True, capture_output=True)

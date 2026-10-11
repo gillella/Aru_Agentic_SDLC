@@ -83,15 +83,21 @@ unconfirmed success visible until a later helper run supersedes it. After an
 `authority-unavailable` refusal, read back that head's `aru-merge-authorized`
 runs before any further action; never merge that head by hand.
 
-The request installs handlers for catchable SIGINT, SIGTERM and SIGHUP and
-restores them afterward. It tracks attempted success before the adapter call,
+The request installs handlers for catchable SIGINT, SIGTERM, SIGHUP, SIGXCPU
+and SIGXFSZ, restoring them afterward. It tracks attempted success before the adapter call,
 so interruption even in the canonical post/try gap attempts a same-head failure.
 Further catchable signals are deferred during that cancellation; canonical
 revocation is not duplicated after a confirmed failure. Offline regressions
 exercise the real pinned helper and installed handlers, not a live host signal
 relay. SIGKILL, host loss and transport outages cannot guarantee cancellation;
 the existing non-atomic authorization/submission boundary still applies. The
-operator must audit the caller context and prevent coding/CI access to generic
+sudo policy pins all supported CPU, file-size, memory, stack, descriptor and
+process limits for only the digest-sealed request; core dumps are disabled. The
+request verifies both soft and hard values before authority access and refuses
+if sudo inherited or could not replace caller limits. Host proof must include a
+caller with deliberately restricted CPU/file-size limits still reaching an
+ordinary safe request denial, without those limits reaching the merge process.
+The operator must audit the caller context and prevent coding/CI access to generic
 merge credentials and endpoints. A narrowly scoped caller may share the coding
 account only if that reviewed trust boundary and every live gate are established;
 this does not grant a generic merge credential to that account.
@@ -99,7 +105,11 @@ this does not grant a generic merge credential to that account.
 The canonical helper posts authorization only after its final live checks. It
 submits the exact head, verifies GitHub's merged head/commit and closes the issue
 and Project. A retry of a GitHub-confirmed merge performs only canonical
-close-out recovery, never another merge. The caller reads GitHub back and uses
+close-out recovery, never another merge. Once an exact-head GitHub merge is
+confirmed, the request clears pending
+authorization before further scope/close-out checks. A later failure preserves
+its original close-out error without posting a misleading failure check on the
+already-merged head. The caller reads GitHub back and uses
 the ordinary cleanup helper, preserving other workers and worktrees.
 
 ## Prepare one reviewed package
@@ -159,7 +169,10 @@ user's 0700 directory without printing it. No new App, key generation, broader
 permissions or ruleset change is required. Never send a PEM/token to an agent.
 Existing installation, sudo policy and staging paths are preserved rather than
 overwritten. Validate the complete root-owned payload and sudo policy before
-publishing the narrowly scoped `NOPASSWD: NOSETENV` entry.
+publishing the narrowly scoped `NOPASSWD: NOSETENV` entry. File ownership
+and permissions are set through the open descriptor, and credential parents
+stay root-owned until the key is staged, so path replacement cannot redirect
+root ownership changes.
 
 Before reading the PEM or writing any file or policy, the installer reads the
 live `aru-merge` account and refuses unless its shell is exactly `/usr/bin/false`.
