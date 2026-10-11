@@ -213,17 +213,21 @@ def test_uninstalled_program_refuses_without_importing_privileged_helper(capsys)
     assert '"gate": "not-installed"' in capsys.readouterr().out
 
 
-def integration_module(name):
-    spec = importlib.util.spec_from_file_location("merge_integration_" + name,
-                                                 ROOT / f"integrations/merge-authority/{name}.py")
+def integration_module(spec):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-app = integration_module("app")
-bundle = integration_module("bundle")
-installer = integration_module("install")
+app = integration_module(importlib.util.spec_from_file_location(
+    "merge_integration_app", ROOT / "integrations/merge-authority/app.py",
+))
+bundle = integration_module(importlib.util.spec_from_file_location(
+    "merge_integration_bundle", ROOT / "integrations/merge-authority/bundle.py",
+))
+installer = integration_module(importlib.util.spec_from_file_location(
+    "merge_integration_install", ROOT / "integrations/merge-authority/install.py",
+))
 
 
 def config_fixture():

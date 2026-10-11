@@ -64,7 +64,7 @@ def test_actual_canonical_admission_refuses_without_app_post_or_merge(monkeypatc
 
 
 
-@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGXCPU, signal.SIGXFSZ])
+@pytest.mark.parametrize("signum", sorted(request.catchable_signals()))
 @pytest.mark.parametrize("stage", ["post", "await"])
 def test_catchable_interruption_cancels_authorization_and_restores_handlers(monkeypatch, signum, stage):
     import merge_pr
@@ -73,7 +73,7 @@ def test_catchable_interruption_cancels_authorization_and_restores_handlers(monk
     record = install_happy_gate(monkeypatch)
     record.update(number=825, body="Closes #821", reviewDecision="APPROVED")
     reads, posts = [], []
-    handlers = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGXCPU, signal.SIGXFSZ)}
+    handlers = {number: signal.getsignal(number) for number in request.catchable_signals()}
 
     def interrupt():
         handler = signal.getsignal(signum)
@@ -230,3 +230,53 @@ def test_confirmed_merge_closeout_error_preserved_without_authorization_revocati
     with pytest.raises(helper.KernelError, match="close-out-original-error"):
         request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
     assert posts == ["success"]
+
+
+@pytest.mark.parametrize("mask", [0o377, 0o777])
+def test_main_normalizes_caller_umask_and_leaves_reopenable_lock(tmp_path, monkeypatch, mask):
+    root = tmp_path / "installed"
+    root.mkdir()
+    (root / "runtime").mkdir(mode=0o700)
+    monkeypatch.setattr(request, "ROOT", root)
+    monkeypatch.setattr(request, "__file__", str(root / "request.py"))
+    monkeypatch.setattr(request.sys, "platform", "darwin")
+    monkeypatch.setattr(request.sys, "path", list(request.sys.path))
+    monkeypatch.setattr(request, "verify_resource_limits", lambda: None)
+    monkeypatch.setattr(request, "verify_installation", lambda _c: None)
+    monkeypatch.setattr(request, "protected_bytes", lambda *_a: b"{}")
+    monkeypatch.setattr(request, "validate_config", lambda _v: {
+        "principal_uid": os.getuid(), "repository": "gillella/Aru_Agentic_SDLC", "issues": [821]})
+    monkeypatch.setattr(request, "authority_environment", lambda _c: {})
+    monkeypatch.setattr(request.os, "environ", {})
+    monkeypatch.setattr(request.os, "chdir", lambda _p: None)
+    monkeypatch.setitem(sys.modules, "merge_pr", kernel())
+    before = os.umask(mask)
+    try:
+        for _attempt in range(2):
+            assert request.main(["--pr", "825", "--expected-head", HEAD, "--check"]) == 0
+            assert (root / "runtime/request.lock").stat().st_mode & 0o777 == 0o600
+        assert os.umask(mask) == mask
+    finally:
+        os.umask(before)
+
+
+def test_public_refusals_separate_canonical_and_authority_failures_without_raw_data():
+    helper = kernel()
+    assert request.public_failure(helper.KernelError("unaccepted criteria"), helper) == "kernel-refused"
+    assert request.public_failure(helper.KernelError("private diagnostic token"), helper) == "kernel-refused"
+    assert request.public_failure(OSError("private credential path"), helper) == "authority-unavailable"
+    assert request.public_failure(request.Refusal("request-head"), helper) == "request-head"
+
+
+def test_private_adapter_failure_has_authority_label_and_attempts_revocation():
+    helper = kernel()
+    posts = []
+    def post(_head, conclusion, _summary):
+        posts.append(conclusion)
+        if conclusion == "success":
+            raise helper.KernelError("private adapter failure")
+    helper.merge_authority.post = post
+    with pytest.raises(request.Refusal, match="authority-unavailable"):
+        with request.cancellation_guard(helper, HEAD, request.scope_refusal(helper)):
+            helper.merge_authority.post(HEAD, "success", "valid")
+    assert posts == ["success", "failure"]

@@ -99,7 +99,8 @@ def policy_text(caller: str, principal: str, interpreter_digest: str) -> str:
                         for name, value in LIMITS.items())
     return (f"Cmnd_Alias ARU_TRUSTED_MERGE = sha256:{interpreter_digest} "
             f"/usr/bin/python3 -I {ROOT}/request.py --pr * --expected-head *\n"
-            f"Defaults!ARU_TRUSTED_MERGE {options}\n"
+            f"Defaults!ARU_TRUSTED_MERGE {options}, umask=0077, umask_override, "
+            "command_timeout=0, !user_command_timeouts\n"
             f"{caller} ALL=({principal}) NOPASSWD: NOSETENV: ARU_TRUSTED_MERGE\n")
 
 

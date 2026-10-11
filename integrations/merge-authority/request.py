@@ -202,7 +202,8 @@ def execution_lock(uid: int) -> int:
     fd = os.open(ROOT / "runtime" / "request.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_mode & 0o077 or info.st_nlink != 1:
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != uid or info.st_mode & 0o077
+                or info.st_mode & 0o600 != 0o600 or info.st_nlink != 1):
             raise Refusal("unsafe-execution-lock")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -293,6 +294,34 @@ def scope_refusal(kernel) -> type:
 
 
 
+
+def catchable_signals() -> set:
+    """Handle every catchable default-terminating/stopping signal on this OS."""
+    ignored = {signal.SIGKILL, signal.SIGSTOP, signal.SIGCHLD, signal.SIGCONT,
+               signal.SIGWINCH, signal.SIGURG}
+    if hasattr(signal, "SIGINFO"):
+        ignored.add(signal.SIGINFO)
+    return signal.valid_signals() - ignored
+
+
+def authority_post(original_post, head, conclusion, summary, scope_error):
+    try:
+        return original_post(head, conclusion, summary)
+    except Refusal:
+        raise
+    except Exception:
+        raise scope_error("authority-unavailable") from None
+
+
+def public_failure(exc: Exception, kernel=None) -> str:
+    if isinstance(exc, Refusal):
+        return str(exc)
+    if getattr(exc, "gate", None):
+        return exc.gate
+    if kernel is not None and isinstance(exc, kernel.KernelError):
+        return "kernel-refused"
+    return "authority-unavailable"
+
 def cancel_pending(original_post, head, previous_signals, scope_error):
     # Defer catchable signals while attempting the same-head cancellation.
     for number in previous_signals:
@@ -326,7 +355,7 @@ def cancellation_guard(kernel, head: str, scope_error):
             # Mark before the call: interruption may occur after GitHub records
             # success but before the adapter or canonical helper returns it.
             authorization_pending = True
-        result = original_post(post_head, conclusion, summary)
+        result = authority_post(original_post, post_head, conclusion, summary, scope_error)
         if conclusion == "failure":
             authorization_pending = False
         return result
@@ -337,7 +366,7 @@ def cancellation_guard(kernel, head: str, scope_error):
 
     try:
         kernel.merge_authority.post = scoped_post
-        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGXCPU, signal.SIGXFSZ):
+        for number in sorted(catchable_signals()):
             previous_signals[number] = signal.signal(number, interrupted)
         yield merge_confirmed
     except BaseException:
@@ -415,7 +444,8 @@ def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> di
 
 
 def main(argv: list[str]) -> int:
-    lock = None
+    lock, kernel = None, None
+    previous_umask = os.umask(0o077)
     try:
         pr, head, check = parse_request(argv)
         if sys.platform != "darwin" or Path(__file__).absolute() != ROOT / "request.py":
@@ -441,12 +471,13 @@ def main(argv: list[str]) -> int:
                           "merge_commit": result.get("merge_commit")}))
         return 0
     except Exception as exc:
-        gate = str(exc) if isinstance(exc, Refusal) else getattr(exc, "gate", "authority-unavailable")
+        gate = public_failure(exc, kernel)
         print(json.dumps({"refused": True, "gate": gate}))
         return 2
     finally:
         if lock is not None:
             os.close(lock)
+        os.umask(previous_umask)
 
 
 if __name__ == "__main__":

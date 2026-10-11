@@ -81,18 +81,29 @@ never repeats a success, merges or waives a gate. This is not an atomic
 revocation guarantee: a transport outage outlasting those attempts can leave an
 unconfirmed success visible until a later helper run supersedes it. After an
 `authority-unavailable` refusal, read back that head's `aru-merge-authorized`
-runs before any further action; never merge that head by hand.
+runs before any further action; never merge that head by hand. A private
+adapter failure receives `authority-unavailable`; named canonical gates keep
+their gate label. A plain canonical `KernelError` receives `kernel-refused`,
+without copying private diagnostic text. The pinned helper uses that one type
+for both unmet gates and unreadable GitHub evidence, so the latter label does
+not claim a narrower diagnosis: refresh GitHub to distinguish those outcomes.
+Neither label grants permission to retry or use another merge route.
 
-The request installs handlers for catchable SIGINT, SIGTERM, SIGHUP, SIGXCPU
-and SIGXFSZ, restoring them afterward. It tracks attempted success before the adapter call,
+The request handles every catchable default-terminating/stopping signal on
+the installed OS, including quit, user, alarm and job-control signals, restoring
+previous handlers afterward. It tracks attempted success before the adapter call,
 so interruption even in the canonical post/try gap attempts a same-head failure.
 Further catchable signals are deferred during that cancellation; canonical
 revocation is not duplicated after a confirmed failure. Offline regressions
 exercise the real pinned helper and installed handlers, not a live host signal
-relay. SIGKILL, host loss and transport outages cannot guarantee cancellation;
+relay. Uncatchable SIGKILL/SIGSTOP, native faults, host loss and transport outages
+cannot guarantee cancellation;
 the existing non-atomic authorization/submission boundary still applies. The
 sudo policy pins all supported CPU, file-size, memory, stack, descriptor and
-process limits for only the digest-sealed request; core dumps are disabled. The
+process limits for only the digest-sealed request; core dumps are disabled.
+The policy also disables caller-selected command timeouts and pins a private
+umask with override; the program resets its umask before any runtime file
+creation, preventing an unusable lock from a strict caller mask. The
 request verifies both soft and hard values before authority access and refuses
 if sudo inherited or could not replace caller limits. Host proof must include a
 caller with deliberately restricted CPU/file-size limits still reaching an
