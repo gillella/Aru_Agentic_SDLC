@@ -25,6 +25,7 @@ KERNEL_FILES = (
     "merge_pr.py", "merge_authority.py", "merge_state.py", "common.py",
     "check_ci.py", "fetch_pr_feedback.py", "touches.py",
 )
+LOCKED_SHELL = "/usr/bin/false"
 
 
 def unpack(raw: bytes) -> tuple[dict, dict[str, bytes]]:
@@ -75,6 +76,14 @@ def system_interpreter() -> Path:
     return resolved
 
 
+def require_locked_principal(principal) -> None:
+    # Read-only check of live account metadata. A human administrator sets
+    # the shell beforehand; this installer never creates or edits an account.
+    if principal.pw_name != "aru-merge" or principal.pw_shell != LOCKED_SHELL:
+        raise ValueError("Merge principal aru-merge must already have the non-login shell "
+                         f"{LOCKED_SHELL}; accounts are never changed here")
+
+
 def policy_text(caller: str, principal: str, interpreter_digest: str) -> str:
     if any(not re.fullmatch(r"[a-z][a-z0-9_-]{0,31}", name) for name in (caller, principal)) or caller == principal:
         raise ValueError("Invalid distinct caller and principal")
@@ -115,6 +124,7 @@ def install_payload(manifest: dict, payload: dict[str, bytes], caller: str, prin
     staging = POLICY.with_name(".aru-trusted-merge-candidate")
     if staging.exists() or staging.is_symlink():
         raise ValueError("Existing policy staging file is preserved")
+    require_locked_principal(principal)
     root_chain(ROOT.parent)
     root_chain(POLICY.parent)
     python = system_interpreter()
@@ -182,6 +192,14 @@ def main() -> None:
     principal = pwd.getpwnam("aru-merge")
     if pwd.getpwnam(caller).pw_uid in (0, principal.pw_uid) or principal.pw_uid == 0 or principal.pw_gid == 0:
         raise ValueError("Caller and merge user must be separate non-root identities")
+    require_locked_principal(principal)
+    # The false shell narrows interactive login only. The human operator attests
+    # the host audit; this installer neither performs nor replaces that proof.
+    print("Access audit: no coding, CI or external caller can authenticate as aru-merge by password,")
+    print("SSH or remote access; no other unrestricted passwordless sudo or runner path reaches it;")
+    print("no operator credential, sudo timestamp or TTY is shared with those callers.")
+    if input("Is this host access audit complete? Type AUDITED: ") != "AUDITED":
+        raise ValueError("Operator did not confirm the completed access audit")
     number = input("Existing merge App 4921120 installation ID: ").strip()
     if not re.fullmatch(r"[1-9][0-9]{0,11}", number):
         raise ValueError("Invalid installation ID")

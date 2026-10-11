@@ -6,6 +6,7 @@ import hashlib
 import fcntl
 import json
 import os
+import pwd
 import re
 import stat
 import sys
@@ -16,6 +17,8 @@ KERNEL_FILES = (
     "merge_pr.py", "merge_authority.py", "merge_state.py", "common.py",
     "check_ci.py", "fetch_pr_feedback.py", "touches.py",
 )
+PRINCIPAL = "aru-merge"
+LOCKED_SHELL = "/usr/bin/false"
 
 
 class Refusal(RuntimeError):
@@ -132,11 +135,30 @@ def validate_config(config: object) -> dict:
     return config
 
 
+def verify_locked_principal(config: dict) -> None:
+    """Recheck live account metadata; the shell is never caller or config input.
+
+    A non-login shell narrows one access route. It does not prove the absence of
+    passwords, SSH, remote access or other sudo paths; host proof covers those.
+    """
+    try:
+        account = pwd.getpwuid(os.geteuid())
+    except KeyError:
+        raise Refusal("wrong-execution-principal") from None
+    if (account.pw_name, account.pw_uid, account.pw_gid, account.pw_dir) != (
+        PRINCIPAL, config["principal_uid"], config["principal_gid"], config["principal_home"],
+    ):
+        raise Refusal("wrong-execution-principal")
+    if account.pw_shell != LOCKED_SHELL:
+        raise Refusal("login-capable-principal")
+
+
 def verify_installation(config: dict) -> None:
     if not sys.flags.isolated or os.geteuid() != config["principal_uid"]:
         raise Refusal("wrong-execution-principal")
     if os.getegid() != config["principal_gid"] or os.geteuid() == 0:
         raise Refusal("wrong-execution-principal")
+    verify_locked_principal(config)
     for relative, digest in config["files"].items():
         if hashlib.sha256(protected_bytes(ROOT / relative, {0})).hexdigest() != digest:
             raise Refusal("installation-content-changed")
@@ -206,6 +228,7 @@ def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> di
     """Bind every canonical reread to this request's admitted issue and head."""
     original_pull = kernel.pull_request
     original_gate = kernel.issue_gate
+    original_close = kernel.close_out
     admitted = None
 
     def scoped_pull(number):
@@ -225,10 +248,18 @@ def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> di
             raise Refusal("authorized-issue-changed")
         return original_gate(numbers, *args, **kwargs)
 
+    def scoped_close(numbers, *args, **kwargs):
+        # The pinned helper passes the admitted issue; refuse any other set
+        # before canonical close-out reads or changes issue/Project status.
+        if admitted is None or numbers != [admitted]:
+            raise Refusal("authorized-issue-changed")
+        return original_close(numbers, *args, **kwargs)
+
     # The process lock admits one request. Temporary wrappers add the external
-    # operator scope to each read without replacing any canonical lifecycle gate.
+    # operator scope to each read and close-out without replacing a canonical gate.
     kernel.pull_request = scoped_pull
     kernel.issue_gate = scoped_gate
+    kernel.close_out = scoped_close
     try:
         record = kernel.pull_request(pr)
         if record.get("state") == "MERGED":
@@ -240,6 +271,7 @@ def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> di
     finally:
         kernel.pull_request = original_pull
         kernel.issue_gate = original_gate
+        kernel.close_out = original_close
 
 
 def main(argv: list[str]) -> int:

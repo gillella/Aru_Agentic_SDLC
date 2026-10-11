@@ -48,6 +48,7 @@ def kernel(record=None, failure=None):
     return SimpleNamespace(
         calls=calls, merge=merge, finalize_queued=finalize,
         issue_gate=lambda numbers, *_args, **_kwargs: [{"issue": numbers[0]}],
+        close_out=lambda numbers, *_args, **_kwargs: [{"issue": numbers[0]}],
         linked_issues=lambda body: [int(body.split("#")[1])],
         pull_request=lambda pr: record or {
             "number": pr, "headRefOid": HEAD, "body": "Closes #821",
@@ -103,6 +104,44 @@ def test_confirmed_merge_retry_only_finalizes_exact_head():
     assert helper.calls == [("finalize", 825, HEAD)]
     with pytest.raises(request.Refusal, match="already-merged"):
         request.execute_request(helper, {"issues": [821]}, 825, HEAD, True)
+
+
+@pytest.mark.parametrize("state", ["OPEN", "MERGED"])
+@pytest.mark.parametrize("numbers", [[822], [821, 822], []])
+def test_close_out_outside_admitted_issue_refuses_before_status_or_close(monkeypatch, state, numbers):
+    import merge_state
+
+    monkeypatch.setattr(merge_state, "issue", lambda *_a: pytest.fail("close-out read an issue"))
+    monkeypatch.setattr(merge_state, "set_status", lambda *_a, **_k: pytest.fail("close-out changed status"))
+    monkeypatch.setattr(merge_state, "run", lambda *_a: pytest.fail("close-out closed an issue"))
+    helper = kernel(dict(kernel().pull_request(825), state=state))
+    helper.close_out = merge_state.close_out
+
+    def stray_close_out(*_args, **_kwargs):
+        helper.calls.append("helper")
+        return helper.close_out(numbers, ["scripts/merge_pr.py"])
+
+    # Open requests reach merge(); confirmed-merge retries reach finalize_queued().
+    helper.merge = helper.finalize_queued = stray_close_out
+    with pytest.raises(request.Refusal, match="authorized-issue-changed"):
+        request.execute_request(helper, {"issues": [821, 822]}, 825, HEAD, False)
+    assert helper.calls == ["helper"]
+    assert helper.close_out is merge_state.close_out
+
+
+def test_admitted_close_out_calls_canonical_close_out_unchanged():
+    helper = kernel(dict(kernel().pull_request(825), state="MERGED"))
+    seen = []
+
+    def canonical(numbers, changed_paths):
+        seen.append((numbers, changed_paths))
+        return [{"issue": numbers[0]}]
+
+    helper.close_out = canonical
+    helper.finalize_queued = lambda _pr, _head: {"finalized": bool(helper.close_out([821], ["README.md"]))}
+    assert request.execute_request(helper, {"issues": [821]}, 825, HEAD, False) == {"finalized": True}
+    assert seen == [([821], ["README.md"])]
+    assert helper.close_out is canonical
 
 
 def test_authority_environment_has_no_caller_credentials_or_executable_inputs(monkeypatch):
@@ -221,6 +260,12 @@ def test_mutable_ancestor_is_rejected_before_read(tmp_path, monkeypatch):
         request.protected_bytes(path, {0, os.getuid()})
 
 
+def principal_account(**changes):
+    account = {"pw_name": "aru-merge", "pw_uid": 502, "pw_gid": 502,
+               "pw_dir": "/Users/aru-merge", "pw_shell": "/usr/bin/false"}
+    return SimpleNamespace(**{**account, **changes})
+
+
 def test_changed_content_or_wrong_principal_is_rejected(monkeypatch):
     config = config_fixture()
     monkeypatch.setattr(request.sys, "flags", SimpleNamespace(isolated=1))
@@ -229,9 +274,33 @@ def test_changed_content_or_wrong_principal_is_rejected(monkeypatch):
         request.verify_installation(config)
     monkeypatch.setattr(request.os, "geteuid", lambda: 502)
     monkeypatch.setattr(request.os, "getegid", lambda: 502)
+    monkeypatch.setattr(request.pwd, "getpwuid", lambda _uid: principal_account())
     monkeypatch.setattr(request, "protected_bytes", lambda *_args: b"tampered")
     with pytest.raises(request.Refusal, match="installation-content-changed"):
         request.verify_installation(config)
+
+
+@pytest.mark.parametrize("change,gate", [
+    ({"pw_shell": "/bin/zsh"}, "login-capable-principal"),
+    ({"pw_shell": "/sbin/nologin"}, "login-capable-principal"),
+    ({"pw_shell": ""}, "login-capable-principal"),
+    ({"pw_name": "gillella"}, "wrong-execution-principal"),
+    ({"pw_dir": "/Users/gillella"}, "wrong-execution-principal"),
+    (None, "wrong-execution-principal"),
+])
+def test_login_capable_or_changed_principal_refuses_before_code_or_credentials(monkeypatch, change, gate):
+    def account(uid):
+        if change is None:
+            raise KeyError(uid)
+        return principal_account(**change)
+
+    monkeypatch.setattr(request.sys, "flags", SimpleNamespace(isolated=1))
+    monkeypatch.setattr(request.os, "geteuid", lambda: 502)
+    monkeypatch.setattr(request.os, "getegid", lambda: 502)
+    monkeypatch.setattr(request.pwd, "getpwuid", account)
+    monkeypatch.setattr(request, "protected_bytes", lambda *_a, **_k: pytest.fail("read code or credentials"))
+    with pytest.raises(request.Refusal, match=gate):
+        request.verify_installation(config_fixture())
 
 
 @pytest.mark.parametrize("failure", ["ci", "feedback", "approval", "queue", "auto", "criteria",
@@ -440,6 +509,40 @@ def test_installation_never_executes_from_agent_or_unverified_mutable_source():
         installer.main()
 
 
+@pytest.mark.parametrize("shell,audit", [("/bin/zsh", "AUDITED"), ("/usr/bin/false", "skipped")])
+def test_installer_refuses_login_capable_or_unaudited_principal_before_key_or_writes(monkeypatch, shell, audit):
+    accounts = {
+        "gillella": SimpleNamespace(pw_uid=501, pw_gid=20, pw_name="gillella", pw_shell="/bin/zsh"),
+        "aru-merge": SimpleNamespace(pw_uid=502, pw_gid=502, pw_name="aru-merge", pw_shell=shell),
+    }
+    answers = iter(["INSTALL", "gillella", audit, "123", "/operator/merge-app.pem"])
+    monkeypatch.setattr(installer, "_BUNDLE_BYTES", package_fixture(monkeypatch), raising=False)
+    monkeypatch.setattr(installer.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(installer.sys, "flags", SimpleNamespace(isolated=1))
+    monkeypatch.setattr(installer.sys, "platform", "darwin")
+    monkeypatch.setattr(installer.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(installer, "system_interpreter", lambda: Path("/usr/bin/python3"))
+    monkeypatch.setattr(installer, "root_chain", lambda _p: None)
+    monkeypatch.setattr(installer.pwd, "getpwnam", accounts.__getitem__)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": next(answers))
+    monkeypatch.setattr(installer, "private_key", lambda _p: pytest.fail("PEM read before principal checks"))
+    monkeypatch.setattr(installer, "install_payload", lambda *_a: pytest.fail("installation wrote files"))
+    with pytest.raises(ValueError, match="access audit" if shell == "/usr/bin/false" else "non-login shell"):
+        installer.main()
+
+
+def test_installation_transaction_refuses_login_capable_principal_before_writes(tmp_path, monkeypatch):
+    manifest, payload = installer.unpack(package_fixture(monkeypatch))
+    monkeypatch.setattr(installer, "ROOT", tmp_path / "installation")
+    monkeypatch.setattr(installer, "POLICY", tmp_path / "aru-trusted-merge")
+    monkeypatch.setattr(installer.subprocess, "run", lambda *_a, **_k: pytest.fail("staged sudo policy"))
+    principal = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_name="aru-merge",
+                                pw_dir="/merge", pw_shell="/bin/zsh")
+    with pytest.raises(ValueError, match="non-login shell"):
+        installer.install_payload(manifest, payload, "gillella", principal, 123, b"fixture-only-key")
+    assert list(tmp_path.iterdir()) == []
+
+
 @pytest.mark.parametrize("invalid_policy", [False, True])
 def test_installation_transaction_seals_payload_before_publishing_capability(tmp_path, monkeypatch, invalid_policy):
     manifest, payload = installer.unpack(package_fixture(monkeypatch))
@@ -454,7 +557,8 @@ def test_installation_transaction_seals_payload_before_publishing_capability(tmp
     # separate metadata tests; this fixture never edits a system location.
     monkeypatch.setattr(installer, "root_chain", lambda _p: None)
     monkeypatch.setattr(installer, "system_interpreter", lambda: Path(request.sys.executable).resolve())
-    principal = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_name="aru-merge", pw_dir="/merge")
+    principal = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid(), pw_name="aru-merge", pw_dir="/merge",
+                                pw_shell="/usr/bin/false")
     calls = []
     def validate_policy(argv, **_kwargs):
         assert not policy.exists()

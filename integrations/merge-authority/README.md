@@ -27,9 +27,11 @@ there is no pending-work queue. Refusals do not authorize another route.
 The installation contains root-owned request/adapter code, exactly seven
 canonical helper modules, a sealed `gh` binary, and an empty Git metadata stub
 with one fixed origin and disabled hooks. It never checks out or executes PR
-code. Every request verifies the code hashes, interpreter identity, protected
-ancestor ownership/modes, private credential/runtime directories and the
-non-root merge principal before importing the canonical helper. A root/OS update
+code. Every request first rechecks the merge principal's live account name,
+IDs and home (`wrong-execution-principal`) and exact `/usr/bin/false` shell
+(`login-capable-principal`), then verifies code hashes, interpreter identity,
+protected ancestor ownership/modes and private credential/runtime directories
+before importing the canonical helper. A root/OS update
 or changed sealed component can require a separately reviewed reinstallation;
 there is no automatic helper upgrade or overwrite option.
 
@@ -113,11 +115,30 @@ Existing installation, sudo policy and staging paths are preserved rather than
 overwritten. Validate the complete root-owned payload and sudo policy before
 publishing the narrowly scoped `NOPASSWD: NOSETENV` entry.
 
+Before reading the PEM or writing any file or policy, the installer reads the
+live `aru-merge` account and refuses unless its shell is exactly `/usr/bin/false`.
+It never creates or edits an account: a human administrator sets that shell
+beforehand with the host's normal account tools and may confirm it read-only
+with `dscl . -read /Users/aru-merge UserShell`. Sudo still executes the fixed
+request and the operator setup commands below directly. The installer then
+requires the operator to type `AUDITED`, confirming a completed host access
+audit: coding, CI and external callers cannot authenticate as `aru-merge` by
+password, SSH or other remote access; no other unrestricted passwordless sudo or
+runner path reaches it; and no operator credential, sudo timestamp or TTY is
+shared with those callers. Human administrators remain trusted. A false shell
+closes only interactive login shells and does not prove any other access path;
+the actual host access and denial proof below remains mandatory.
+
 The admitted issue and exact head remain fixed through every canonical PR
 reread, including post-merge retry/finalization. A body change to another issue,
 even another installed allowed issue, refuses the request. GitHub reads and the
 merge operation remain separate; this adds scope enforcement to the canonical
-semantic rereads rather than claiming an atomic GitHub transaction.
+semantic rereads rather than claiming an atomic GitHub transaction. Canonical
+close-out is likewise accepted only for exactly the admitted issue; any other
+issue set refuses before status or close changes. The pinned helper already
+passes that issue. Helpers are immutable here, and any future helper refactor
+needs a newly reviewed installation; this wrapper does not promise scope
+enforcement for arbitrary future code.
 
 ## Operator proof before automatic use
 
@@ -154,6 +175,12 @@ Use permission-list inspection for the generic runner; do not execute it merely
 to test denial. Never tamper with installed production code to test its hashes;
 the offline tests cover changed code/ownership, archive integrity and real
 canonical-gate refusals.
+Separately prove the host access audit the installer only confirms: coding, CI
+and caller contexts cannot authenticate as `aru-merge` by password, SSH or other
+remote access; `sudo -l -U <identity>` for those identities shows no unrestricted
+passwordless route to it; and no operator credential, cached sudo authority or
+TTY is shared. Neither the typed `AUDITED` confirmation nor the false shell is
+that proof.
 
 Record nonsecret outcomes, exact installed hashes, scope, current head/checks/
 review and denials in the GitHub issue. Do not mark criteria from an installer
