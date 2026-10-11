@@ -260,6 +260,115 @@ def validate_live_record(kernel, record: dict, config: dict, pr: int, head: str)
     return numbers[0]
 
 
+def bounded_nodes(connection) -> list:
+    if (not isinstance(connection, dict) or type(connection.get("totalCount")) is not int
+            or not isinstance(connection.get("nodes"), list)
+            or not 0 <= connection["totalCount"] <= 100
+            or len(connection["nodes"]) != connection["totalCount"]
+            or not isinstance(connection.get("pageInfo"), dict)
+            or connection["pageInfo"].get("hasNextPage") is not False):
+        raise Refusal("closing-effect-evidence")
+    return connection["nodes"]
+
+
+def read_closing_effects(kernel, record: dict, pr: int) -> dict:
+    owner, name = kernel.repo_slug().split("/", 1)
+    query = """query($owner:String!,$name:String!,$number:Int!){
+      repository(owner:$owner,name:$name){pullRequest(number:$number){
+        number title body state headRefOid baseRefOid headRefName
+        mergeCommit{oid message}
+        repository{nameWithOwner} headRepository{nameWithOwner}
+        closingIssuesReferences(first:100,excludeUserLinked:false){
+          totalCount pageInfo{hasNextPage} nodes{number repository{nameWithOwner}}
+        }
+        commits(first:100){totalCount pageInfo{hasNextPage} nodes{commit{oid message}}}
+      }}
+    }"""
+    try:
+        result = kernel.run([
+            "gh", "api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}",
+            "-F", f"name={name}", "-F", f"number={pr}",
+        ], auth="repository", timeout=30)
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict) or ("errors" in data and data["errors"] != []):
+            raise ValueError
+        return data["data"]["repository"]["pullRequest"]
+    except Exception:
+        raise Refusal("closing-effect-evidence") from None
+
+
+def restricted_closing_text(text: str, issue: int) -> None:
+    """Admit simple whole-line directives only; do not emulate GitHub's parser.
+
+    Remove exact same-issue local directives and Markdown heading markers, then
+    deny any remaining reference when closing vocabulary occurs in the text.
+    This rejects prose/code examples and ambiguous syntax as well as closures;
+    removing a directive must never hide a possible continuation target.
+    Conventional 'fix:' messages without references remain usable. Substring
+    matching is conservative even around punctuation, Markdown and Unicode.
+    """
+    keywords = r"close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved"
+    directive = re.compile(rf"(?i:{keywords})[ \t]+#{issue}")
+    residual = "\n".join(re.sub(r"^[ \t]*#{1,6}[ \t]+", "", line)
+                         for line in text.splitlines()
+                         if not directive.fullmatch(line.strip(" \t\r")))
+    if re.search(keywords, text, re.I) and (
+        "#" in residual or "github.com" in residual.lower()
+    ):
+        raise Refusal("authorized-closing-scope")
+
+
+def validate_closing_effects(kernel, record: dict, config: dict, pr: int, issue: int) -> None:
+    live = read_closing_effects(kernel, record, pr)
+    if (not isinstance(live, dict)
+            or any(key not in record or live.get(key) != record[key] for key in
+                   ("number", "title", "body", "state", "headRefOid", "baseRefOid", "headRefName"))
+            or live.get("repository") != {"nameWithOwner": config["repository"]}
+            or live.get("headRepository") != {"nameWithOwner": config["repository"]}):
+        raise Refusal("closing-effect-evidence")
+    for field in ("title", "body", "headRefName"):
+        if not isinstance(live[field], str):
+            raise Refusal("closing-effect-evidence")
+        restricted_closing_text(live[field], issue)
+    targets = bounded_nodes(live.get("closingIssuesReferences"))
+    if (len(targets) != 1 or not isinstance(targets[0], dict)
+            or type(targets[0].get("number")) is not int
+            or targets != [{"number": issue, "repository": {"nameWithOwner": config["repository"]}}]):
+        raise Refusal("authorized-closing-scope")
+    commits = bounded_nodes(live.get("commits"))
+    oids = []
+    for node in commits:
+        commit = node.get("commit") if isinstance(node, dict) else None
+        if (not isinstance(commit, dict) or not isinstance(commit.get("oid"), str)
+                or not re.fullmatch(r"[0-9a-f]{40}", commit["oid"])
+                or not isinstance(commit.get("message"), str)):
+            raise Refusal("closing-effect-evidence")
+        oids.append(commit["oid"])
+        restricted_closing_text(commit["message"], issue)
+    if not oids or len(set(oids)) != len(oids) or record["headRefOid"] not in oids:
+        raise Refusal("closing-effect-evidence")
+    if record["state"] == "MERGED":
+        validate_merge_message(live, record, config, pr, issue)
+
+
+def validate_merge_message(live, record, config, pr, issue):
+    commit = live.get("mergeCommit")
+    expected = record.get("mergeCommit")
+    if (not isinstance(commit, dict) or not isinstance(expected, dict)
+            or commit.get("oid") != expected.get("oid")
+            or not isinstance(commit.get("oid"), str)
+            or not re.fullmatch(r"[0-9a-f]{40}", commit["oid"])
+            or not isinstance(commit.get("message"), str)):
+        raise Refusal("closing-effect-evidence")
+    # This fixed mechanical header references the PR, not a closing target.
+    # Its branch and the remaining generated title/body are checked separately.
+    header = f"Merge pull request #{pr} from {config['repository'].split('/')[0]}/{record['headRefName']}\n\n"
+    message = commit["message"]
+    if message.startswith(header):
+        message = message[len(header):]
+    restricted_closing_text(message, issue)
+
+
 def merged_body_unchanged(kernel, record: dict, pr: int, head: str) -> None:
     """Use GitHub's body-edit evidence, not a local receipt, for merged retries."""
     owner, name = kernel.repo_slug().split("/", 1)
@@ -293,6 +402,7 @@ def admitted_issue(kernel, record: dict, config: dict, pr: int, head: str) -> in
     issue = validate_live_record(kernel, record, config, pr, head)
     if record.get("state") == "MERGED":
         merged_body_unchanged(kernel, record, pr, head)
+    validate_closing_effects(kernel, record, config, pr, issue)
     return issue
 
 
@@ -352,14 +462,13 @@ def confirmed_merge(record: dict, pr: int, head: str) -> bool:
 
 
 @contextmanager
-def cancellation_guard(kernel, head: str, scope_error):
+def cancellation_guard(kernel, head: str, scope_error, before_success=None):
     """Cancel attempted authorization on catchable interruption or failure."""
     original_post = kernel.merge_authority.post
     authorization_pending = False
     previous_signals = {}
     signals = catchable_signals()
-    interrupted_once = False
-    cleaning = False
+    interrupted_once = cleaning = False
 
     def interrupted(_number, _frame):
         nonlocal interrupted_once
@@ -376,6 +485,8 @@ def cancellation_guard(kernel, head: str, scope_error):
         if post_head != head:
             raise scope_error("current-head")
         if conclusion == "success":
+            if before_success is not None:
+                before_success()
             # Mark before the call: interruption may occur after GitHub records
             # success but before the adapter or canonical helper returns it.
             authorization_pending = True
@@ -429,16 +540,39 @@ def checked_admission(kernel, record, config, pr, head, scope_error):
         # Scope changes inside the canonical submission block reach revocation.
         raise scope_error(str(exc)) from None
 
+
+def scoped_issue_action(original, admitted, scope_error, before=None):
+    def action(numbers, *args, **kwargs):
+        if admitted() is None or numbers != [admitted()]:
+            raise scope_error("authorized-issue-changed")
+        if before is not None:
+            before()
+        return original(numbers, *args, **kwargs)
+    return action
+
+
 def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> dict:
     """Bind every canonical reread to this request's admitted issue and head."""
     scope_error = scope_refusal(kernel)
     original_pull = kernel.pull_request
     original_gate = kernel.issue_gate
     original_close = kernel.close_out
+    original_run = kernel.run
     admitted = None
+    latest_record = None
+
+    def recheck_effects():
+        issue = checked_admission(kernel, latest_record, config, pr, head, scope_error)
+        if issue != admitted:
+            raise scope_error("authorized-issue-changed")
+
+    def scoped_run(argv, *args, **kwargs):
+        if list(argv)[:3] == ["gh", "pr", "merge"]:
+            recheck_effects()
+        return original_run(argv, *args, **kwargs)
 
     def scoped_pull(number):
-        nonlocal admitted
+        nonlocal admitted, latest_record
         if number != pr:
             raise scope_error("current-head")
         record = original_pull(number)
@@ -449,27 +583,17 @@ def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> di
             admitted = issue
         elif issue != admitted:
             raise scope_error("authorized-issue-changed")
+        latest_record = dict(record)
         return record
-
-    def scoped_gate(numbers, *args, **kwargs):
-        if admitted is None or numbers != [admitted]:
-            raise scope_error("authorized-issue-changed")
-        return original_gate(numbers, *args, **kwargs)
-
-    def scoped_close(numbers, *args, **kwargs):
-        # The pinned helper passes the admitted issue; refuse any other set
-        # before canonical close-out reads or changes issue/Project status.
-        if admitted is None or numbers != [admitted]:
-            raise scope_error("authorized-issue-changed")
-        return original_close(numbers, *args, **kwargs)
 
     # The process lock admits one request. Temporary wrappers add the external
     # operator scope to each read and close-out without replacing a canonical gate.
     kernel.pull_request = scoped_pull
-    kernel.issue_gate = scoped_gate
-    kernel.close_out = scoped_close
+    kernel.issue_gate = scoped_issue_action(original_gate, lambda: admitted, scope_error)
+    kernel.close_out = scoped_issue_action(original_close, lambda: admitted, scope_error, recheck_effects)
+    kernel.run = scoped_run
     try:
-        with cancellation_guard(kernel, head, scope_error) as confirm_merge:
+        with cancellation_guard(kernel, head, scope_error, recheck_effects) as confirm_merge:
             record = kernel.pull_request(pr)
             if record.get("state") == "MERGED":
                 if check:
@@ -481,6 +605,7 @@ def execute_request(kernel, config: dict, pr: int, head: str, check: bool) -> di
         kernel.pull_request = original_pull
         kernel.issue_gate = original_gate
         kernel.close_out = original_close
+        kernel.run = original_run
 
 
 def main(argv: list[str]) -> int:

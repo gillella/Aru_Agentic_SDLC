@@ -233,6 +233,35 @@ passes that issue. Helpers are immutable here, and any future helper refactor
 needs a newly reviewed installation; this wrapper does not promise scope
 enforcement for arbitrary future code.
 
+The integration does not treat the Kernel's standalone closing-line parser as
+proof of every GitHub closing effect. Each admission requires a matching GitHub
+GraphQL snapshot of the PR's body, title, state, head, base, branch and both
+repositories; a complete `closingIssuesReferences` inventory including manual
+links containing exactly the admitted issue in the installed repository; and
+every PR commit's full message. Null, malformed, conflicting or unreadable
+evidence refuses. Each inventory is bounded to 100 entries: a remaining page,
+count mismatch, duplicate commit or missing head refuses rather than treating
+partial data as complete. Merged reads also inspect the actual merge commit's
+message and require its oid to match the canonical PR record.
+
+Closing text is deliberately restricted instead of attempting to duplicate
+GitHub's keyword parser. Only whole-line local directives for the admitted issue
+are accepted. After removing those directives and Markdown heading markers,
+text containing closing vocabulary and any remaining `#` or `github.com`
+reference refuses. This includes colon/compound/qualified forms, extra targets
+in commit messages, and ambiguous examples or unrelated references in the same
+text, even when the extra issue is in the installation allowlist. Conventional
+`fix:` text without references remains usable. The fixed GitHub merge header's
+reference to this PR is removed before checking the generated message; the
+branch, title and body are checked separately.
+
+The complete effect proof is reread on every canonical PR read and immediately
+before posting success authorization, submitting the merge command, and calling
+canonical close-out. Observed drift before submission refuses; drift after a
+success authorization triggers the existing failure compensation. Once GitHub
+confirms merge, drift blocks close-out but cannot undo the merge or automatic
+closures. These separate reads remain non-atomic and do not lock GitHub metadata.
+
 ## Operator proof before automatic use
 
 The human configures a fresh, appropriately authorized CLI login under the

@@ -13,6 +13,200 @@ from types import SimpleNamespace
 import pytest
 
 from test_trusted_merge import HEAD, ROOT, bundle, config_fixture, installer, kernel, request
+from test_trusted_merge import closing_effect_fixture, mock_closing_effects  # noqa: F401
+
+READ_CLOSING_EFFECTS = request.read_closing_effects
+SCOPE_CONFIG = {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821, 822, 792]}
+
+
+def canonical_effect_flow(monkeypatch, mutate=None, at=1):
+    """Actual merge/finalization helpers, with only offline GitHub transport."""
+    import merge_pr
+    from test_merge_gate import install_happy_gate
+
+    record = install_happy_gate(monkeypatch)
+    record.update(number=825, title="Implement requests", body="Closes #821",
+                  reviewDecision="APPROVED")
+    posts, submissions, closures, reads = [], [], [], []
+
+    def transport(argv, **kwargs):
+        if argv[:3] == ["gh", "api", "graphql"]:
+            assert kwargs["auth"] == "repository"
+            if "closingIssuesReferences" in argv[4]:
+                assert "excludeUserLinked:false" in argv[4]
+                assert "commits(first:100)" in argv[4]
+                assert kwargs["timeout"] == 30
+                reads.append(True)
+                live = closing_effect_fixture(record)
+                if mutate and len(reads) >= at:
+                    mutate(live)
+            else:
+                live = {key: record[key] for key in
+                        ("number", "state", "headRefOid", "body", "mergedAt")}
+                live["lastEditedAt"] = None
+            return SimpleNamespace(stdout=json.dumps({"data": {"repository": {"pullRequest": live}}}))
+        assert argv == ["gh", "pr", "merge", "825", "--merge", "--match-head-commit", HEAD]
+        submissions.append(argv)
+        record.update(state="MERGED", mergedAt="2026-10-11T03:00:00Z",
+                      mergeCommit={"oid": "c" * 40})
+        return SimpleNamespace(stdout="")
+
+    def post(head, conclusion, _summary):
+        posts.append((head, conclusion))
+        return len(posts)
+
+    def close(numbers, _paths):
+        closures.append(numbers)
+        return [{"issue": numbers[0]}]
+
+    monkeypatch.setattr(request, "read_closing_effects", READ_CLOSING_EFFECTS)
+    monkeypatch.setattr(merge_pr, "repo_slug", lambda: SCOPE_CONFIG["repository"])
+    monkeypatch.setattr(merge_pr, "run", transport)
+    monkeypatch.setattr(merge_pr, "issue_gate", lambda numbers, *_a, **_k: [{"issue": numbers[0]}])
+    monkeypatch.setattr(merge_pr, "finalization_verdict", lambda _r: {
+        "head": HEAD, "state": "success", "checks": ["Verify"]})
+    monkeypatch.setattr(merge_pr.merge_authority, "post", post)
+    monkeypatch.setattr(merge_pr, "close_out", close)
+    return merge_pr, record, posts, submissions, closures, reads
+
+
+@pytest.mark.parametrize("extra", [
+    "Closes: #793", "CLOSES #793", "CLOSES: #793",
+    "Resolves #821, resolves #793, resolves octo-org/octo-repo#100",
+    "Fixes octo-org/octo-repo#821", "Closes https://github.com/other/repo/issues/793",
+    "Closes: #822", "<!-- closes #793 -->", "`fixes #793`", "Closes\n#793",
+    "Closes #821\n#793", "Closes #821\nhttps://github.com/other/repo/issues/793",
+])
+@pytest.mark.parametrize("field", ["body", "title", "commit"])
+def test_additional_closing_effects_never_authorize_submit_or_close(monkeypatch, extra, field):
+    helper, record, posts, submissions, closures, _reads = canonical_effect_flow(monkeypatch)
+    if field == "commit":
+        def mutate(live):
+            live["commits"]["nodes"].insert(0, {"commit": {"oid": "d" * 40, "message": extra}})
+            live["commits"]["totalCount"] = 2
+        helper, record, posts, submissions, closures, _reads = canonical_effect_flow(monkeypatch, mutate)
+    else:
+        record[field] = "Closes #821\n\n" + extra if field == "body" else extra
+    with pytest.raises(request.Refusal, match="authorized-(closing|issue)-scope"):
+        request.execute_request(helper, SCOPE_CONFIG, 825, HEAD, False)
+    assert not posts and not submissions and not closures
+
+
+def corrupt_effect_evidence(live, defect):
+    if defect in ("extra-link", "allowed-extra-link", "foreign-link", "missing-link"):
+        targets = live["closingIssuesReferences"]
+        if defect == "missing-link":
+            targets["nodes"] = []
+        else:
+            targets["nodes"].append({"number": 822 if defect == "allowed-extra-link" else 793,
+                                    "repository": {"nameWithOwner": "other/repo" if defect == "foreign-link"
+                                                   else SCOPE_CONFIG["repository"]}})
+        targets["totalCount"] = len(targets["nodes"])
+    elif defect in ("body", "title", "state", "baseRefOid", "headRefOid", "headRefName", "number"):
+        live[defect] = "drift"
+    elif defect in ("repository", "headRepository"):
+        live[defect] = {"nameWithOwner": "other/repo"}
+    elif defect.startswith("commits-") or defect.startswith("links-"):
+        connection = live["commits" if defect.startswith("commits-") else "closingIssuesReferences"]
+        kind = defect.split("-")[1]
+        if kind == "page":
+            connection["pageInfo"]["hasNextPage"] = True
+        elif kind == "boolean":
+            connection["pageInfo"]["hasNextPage"] = 0
+        elif kind == "count":
+            connection["totalCount"] += 1
+        elif kind == "overflow":
+            connection["totalCount"] = 101
+        elif kind == "null":
+            connection["nodes"][0] = None
+    elif defect == "message":
+        live["commits"]["nodes"][0]["commit"]["message"] = None
+    elif defect == "missing-head":
+        live["commits"]["nodes"][0]["commit"]["oid"] = "d" * 40
+    elif defect == "duplicate":
+        live["commits"]["nodes"] *= 2
+        live["commits"]["totalCount"] = 2
+    elif defect == "absent":
+        live.clear()
+
+
+@pytest.mark.parametrize("defect", [
+    "extra-link", "allowed-extra-link", "foreign-link", "missing-link", "body", "title", "state",
+    "baseRefOid", "headRefOid", "headRefName", "number", "repository", "headRepository", "message", "missing-head",
+    "duplicate", "absent", *[prefix + suffix for prefix in ("commits-", "links-")
+                             for suffix in ("page", "boolean", "count", "overflow", "null")],
+])
+def test_incomplete_or_conflicting_effect_proof_refuses_before_authority(monkeypatch, defect):
+    helper, _record, posts, submissions, closures, _reads = canonical_effect_flow(
+        monkeypatch, lambda live: corrupt_effect_evidence(live, defect))
+    with pytest.raises(request.Refusal, match="closing-(effect-evidence|scope)"):
+        request.execute_request(helper, SCOPE_CONFIG, 825, HEAD, False)
+    assert not posts and not submissions and not closures
+
+
+@pytest.mark.parametrize("failure", ["transport", "json", "errors", "null"])
+def test_unreadable_effect_lookup_refuses_without_fallback(monkeypatch, failure):
+    helper, _record, posts, submissions, closures, _reads = canonical_effect_flow(monkeypatch)
+    def unreadable(*_a, **_k):
+        if failure == "transport":
+            raise helper.KernelError("unreadable private diagnostic")
+        return SimpleNamespace(stdout={"json": "broken", "errors": '{"data":{},"errors":[{}]}',
+                                       "null": '{"data":{"repository":null}}'}[failure])
+    monkeypatch.setattr(helper, "run", unreadable)
+    with pytest.raises(request.Refusal, match="closing-effect-evidence"):
+        request.execute_request(helper, SCOPE_CONFIG, 825, HEAD, False)
+    assert not posts and not submissions and not closures
+
+
+@pytest.mark.parametrize("at", range(2, 11))
+@pytest.mark.parametrize("source", ["linked", "commit"])
+def test_effect_scope_drift_on_each_reread_and_action_boundary_refuses(monkeypatch, at, source):
+    def mutate(live):
+        if source == "linked":
+            corrupt_effect_evidence(live, "extra-link")
+        else:
+            live["commits"]["nodes"][0]["commit"]["message"] = "CLOSES: #793"
+    helper, _record, posts, submissions, closures, reads = canonical_effect_flow(monkeypatch, mutate, at)
+    originals = (helper.pull_request, helper.run, helper.issue_gate, helper.close_out, helper.merge_authority.post)
+    with pytest.raises(request.Refusal, match="authorized-closing-scope"):
+        request.execute_request(helper, SCOPE_CONFIG, 825, HEAD, False)
+    assert len(reads) == at and not closures
+    if at <= 5:  # Initial evaluation, final reread, or immediately before authorization.
+        assert not posts and not submissions
+    elif at <= 7:  # await_unblocked or immediately before the merge command.
+        assert posts == [(HEAD, "success"), (HEAD, "failure")] and not submissions
+    else:  # Observed only after GitHub confirmed merge: cannot undo submission.
+        assert posts == [(HEAD, "success")] and len(submissions) == 1
+    assert originals == (helper.pull_request, helper.run, helper.issue_gate, helper.close_out,
+                         helper.merge_authority.post)
+
+
+@pytest.mark.parametrize("check", [False, True])
+def test_complete_single_issue_effect_proof_preserves_legitimate_canonical_flow(monkeypatch, check):
+    helper, record, posts, submissions, closures, reads = canonical_effect_flow(monkeypatch)
+    record.update(title="fix: protect requests", body="## Implementation\n\nProtect requests.\n\nCloses #821")
+    result = request.execute_request(helper, SCOPE_CONFIG, 825, HEAD, check)
+    assert result["merged"] is not check
+    assert posts == ([] if check else [(HEAD, "success")])
+    assert len(submissions) == (0 if check else 1)
+    assert closures == ([] if check else [[821]])
+    assert len(reads) == (2 if check else 10)
+
+
+@pytest.mark.parametrize("defect", ["additional", "missing", "mismatch", "message"])
+def test_merged_retry_reads_actual_merge_commit_before_any_closeout(monkeypatch, defect):
+    def mutate(live):
+        if defect == "additional":
+            live["mergeCommit"]["message"] += "\nCLOSES: other/repo#793"
+        elif defect == "missing":
+            live["mergeCommit"] = None
+        else:
+            live["mergeCommit"]["oid" if defect == "mismatch" else "message"] = None
+    helper, record, posts, submissions, closures, _reads = canonical_effect_flow(monkeypatch, mutate)
+    record.update(state="MERGED", mergedAt="2026-10-11T03:00:00Z", mergeCommit={"oid": "c" * 40})
+    with pytest.raises(request.Refusal, match="closing-(scope|effect-evidence)"):
+        request.execute_request(helper, SCOPE_CONFIG, 825, HEAD, False)
+    assert not posts and not submissions and not closures
 
 
 @pytest.mark.parametrize("failure", ["ci", "feedback", "approval", "queue", "auto", "criteria",
@@ -61,7 +255,7 @@ def test_actual_canonical_admission_refuses_without_app_post_or_merge(monkeypatc
         "project": "labels and linked Project", "base": "BEHIND",
     }
     with pytest.raises(merge_pr.KernelError, match=expected[failure]):
-        request.execute_request(merge_pr, {"issues": [821]}, 825, HEAD, False)
+        request.execute_request(merge_pr, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)
 
 
 
@@ -100,7 +294,7 @@ def test_catchable_interruption_cancels_authorization_and_restores_handlers(monk
     monkeypatch.setattr(merge_pr, "run", lambda *_a, **_k: pytest.fail("interrupted request submitted merge"))
     monkeypatch.setattr(merge_pr, "close_out", lambda *_a, **_k: pytest.fail("interrupted request closed issue"))
     with pytest.raises(request.Refusal, match="request-interrupted"):
-        request.execute_request(merge_pr, {"issues": [821]}, 825, HEAD, False)
+        request.execute_request(merge_pr, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)
     assert posts == [(HEAD, "success"), (HEAD, "failure")]
     assert merge_pr.pull_request is pull and merge_pr.merge_authority.post is post
     assert all(signal.getsignal(number) is handler for number, handler in handlers.items())
@@ -117,7 +311,7 @@ def test_keyboard_interrupt_after_post_is_also_canceled(monkeypatch):
     helper.merge_authority.post = post
     helper.merge = lambda *_a, **_k: helper.merge_authority.post(HEAD, "success", "Passed")
     with pytest.raises(KeyboardInterrupt):
-        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+        request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)
     assert posts == [(HEAD, "success"), (HEAD, "failure")]
     assert helper.merge_authority.post is post
 
@@ -175,7 +369,7 @@ def test_second_signal_during_unwind_and_compensation_cannot_skip_cancellation(m
     try:
         gate = {"ordinary-error": "authority-unavailable", "ordinary-unwind": "ordinary metadata exception"}.get(stage, "request-interrupted")
         with pytest.raises(OSError if stage == "ordinary-unwind" else request.Refusal, match=gate):
-            request.execute_request(merge_pr, {"issues": [821]}, 825, HEAD, False)
+            request.execute_request(merge_pr, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)
         assert posts == [(HEAD, "success"), (HEAD, "failure")]
         assert merge_pr.pull_request is pull and merge_pr.merge_authority.post is post
         assert all(signal.getsignal(number) is handler for number, handler in handlers.items())
@@ -213,7 +407,7 @@ def test_reentrant_python_delivery_while_first_signal_blocks_does_not_raise_twic
     helper.merge_authority.post = post
     helper.merge = lambda *_a, **_k: helper.merge_authority.post(HEAD, "success", "valid")
     with pytest.raises(request.Refusal, match="request-interrupted"):
-        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+        request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)
     assert reentered == [True] and posts == [(HEAD, "success"), (HEAD, "failure")]
     assert original_mask(signal.SIG_BLOCK, set()) == before
     assert all(signal.getsignal(number) is handler for number, handler in handlers.items())
@@ -245,7 +439,7 @@ def test_signal_at_ordinary_exception_cleanup_entry_and_failed_compensation_rest
     helper.merge_authority.post, helper.merge = post, merge
     monkeypatch.setattr(signal, "pthread_sigmask", mask)
     with pytest.raises(request.Refusal, match="authorization-revocation-unavailable"):
-        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+        request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)
     assert cleanup_delivery == [True] and posts == ["success", "failure"]
     assert helper.merge_authority.post is post
     assert original_mask(signal.SIG_BLOCK, set()) == before
@@ -282,7 +476,7 @@ def test_first_signal_before_cleanup_flag_cannot_escape_compensation():
     try:
         sys.settrace(trace)
         with pytest.raises(request.Refusal, match="request-interrupted"):
-            request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+            request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)
         sys.settrace(old_trace)
         assert posts == [(HEAD, "success"), (HEAD, "failure")]
         assert helper.merge_authority.post is post
@@ -303,7 +497,7 @@ def test_new_process_retry_refuses_a_body_edited_at_or_after_merge(edited):
     metadata["lastEditedAt"] = edited
     helper.run = lambda *_a, **_k: SimpleNamespace(stdout=json.dumps({"data": {"repository": {"pullRequest": metadata}}}))
     with pytest.raises(request.Refusal, match="merged-body"):
-        request.execute_request(helper, {"issues": [821, 822]}, 825, HEAD, False)
+        request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821, 822]}, 825, HEAD, False)
     assert helper.calls == []
 
 
@@ -315,7 +509,7 @@ def test_merged_retry_requires_current_matching_github_metadata(change):
     metadata.update(lastEditedAt=None, **change)
     helper.run = lambda *_a, **_k: SimpleNamespace(stdout=json.dumps({"data": {"repository": {"pullRequest": metadata}}}))
     with pytest.raises(request.Refusal, match="merged-body-evidence"):
-        request.execute_request(helper, {"issues": [821, 822]}, 825, HEAD, False)
+        request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821, 822]}, 825, HEAD, False)
     assert helper.calls == []
 
 
@@ -403,7 +597,7 @@ def test_confirmed_merge_closeout_error_preserved_without_authorization_revocati
 
     helper.merge = merge
     with pytest.raises(helper.KernelError, match="close-out-original-error"):
-        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+        request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)
     assert posts == ["success"]
 
 

@@ -21,6 +21,34 @@ SPEC.loader.exec_module(request)
 HEAD = "a" * 40
 
 
+def closing_effect_fixture(record):
+    from merge_state import linked_issues
+    record.setdefault("title", "Implement trusted requests")
+    record.setdefault("baseRefOid", "b" * 40)
+    record.setdefault("headRefName", "feat/issue-821")
+    if record["state"] == "MERGED":
+        record.setdefault("mergeCommit", {"oid": "c" * 40})
+    def connection(nodes):
+        return {"totalCount": len(nodes), "nodes": nodes, "pageInfo": {"hasNextPage": False}}
+    repository = {"nameWithOwner": "gillella/Aru_Agentic_SDLC"}
+    return {**{key: record[key] for key in
+               ("number", "title", "body", "state", "headRefOid", "baseRefOid", "headRefName")},
+            "repository": repository, "headRepository": repository,
+            "mergeCommit": None if record["state"] != "MERGED" else {
+                "oid": record["mergeCommit"]["oid"],
+                "message": f"Merge pull request #825 from gillella/{record['headRefName']}\n\n{record['title']}"},
+            "closingIssuesReferences": connection([
+                {"number": linked_issues(record["body"])[0], "repository": repository}]),
+            "commits": connection([{"commit": {"oid": HEAD, "message": "fix: protect requests"}}])}
+
+
+@pytest.fixture(autouse=True)
+def mock_closing_effects(monkeypatch):
+    # Existing merge/signal cases mock the read, while retaining effect validation.
+    monkeypatch.setattr(request, "read_closing_effects",
+                        lambda _kernel, record, _pr: closing_effect_fixture(record))
+
+
 @pytest.mark.parametrize("arguments", [
     [], ["--pr", "825"], ["--pr", "0", "--expected-head", HEAD],
     ["--pr", "825;sh", "--expected-head", HEAD],
@@ -74,7 +102,7 @@ def kernel(record=None, failure=None):
 def test_trusted_request_delegates_merge_and_check_to_canonical_helper():
     for check in (False, True):
         helper = kernel()
-        result = request.execute_request(helper, {"issues": [821]}, 825, HEAD, check)
+        result = request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, check)
         assert helper.calls == [("merge", 825, HEAD, check)]
         assert result["merged"] is not check
     assert request.parse_request(["--pr", "825", "--expected-head", HEAD, "--check"]) == (825, HEAD, True)
@@ -94,7 +122,7 @@ def test_untrusted_live_authority_never_reaches_submission(change, gate):
     record.update(change)
     helper = kernel(record)
     with pytest.raises(request.Refusal, match=gate):
-        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+        request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)
     assert helper.calls == []
 
 
@@ -102,7 +130,7 @@ def test_scope_refusals_are_also_the_sealed_helpers_error_type():
     record = dict(kernel().pull_request(825), reviewDecision="REVIEW_REQUIRED")
     helper = kernel(record)
     with pytest.raises(FakeKernelError) as refused:
-        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+        request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)
     # The public gate is unchanged while canonical KernelError handlers catch it.
     assert isinstance(refused.value, request.Refusal)
     assert str(refused.value) == "github-counted-approval"
@@ -118,7 +146,7 @@ def test_helper_without_verified_kernel_error_refuses_before_any_read(contract):
     else:
         helper.KernelError = contract
     with pytest.raises(request.Refusal, match="kernel-error-contract"):
-        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+        request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)
     assert helper.calls == []
 
 
@@ -130,7 +158,7 @@ def test_helper_without_verified_kernel_error_refuses_before_any_read(contract):
 def test_request_propagates_canonical_gate_refusals_without_fallback(gate):
     helper = kernel(failure=RuntimeError(gate))
     with pytest.raises(RuntimeError, match=gate):
-        request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)
+        request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)
     assert helper.calls == [("merge", 825, HEAD, False)]
 
 
@@ -138,10 +166,10 @@ def test_confirmed_merge_retry_only_finalizes_exact_head():
     record = kernel().pull_request(825)
     record["state"] = "MERGED"
     helper = kernel(record)
-    assert request.execute_request(helper, {"issues": [821]}, 825, HEAD, False)["finalized"]
+    assert request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)["finalized"]
     assert helper.calls == [("finalize", 825, HEAD)]
     with pytest.raises(request.Refusal, match="already-merged"):
-        request.execute_request(helper, {"issues": [821]}, 825, HEAD, True)
+        request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, True)
 
 
 @pytest.mark.parametrize("state", ["OPEN", "MERGED"])
@@ -162,7 +190,7 @@ def test_close_out_outside_admitted_issue_refuses_before_status_or_close(monkeyp
     # Open requests reach merge(); confirmed-merge retries reach finalize_queued().
     helper.merge = helper.finalize_queued = stray_close_out
     with pytest.raises(request.Refusal, match="authorized-issue-changed"):
-        request.execute_request(helper, {"issues": [821, 822]}, 825, HEAD, False)
+        request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821, 822]}, 825, HEAD, False)
     assert helper.calls == ["helper"]
     assert helper.close_out is merge_state.close_out
 
@@ -177,7 +205,7 @@ def test_admitted_close_out_calls_canonical_close_out_unchanged():
 
     helper.close_out = canonical
     helper.finalize_queued = lambda _pr, _head: {"finalized": bool(helper.close_out([821], ["README.md"]))}
-    assert request.execute_request(helper, {"issues": [821]}, 825, HEAD, False) == {"finalized": True}
+    assert request.execute_request(helper, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False) == {"finalized": True}
     assert seen == [([821], ["README.md"])]
     assert helper.close_out is canonical
 
@@ -367,7 +395,7 @@ def test_canonical_rereads_cannot_escape_or_switch_admitted_issue(monkeypatch, r
     monkeypatch.setattr(merge_pr.merge_authority, "post", lambda *_a: pytest.fail("race posted authorization"))
     monkeypatch.setattr(merge_pr, "run", lambda *_a: pytest.fail("race submitted merge"))
     with pytest.raises(request.Refusal, match="authorized-issue"):
-        request.execute_request(merge_pr, {"issues": [821, 822]}, 825, HEAD, False)
+        request.execute_request(merge_pr, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821, 822]}, 825, HEAD, False)
     assert len(reads) == read_number
     assert merge_pr.pull_request is live_pull
     assert merge_pr.issue_gate is gate
@@ -389,7 +417,7 @@ def test_counted_approval_withdrawal_on_canonical_reread_refuses(monkeypatch):
     monkeypatch.setattr(merge_pr.merge_authority, "post", lambda *_a: pytest.fail("race posted authorization"))
     monkeypatch.setattr(merge_pr, "run", lambda *_a: pytest.fail("race submitted merge"))
     with pytest.raises(request.Refusal, match="github-counted-approval"):
-        request.execute_request(merge_pr, {"issues": [821]}, 825, HEAD, False)
+        request.execute_request(merge_pr, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821]}, 825, HEAD, False)
 
 
 def test_confirmed_merge_retry_cannot_close_out_a_reassigned_issue(monkeypatch):
@@ -410,7 +438,7 @@ def test_confirmed_merge_retry_cannot_close_out_a_reassigned_issue(monkeypatch):
     monkeypatch.setattr(merge_pr.merge_authority, "post", lambda *_a: pytest.fail("retry posted authorization"))
     monkeypatch.setattr(merge_pr, "run", lambda *_a: pytest.fail("retry submitted merge"))
     with pytest.raises(request.Refusal, match="authorized-issue-changed"):
-        request.execute_request(merge_pr, {"issues": [821, 822]}, 825, HEAD, False)
+        request.execute_request(merge_pr, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821, 822]}, 825, HEAD, False)
 
 
 def package_fixture(monkeypatch):
@@ -662,7 +690,7 @@ def test_drift_after_posted_authorization_supersedes_it_in_the_pinned_helper(mon
     monkeypatch.setattr(merge_pr.merge_authority, "post", post)
     monkeypatch.setattr(merge_pr, "run", lambda *_a, **_k: pytest.fail("refused request submitted a merge"))
     with pytest.raises(request.Refusal, match=gate) as refused:
-        request.execute_request(merge_pr, {"issues": [821, 822]}, 825, HEAD, False)
+        request.execute_request(merge_pr, {"repository": "gillella/Aru_Agentic_SDLC", "issues": [821, 822]}, 825, HEAD, False)
     # Canonical merge() caught it as KernelError and posted the same-head failure.
     assert isinstance(refused.value, merge_pr.KernelError)
     assert len(reads) == 5
