@@ -105,8 +105,165 @@ def test_optional_driver_source_boundary_is_documented_without_rollout_claims():
         assert "outside Git" in content
     assert "Kernel remains independently usable" in contract
     assert "no verified maintained source or installer" in contract
-    assert "operator-only `merge_pr.py --expected-head`" in contract
+    assert "operator-only `merge_pr.py --expected-head`" not in contract
     assert "#794" in operations
+
+
+def test_driver_merge_boundary_agrees_between_contract_and_operations():
+    """Both documents admit only a proven scoped entry point, never the raw key."""
+    contract = " ".join(text(ROOT / "docs" / "KERNEL-CONTRACT.md").split())
+    operations = " ".join(text(ROOT / "docs" / "OPERATIONS.md").split())
+    for content in (contract, operations):
+        for requirement in (
+            "raw merge-authority credential", "proven, operator-installed protected entry point",
+            "separate operator-controlled principal", "canonical helper with every gate",
+            "no generic endpoint and never runs PR code", "An unproven entry point refuses",
+        ):
+            assert requirement in content, requirement
+    assert ("its generic App runner and direct `merge_pr.py --expected-head` execution remain "
+            "outside the Driver") in contract
+    assert "merge-authority credential and operator-only" not in contract
+
+
+def operations_section(heading: str) -> str:
+    content = text(ROOT / "docs" / "OPERATIONS.md")
+    marker = f"### {heading}\n"
+    assert marker in content, f"missing OPERATIONS.md section: {heading}"
+    return " ".join(content.split(marker, 1)[1].split("\n### ", 1)[0].split())
+
+
+def test_trusted_merge_request_keeps_authority_outside_coding_and_ci():
+    boundary = operations_section("Trusted callers and mechanical merge")
+    for requirement in (
+        "outside PR worktrees", "protected from coding/CI writes",
+        "separate merge principal", "Strip caller-controlled tokens",
+        "Never check out, import or execute PR-controlled code, verifier, hook or runtime",
+        "approved repository, issue scope, PR and full expected SHA",
+        "Reject extra arguments, caller-supplied paths, commands, environment",
+        "raw keys, installation tokens, the generic App runner",
+        "arbitrary API/check-posting endpoints inaccessible",
+    ):
+        assert requirement in boundary, requirement
+    operations = " ".join(text(ROOT / "docs" / "OPERATIONS.md").split())
+    assert "A proven restricted mechanical-merge route is the only automation exception" in operations
+    assert "passing an agent these variables is not that route" in operations
+    assert "Do not expose this session, its credentials or its generic App runner" in operations
+    assert "an operator-controlled session alone runs" not in operations
+    assert "operator alone invokes" not in operations
+
+
+def test_trusted_mechanical_merge_retains_live_gates_and_close_out():
+    boundary = operations_section("Trusted callers and mechanical merge")
+    for requirement in (
+        "canonical `merge_pr.py --expected-head`", "exact-head checks",
+        "eligible non-author approval", "every finding/thread", "accepted criteria",
+        "exclusive claim", "live touches", "dependency and base checks",
+        "refusal of configured queues or pending queue/auto-merge requests",
+        "changed or unreadable authority refuses", "Do not replace this route with GitHub auto-merge",
+        "expected head", "merge commit", "linked issue CLOSED and Project Done",
+        "`--finalize` recovery", "never submit the head again",
+    ):
+        assert requirement in boundary, requirement
+    step = operations_section("Step 8: merge the exact head")
+    assert "Apply **Trusted callers and mechanical merge** before unattended execution" in step
+    assert '--expected-head "$head_sha"' in step
+
+
+def test_external_continuation_is_owned_ready_first_and_explicitly_scoped():
+    cycle = operations_section("Bounded external continuation")
+    for requirement in (
+        "Resume actionable work owned by that actual worker first",
+        "only one exclusive active issue", "`fetch_next_work.py` for valid Ready work",
+        "repository-wide candidates and has no scope flag",
+        "restrict the live Ready candidate set", "canonical validation and ordering",
+        "reject any out-of-scope result before claim", "report a scope block",
+        "`triage_backlog.py --issue <authorized-number>`",
+        "explicit authorized Backlog subset", "re-read the picker before claim",
+        "another live read, never an unrelated fallback",
+        "once per activation", "never poll inside a skill",
+        "duplicate an accepted pending review", "inaccessible merge authority and genuine idle",
+        "GitHub Issues/Project as the only lifecycle authority",
+        "do not create a scheduler, private queue, handoff file or second lifecycle store in the Kernel",
+    ):
+        assert requirement in cycle, requirement
+
+
+def test_operator_merge_evidence_does_not_claim_unattended_delivery():
+    boundary = operations_section("Trusted callers and mechanical merge")
+    assert "App **4921120**" in boundary
+    assert "interactive operator route, not unattended delivery" in boundary
+    assert "automatic merging remains unavailable until that boundary is proven" in boundary
+    assert "does not install a service, activate a Driver, change schedules or modify a ruleset" in boundary
+
+
+def test_restricted_package_requires_installation_and_actual_runtime_proof():
+    integration = text(ROOT / "integrations/merge-authority/README.md")
+    for requirement in (
+        "GitHub Issues/Project remain the authority", "separate execution user",
+        "does **not** establish that the capability is installed", "independently reviewed canonical",
+        "Checks write and Metadata read only", "not** in sudoers", "No admin bypass",
+        "verified in-memory", "Existing installation, sudo policy and staging paths are preserved",
+        "Never send a PEM/token to an agent", "a generic shell, interpreter command or App runner",
+        "one actual unattended governed merge", "changes no power settings or scheduled jobs",
+    ):
+        assert requirement in " ".join(integration.split()), requirement
+    assert "restricted merge integration" in text(ROOT / "docs/OPERATIONS.md")
+
+
+def test_import_chain_proof_is_limited_to_hashed_files_and_operator_audit():
+    boundary = operations_section("Trusted callers and mechanical merge")
+    for requirement in (
+        "bundled helper modules, request/adapter code, sealed CLI and interpreter binary",
+        "not individually inventoried", "`.pth`", "do not prove the whole import chain",
+        "operator must audit", "runtime import chain remains unproven",
+    ):
+        assert requirement in boundary, requirement
+    assert "verify their identities before execution" not in boundary
+    integration = " ".join(text(ROOT / "integrations/merge-authority/README.md").split())
+    assert "not individually inventoried" in integration
+    assert "runtime import-chain proof remains unresolved" in integration
+
+
+def test_human_enablement_is_config_bound_and_not_lifecycle_authority():
+    boundary = operations_section("Trusted callers and mechanical merge")
+    contract = " ".join(text(ROOT / "docs/KERNEL-CONTRACT.md").split())
+    integration = " ".join(text(ROOT / "integrations/merge-authority/README.md").split())
+    for requirement in ("submissions disabled", "root-owned", "installed configuration",
+                        "before authority use", "host configuration, not lifecycle",
+                        "human acceptance", "`--check`"):
+        assert requirement in boundary, requirement
+    for requirement in ("submissions disabled", "check-only evaluation available", "root-owned marker",
+                        "denials, eligible preflight", "not lifecycle state or canonical gate evidence"):
+        assert requirement in contract, requirement
+    for requirement in ("installer never creates `enabled.json`", "separate human enablement",
+                        "os.O_EXCL | os.O_NOFOLLOW", "config_sha256", "Existing markers are never overwritten",
+                        "Rollback first removes", "keeping `--check` available", "already admitted/in-flight"):
+        assert requirement in integration, requirement
+
+
+def test_signal_documentation_describes_unwind_masking_and_pending_delivery_limits():
+    integration = " ".join(text(ROOT / "integrations/merge-authority/README.md").split())
+    for requirement in ("pthread_sigmask(SIG_BLOCK)", "reentrant Python handler delivery returns",
+                        "blocked through unwind", "Ordinary exceptions also enter compensation",
+                        "Original handlers are restored while blocked", "original mask is restored",
+                        "pending signals", "SIGKILL/SIGSTOP", "host loss and transport outages",
+                        "non-atomic authorization/submission boundary", "asynchronous",
+                        "Intentionally ignored dispositions", "`SIG_IGN`", "`SIGPIPE`", "`SIGXFSZ`",
+                        "`SIGSEGV`", "`SIGBUS`", "`SIGILL`", "`SIGFPE`",
+                        "excluded from handler installation and masking", "faulting native instruction"):
+        assert requirement in integration, requirement
+    assert "every catchable" not in integration
+
+
+def test_adapter_documents_compensation_and_its_honest_limit():
+    integration = " ".join(text(ROOT / "integrations/merge-authority/README.md").split())
+    for requirement in (
+        "positive integer id, App id, head, name and conclusion",
+        "at most two same-head `failure` runs through the same scoped token and check endpoint",
+        "never repeats a success", "not an atomic revocation guarantee",
+        "Token revocation is best effort", "never merge that head by hand",
+    ):
+        assert requirement in integration, requirement
 
 
 def driver_activation_commands(content: str) -> list[str]:

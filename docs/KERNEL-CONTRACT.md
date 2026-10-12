@@ -41,9 +41,22 @@ source boundary does not establish either one.
 Driver operators own any separate installation and its permissions. A Driver
 may invoke bounded Kernel commands with the authoring and Project Board access
 they require, but it gains no lifecycle authority of its own. Reviewer
-credentials remain with a different GitHub account, and the merge-authority
-credential and operator-only `merge_pr.py --expected-head` remain outside the
-Driver. Live configuration, credentials, processes, scheduler job definitions,
+credentials remain with a different GitHub account. The raw merge-authority
+credential, its generic App runner and direct `merge_pr.py --expected-head`
+execution remain outside the Driver. Only a proven, operator-installed
+protected entry point scoped to an approved repository and issue set may accept
+a Driver's PR and expected-head request; a separate operator-controlled
+principal then executes the canonical helper with every gate. It exposes no
+generic endpoint and never runs PR code. The optional restricted integration
+installs with submissions disabled and check-only evaluation available. A human
+operator enables it only after host audits, denials, eligible preflight and
+explicit acceptance, using a protected root-owned marker bound to the exact
+installed configuration. Missing, malformed, mutable or mismatched enablement
+refuses before authority use. The marker is fixed host configuration, not
+lifecycle state or canonical gate evidence; removing it disables new submissions
+but cannot undo an already admitted request. An unproven entry point refuses and
+leaves the operator route as the only merge path. Live configuration,
+credentials, processes, scheduler job definitions,
 and operational receipts stay outside Git. Existing scheduler jobs are not
 changed by admitting source under `driver/`.
 Consumer policy may be stricter for a product but is never a universal Aru

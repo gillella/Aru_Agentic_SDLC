@@ -47,9 +47,13 @@ provenance, installer and rollback evidence. This source allowance is not a
 rollout, and existing scheduler jobs are unchanged.
 
 A Driver may receive only the authoring and Project Board permissions needed
-to invoke bounded Kernel commands. It cannot hold reviewer or merge-authority
-credentials; another GitHub account supplies the exact-head approval and an
-operator alone invokes `merge_pr.py --expected-head`. GitHub and Git remain
+to invoke bounded Kernel commands. It cannot hold reviewer credentials or the
+raw merge-authority credential; another GitHub account supplies the exact-head
+approval. An operator invokes `merge_pr.py --expected-head`, or a proven,
+operator-installed protected entry point accepts the Driver's scoped PR and
+expected-head request and a separate operator-controlled principal executes the
+canonical helper with every gate. It exposes no generic endpoint and never runs
+PR code. An unproven entry point refuses. GitHub and Git remain
 the lifecycle authority. Keep live configuration, credentials, processes,
 scheduler job definitions and receipts outside Git.
 
@@ -245,20 +249,23 @@ control before it can be treated as active.
 | Agent authoring | Authoring App installation for repository commands, including branch and PR work | Agents may use this App; default-branch rules still forbid direct pushes. |
 | Project Board writes | Dedicated board principal through the stored CLI Project authentication used by Project V2 GraphQL and `gh project` | May run in the authoring session only if it is distinct from the named reviewer and has no review or merge authority. |
 | Human review and approval | Proposed named human reviewer through their own GitHub session; the inert `.aru/review.json` does not enforce eligibility | No reviewer authentication, delegated approval endpoint, or shared session in agent or CI processes. |
-| Merge authorization | Merge-authority App posts `aru-merge-authorized`; an operator-controlled session alone runs `merge_pr.py --expected-head` to submit the merge | Agents never receive, execute, or call a service holding the merge-authority App. |
+| Merge authorization | Merge-authority App posts `aru-merge-authorized`; an authorized person or trusted external caller requests `merge_pr.py --expected-head` in the isolated merge context described below | Coding and CI processes never receive raw merge credentials or a generic App/check endpoint. A proven restricted mechanical-merge route is the only automation exception. |
 | Bootstrap and recovery | Operator session uses an authorized bootstrap identity before App installation; the operator owns failed migration and confirmed-merge recovery | No bootstrap or break-glass authority in agent sessions. |
 | Runner and client access | Governed CI runs on the repository's assigned profile with read-only workflow permissions; authoring clients use the authoring and Project routes above | CI may execute PR code, so it must have no reviewer or merge credentials or callable authority service. |
 
 Enforce the boundary with separate host or service identities for agent and CI
 processes versus reviewer and merge sessions. Deny the former access to the
 latter's credential storage, process environment, inherited handles, sockets,
-and any API or IPC that could perform approval or mint/post merge authorization.
+and any generic API or IPC that could perform approval or mint/post merge authorization.
 Do not run those sessions under a shared identity or mount their authority into
 agent or runner workloads. A dedicated board principal must have Project write
 access and only the repository access needed for linked-Project operations; it
 must not be a named reviewer or a ruleset bypass actor. Hooks, shell aliases,
 command wrappers, and environment-variable omission help users choose the
 right route but cannot enforce this isolation against code the agent can run.
+An external caller may submit only the bounded repository, PR and expected-head
+request described under **Trusted callers and mechanical merge**; this does not
+grant the caller the reviewer session, App runner or arbitrary privileged commands.
 
 Before changing access, the operator must prove that effective process and
 service permissions enforce those denials, that the board principal remains
@@ -286,10 +293,12 @@ Migration order and acceptance:
    rule pinned to that App; a missing or wrong publisher blocks cutover.
 5. In each migrated agent and runner context, attempts to access or invoke the
    reviewer session, submit an approval as the named human, invoke the merge
-   authority, post its required check, directly merge, or push the default
+   authority directly, post its required check, directly merge, or push the default
    branch **must fail**. Authoring repository operations and linked Project
    reads/writes **must pass** through their separate routes and retain the five
-   statuses. Verify named-human exact-head review and the helper-controlled merge on an
+   statuses. Separately prove that the restricted trusted-caller route accepts
+   only its approved scope and refuses invalid inputs and missing live gates.
+   Verify eligible non-author exact-head review and the helper-controlled merge on an
    ordinary governed PR in the later operator migration, not in this design
    issue. Missing evidence or a failed check blocks the cutover.
 6. If continuity or a denial fails, stop new agent work. Restore the previous
@@ -299,8 +308,8 @@ Migration order and acceptance:
    or merge authority to an agent context as rollback.
 
 Pass only when every negative attempt fails, both ordinary authoring and
-Project Board writes succeed, only a named human reviewer can supply the required
-review, and only the operator-held merge App can publish the required check for
+Project Board writes succeed, an eligible account other than the author supplies
+the required review, and only the isolated merge App can publish the required check for
 `merge_pr.py`. Otherwise fail closed and retain the prior boundary until the
 operator resolves the evidence.
 
@@ -322,7 +331,9 @@ board, criteria and queue gates.
    App agents use for ordinary commands.
 2. Store its App id and private key in their own credentials directory, and give
    it a runner with the `<runner> --repo OWNER/REPO -- gh ...` interface. **No
-   runner ships with Aru**. On the Mac Mini, the working operator-provided runner
+   generic runner ships with Aru**. The optional check-only adapter under
+   `integrations/merge-authority/` belongs to the restricted installation described
+   below; it is not a generic App endpoint. On the Mac Mini, the working operator-provided runner
    is the root-owned `/usr/local/bin/aru-merge-authority-run` wrapper. It uses
    `sudo -u aru-merge` to run as the separate `aru-merge` user, with credentials
    in `/Users/aru-merge/.aru-merge-authority/`. The operator may receive a sudo
@@ -347,10 +358,12 @@ board, criteria and queue gates.
    Keep the runner and its credentials outside any other tool's directory. Placing
    them inside an agent framework's home makes a kernel merge gate depend on that
    framework being installed.
-3. Only in the operator-controlled merge session on the Mac Mini that runs
+3. In the isolated operator-controlled merge context on the Mac Mini that runs
    `merge_pr.py`, export both variables and complete any sudo password prompt
-   there. The wrapper runs as the separate `aru-merge` user. Do not expose this
-   session or its runner to agents:
+   there. The wrapper runs as the separate `aru-merge` user. A trusted external
+   caller needs the separately proven restricted route below; passing an agent
+   these variables is not that route. Do not expose this session, its credentials
+   or its generic App runner to coding or CI processes:
 
    ```bash
    export ARU_MERGE_APP_RUNNER="/usr/local/bin/aru-merge-authority-run"
@@ -391,6 +404,103 @@ still inspect and dry-run, but cannot merge. If submission fails after the check
 is posted, the helper posts a newer failed run so the head cannot be merged by
 hand; re-run the helper. For break-glass, an administrator edits the ruleset,
 which the ruleset history records.
+
+### Trusted callers and mechanical merge
+
+An authorized person or trusted external automation caller may request the
+canonical `merge_pr.py --expected-head` after every live gate passes, without a
+separate human merge click for each eligible PR. The privileged execution remains
+operator-controlled: an automated operator is a separate execution identity,
+not the coding process with a merge key. An unavailable or unproven restricted
+route means **merge authority unavailable**, not permission to use a generic runner.
+
+Before allowing unattended requests, prove all of these execution constraints:
+
+- Use an installed, independently reviewed canonical helper revision outside PR
+  worktrees. The bundled helper modules, request/adapter code, sealed CLI and
+  interpreter binary are protected from coding/CI writes and hashed before
+  execution. The OS standard library and system site-packages, including `.pth`
+  files, are trusted operating-system dependencies that are not individually
+  inventoried; `python3 -I` and directory ownership narrow the import path but
+  do not prove the whole import chain. The operator must audit that coding, CI
+  and caller identities cannot write those OS dependency locations; until that
+  audit is recorded, the runtime import chain remains unproven and automatic
+  merging stays unavailable. A clean checkout alone is insufficient, and
+  updates require renewed review.
+- Start in a clean authority environment under a separate merge principal. Strip
+  caller-controlled tokens, Python import paths, Git configuration, hooks and
+  executable search paths; load only approved operator configuration. Never
+  check out, import or execute PR-controlled code, verifier, hook or runtime in
+  this context. Verification evidence comes from exact-head server checks.
+- Restrict requests to the approved repository, issue scope, PR and full expected
+  SHA. Reject extra arguments, caller-supplied paths, commands, environment or
+  authorization decisions. Resolve the live PR/issue mapping and scope again;
+  a caller cannot nominate an unrelated issue or supply a precomputed gate result.
+- Expose only this mechanical merge request. Keep raw keys, installation tokens,
+  the generic App runner and arbitrary API/check-posting endpoints inaccessible
+  to authoring/CI processes. Neither a review approval nor a successful dry-run
+  proves that these process and request restrictions are installed.
+- Always run the canonical helper. Preserve exact-head checks, eligible non-author
+  approval, every finding/thread, accepted criteria, exclusive claim, live touches,
+  dependency and base checks, and refusal of configured queues or pending
+  queue/auto-merge requests. Re-read immediately before submission; changed or
+  unreadable authority refuses. Do not replace this route with GitHub auto-merge.
+- Verify GitHub actually merged the expected head and read back the merge commit,
+  linked issue CLOSED and Project Done before cleanup. Incomplete close-out uses
+  the helper's bounded `--finalize` recovery; never submit the head again.
+
+Runtime evidence for this amendment: the established Mac Mini operator identity
+has performed a governed merge through App **4921120**. That proves the interactive
+operator route, not unattended delivery. A reviewed restricted automation entry
+point and its denial/continuity proofs are not yet recorded; automatic merging
+remains unavailable until that boundary is proven. This documentation does not
+install a service, activate a Driver, change schedules or modify a ruleset.
+
+The optional [restricted merge integration](../integrations/merge-authority/README.md)
+provides one installed PR/head request, a protected copy of an independently
+reviewed canonical helper revision, and a check-only App adapter. Its operator
+package is reproducible from immutable source/helper objects and independently
+reviewed CLI bytes; operators compare a separate rebuild before installation.
+Commit labels alone do not establish that binding. An existing external
+continuation calls that request after acceptance and review; there is no Kernel
+scheduler, queue or pending-work file. Installation, private credential setup,
+positive preflight and negative host proofs remain operator actions. A source
+package or passing offline tests never establishes installed authority.
+Installation leaves submissions disabled while `--check` remains available.
+Every non-check request requires a separately human-created, root-owned
+`enabled.json` marker bound to the exact installed configuration bytes; absent,
+malformed, mutable or mismatched evidence refuses before authority use.
+Only after access/import audits, real denials, eligible preflight and explicit
+human acceptance does the operator enable that configuration as described in
+the integration guide. This marker is fixed host configuration, not lifecycle
+state, and supplies no canonical gate evidence. Rollback first removes the
+marker to disable new submissions while retaining `--check`, then removes the
+narrow sudo rule if all requests must stop. Removal cannot undo a request
+already admitted; refresh GitHub for any in-flight submission and close-out.
+
+### Bounded external continuation
+
+The external Driver owns when to invoke one bounded command, not lifecycle state.
+On each activation, refresh GitHub Issues/Project, Git, head/check/review evidence
+and authority availability. Resume actionable work owned by that actual worker
+first; one worker may hold only one exclusive active issue. Otherwise use
+`fetch_next_work.py` for valid Ready work. It reports repository-wide candidates
+and has no scope flag. The Driver must restrict the live Ready candidate set to
+the owner's authorized subset before applying canonical validation and ordering,
+and reject any out-of-scope result before claim. If safe scoped selection is
+unavailable, report a scope block rather than claim unrelated work.
+If none is executable, run `triage_backlog.py --issue <authorized-number>` only
+for an explicit authorized Backlog subset, then re-read the picker before claim.
+Promotion/claim conflicts require another live read, never an unrelated fallback.
+
+For an owned PR, repair failing CI or unresolved feedback in its existing claimed
+worktree; a changed head needs fresh server checks and independent approval.
+Check pending review once per activation; never poll inside a skill or duplicate
+an accepted pending review. Waiting for another account, inaccessible merge
+authority and genuine idle are distinct outcomes. When all gates and the proven
+trusted route are available, request the current-head mechanical merge and verify
+its close-out. Keep GitHub Issues/Project as the only lifecycle authority; do not
+create a scheduler, private queue, handoff file or second lifecycle store in the Kernel.
 
 ### Moving the runners off the machine owner's account
 
@@ -1194,9 +1304,12 @@ arranges a reviewer on another account.
 
 ### Step 8: merge the exact head
 
-The operator uses the isolated merge session for this step. The agent hands off
-the PR number and current head; it never invokes the merge-authority App. Read
-the exact head:
+An authorized person or trusted external caller uses the isolated merge context
+for this step. A proven restricted route performs the mechanical request without
+another manual handoff; until it exists, the operator receives the PR number and
+current head. Coding/CI processes never invoke the generic merge-authority App
+runner. Apply **Trusted callers and mechanical merge** before unattended execution.
+Read the exact head:
 
 ```bash
 head_sha="$(gh pr view 123 --json headRefOid --jq .headRefOid)"
