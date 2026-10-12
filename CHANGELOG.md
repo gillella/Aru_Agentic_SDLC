@@ -8,8 +8,12 @@ exact-head PR checks, independent approval, operator merge, and annotated tag.
 - **Breaking migration (#783):** `.aru/review.json` `authority: human` and named
   `reviewers` no longer make `merge_pr.py` refuse an otherwise valid approval
   from another account. Consumers requiring human-only approval must configure
-  GitHub ruleset required reviewers or `CODEOWNERS`. The one non-author exact-head
-  approval, findings, check, actual-diff `touches:` and governed merge gates remain.
+  required human reviewers in a GitHub ruleset (where supported), or assign
+  human owners for all relevant paths in `CODEOWNERS` and enable required
+  code-owner review in branch protection or a ruleset. CODEOWNERS alone only
+  requests reviews; the Factory default `require_code_owner_review = false`
+  does not require owner approval. The one non-author exact-head approval,
+  findings, check, actual-diff `touches:` and governed merge gates remain.
 - The restricted unattended merge request integration (#821) ships as source and
   an operator package, uninstalled and disabled by default. Host isolation,
   installation, enablement and a real unattended governed merge remain unproven
@@ -29,7 +33,8 @@ exact-head PR checks, independent approval, operator merge, and annotated tag.
 - For a consumer rollback, restore the recorded v2.5.0 managed bytes and modes
   using the v2.5.0 Factory, then confirm its manifest and consumer-owned review,
   verification and instructions. This restores copied files only; it does not
-  reverse v3.0.0 reviewer policy on a server still running v3.0.0.
+  reverse v3.0.0 reviewer policy on a server still running v3.0.0; retain the
+  server-enforced human reviewer rule when rolling back copied files.
 
 - Permit optional, separately packaged Driver source under `driver/` while
   preserving independent Kernel use, the six skills, eleven commands, seven

@@ -108,6 +108,19 @@ def test_v3_release_documents_break_and_disabled_source():
     assert "uninstalled and disabled" in operations
 
 
+def test_human_only_migration_requires_server_enforced_review():
+    sections = (
+        text(ROOT / "README.md").split("### Upgrade from v2.5.0", 1)[1].split("\nAru helps", 1)[0],
+        text(ROOT / "CHANGELOG.md").split("## v3.0.0", 1)[1].split("## v2.5.0", 1)[0],
+        text(ROOT / "docs" / "OPERATIONS.md").split("For v2.5.0 to v3.0.0 migration", 1)[1].split("\nGitHub authenticates", 1)[0],
+        text(ROOT / "docs" / "OPERATIONS.md").split("This file rollback does not undo", 1)[1].split("Do not sync a real", 1)[0],
+    )
+    for section in sections:
+        assert "CODEOWNERS alone only requests reviews" in " ".join(section.split())
+        assert "required code-owner review" in " ".join(section.split())
+        assert "required human reviewers" in " ".join(section.split())
+
+
 def test_optional_driver_source_boundary_is_documented_without_rollout_claims():
     contract = " ".join(text(ROOT / "docs" / "KERNEL-CONTRACT.md").split())
     agents = " ".join(text(ROOT / "AGENTS.md").split())

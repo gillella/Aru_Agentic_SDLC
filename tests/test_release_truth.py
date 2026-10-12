@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 import policy
+import manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASED_HEADING = re.compile(r"^## v(\d+\.\d+\.\d+) - .+ - (\d{4}-\d{2}-\d{2})$", re.M)
@@ -100,6 +101,21 @@ def test_operations_guide_documents_the_release_procedure():
     assert "## 18. Release the Factory" in guide
     assert "[release]" in guide
     assert "test_release_truth.py" in guide
+
+
+def test_release_steps_cover_plugin_versions_and_both_generated_manifests():
+    guide = (ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
+    steps = guide.split("## 18. Release the Factory", 1)[1].split("## Consumer compatibility", 1)[0]
+    for path in (
+        "plugin.json", ".claude-plugin/plugin.json",
+        ".claude-plugin/marketplace.json", ".cursor-plugin/plugin.json",
+        "templates/manifests/self-hosted-mac.json",
+        "templates/manifests/github-hosted.json",
+    ):
+        assert path in steps
+    assert "metadata.version" in steps
+    assert manifest.REGEN_COMMAND in steps
+    assert "tests/test_manifest.py" in steps
 
 
 @pytest.mark.parametrize(

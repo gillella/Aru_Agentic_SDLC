@@ -15,8 +15,12 @@ real governed consumer projects.
 The v3.0.0 migration (#783) changes reviewer policy: legacy `.aru/review.json` values such
 as `authority: human` and named `reviewers` no longer cause `merge_pr.py` to refuse
 an otherwise eligible non-author exact-head approval. Repositories that require
-human-only approval must configure GitHub ruleset required reviewers or
-`CODEOWNERS`. The exact-head check, one non-author approval, live `touches:`
+human-only approval must configure required human reviewers in a GitHub ruleset
+(where supported), or assign human owners for all relevant paths in `CODEOWNERS`
+and enable required code-owner review in branch protection or a ruleset.
+CODEOWNERS alone only requests reviews; the Factory default
+`require_code_owner_review = false` does not require owner approval. The
+exact-head check, one non-author approval, live `touches:`
 enforcement, runner assignment and governed merge still apply. Restricted
 unattended merge request source ships uninstalled and disabled; host proof and
 enablement are tracked in [#830](https://github.com/gillella/Aru_Agentic_SDLC/issues/830).

@@ -685,7 +685,11 @@ For v2.5.0 to v3.0.0 migration, this is a breaking change to the old fail-closed
 reviewer-policy behavior (#783): a legacy `authority: human` or named `reviewers`
 declaration no longer makes `merge_pr.py` refuse a qualifying non-author
 exact-head approval. Consumers that need human-only approval must configure
-GitHub ruleset required reviewers or `CODEOWNERS`. The check names,
+required human reviewers in a GitHub ruleset (where supported), or assign
+human owners for all relevant paths in `CODEOWNERS` and enable required
+code-owner review in branch protection or a ruleset. CODEOWNERS alone only
+requests reviews; the Factory default `require_code_owner_review = false`
+does not require owner approval. The check names,
 account-assigned runner profiles, one exact-head approval, actual-diff `touches:`
 enforcement and operator-controlled merge remain in force.
 
@@ -1789,10 +1793,23 @@ change plus one tag:
 1. File an issue for the release. In its worktree set `[release] version` and
    `released`, rewrite the README status line to match, and in `CHANGELOG.md`
    rename the `## Unreleased` section to `## vX.Y.Z - <title> - <released>`.
-   Add a new `## Unreleased` above it only when unreleased work remains.
-2. Run `.venv/bin/python -m pytest tests/test_release_truth.py
-   tests/test_documentation_contract.py -q`. It fails while the newest tag is
-   ahead of the declaration or while README and the changelog disagree with it.
+   Add a new `## Unreleased` above it only when unreleased work remains. Set
+   the same version in `plugin.json` (`version`), `.claude-plugin/plugin.json`
+   (`version`), `.claude-plugin/marketplace.json` (`metadata.version`), and
+   `.cursor-plugin/plugin.json` (`version`). Regenerate both committed canonical
+   manifests, `templates/manifests/self-hosted-mac.json` and
+   `templates/manifests/github-hosted.json`, from the framework files using
+   `manifest.write_canonical()`:
+
+   ```bash
+   python3 -c "import sys; sys.path.insert(0, 'scripts'); import manifest; manifest.write_canonical()"
+   ```
+2. Run `python3 -m pytest tests/test_release_truth.py
+   tests/test_documentation_contract.py tests/test_manifest.py -q`, then the
+   full final-candidate preflight with `make verify-release`. The tests reject
+   version restatements that disagree, a newest tag ahead of the declaration,
+   and either canonical manifest drifting from its rendered profile. Use a
+   Python interpreter with the repository's development requirements installed.
 3. Open the PR through `create_pr.py`, obtain the approval, and merge through
    `merge_pr.py --expected-head`.
 4. Tag the merge commit with exactly the declared string:
@@ -1811,9 +1828,11 @@ verification and outside-block instructions. Roll back with the v2.5.0 Factory's
 same `--sync` command and compare bytes and modes with the original snapshot.
 The v3.0.0 source package does not install or enable restricted unattended
 merging during scaffold or sync. This file rollback does not undo the #783
-reviewer-policy change on a server still running v3.0.0; use GitHub ruleset
-required reviewers or `CODEOWNERS` for human-only approval. Do not sync a real
-consumer as release-preparation evidence.
+reviewer-policy change on a server still running v3.0.0. Maintain required
+human reviewers in a GitHub ruleset (where supported), or assign human owners
+for all relevant paths in `CODEOWNERS` and enable required code-owner review
+in branch protection or a ruleset. CODEOWNERS alone only requests reviews.
+Do not sync a real consumer as release-preparation evidence.
 
 Never tag a commit whose declared version differs from the tag, and never describe
 untagged work as released. Tags `v2.1.0`, `v2.2.0` and `v2.2.1` were cut before this
