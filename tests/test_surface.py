@@ -78,7 +78,7 @@ def supported_command_paths(paths: list[Path] | None = None) -> list[Path]:
     # `verify_consumer.sh` is the governed-pr action's verifier, not an operator
     # command: it is the former `templates/verify.sh`, which this budget never
     # counted either. Moving a script into scripts/ must not read as new surface.
-    internal_helpers = {"common.py", "local_verification.py", "verify_consumer.sh"}
+    internal_helpers = {"common.py", "local_verification.py", "verify_consumer.sh", "test_scope.py"}
     return [
         path
         for path in (tracked_paths() if paths is None else paths)
@@ -98,6 +98,7 @@ def test_library_modules_do_not_count_as_supported_commands():
         ROOT / "scripts" / "merge_state.py",
         ROOT / "scripts" / "policy.py",
         ROOT / "scripts" / "touches.py",
+        ROOT / "scripts" / "test_scope.py",
     }
     assert all(helper.exists() for helper in helpers)
     assert helpers.isdisjoint(supported_command_paths())

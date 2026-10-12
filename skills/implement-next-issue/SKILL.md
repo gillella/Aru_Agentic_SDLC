@@ -13,6 +13,33 @@ description: Claim and implement one Ready issue in an isolated worktree, then o
 6. Keep the consumer-owned `.aru/verify-project.sh` proportional to the issue's risk.
    Run it or narrower commands locally when useful as preflight; local output is
    optional audit evidence, not merge authority.
+   For Factory stories, use `make verify-story PYTHON=/path/to/venv/bin/python`:
+   full lint plus `scripts/test_scope.py` selects tests from the actual branch diff
+   against `origin/main`, including staged, unstaged and untracked changes. Set
+   `ARU_TEST_BASE` to the intended base commit/ref when needed. Story CI uses the
+   exact PR base/head commits and the same selector. Read its JSON evidence of
+   changed paths, selected tests and rationale; issue prose/checkboxes never waive
+   tests. Selection follows changed behavior and transitive Python callers, literal
+   module/file references and changed/new tests, rather than only edited tests.
+   The Factory's literal `TEST_SOURCE_ROOTS := ...` Makefile declaration names
+   known ordinary Python source trees; the selector reads it as data without Make
+   evaluation, shell sourcing or importing adapters. Missing, malformed, duplicate,
+   nonexistent or unsafe roots require full coverage. The JSON also reports the
+   affected production sources/callers and declared roots; sensitive/shared path
+   overrides still apply inside every declared tree. Changing that policy is itself
+   broad-impact verification and requires the full suite.
+   Every focused run includes scope/touches, independent-review and runner trust
+   invariants. Shared/sensitive/verification/auth/merge/CI/selector changes,
+   unrecognized paths, deleted or renamed-away files, missing test mapping and
+   unreadable/empty diff evidence fall upward to the full suite. Ambiguous impact
+   still requires the caller to use `make verify`; a static dependency map is not
+   proof against every runtime coupling. An incorrect exact CI head refuses.
+   Factory release candidates use `make verify-release` (or `make verify`), always
+   full regression including consumer forward/rollback tests. Version, manifest
+   and release-document changes also force full story CI. Consumer-owned required
+   checks continue unchanged; this selector only changes the Factory's own suite.
+   Repeat completed tests only after a new change, failure or unresolved concern
+   warrants it. Release/broad-impact verification remains a separate full action.
 7. Commit and push the branch.
 8. Open the PR with `python3 "$ARU_SDLC_HOME/scripts/create_pr.py"`; its body must contain `Closes #N`.
 9. Wait for the exact-head `aru-governed-pr` check on the repository's one
