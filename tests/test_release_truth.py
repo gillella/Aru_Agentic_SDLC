@@ -8,6 +8,7 @@ newer tags existed, and the documentation test pinned the stale literal.
 from __future__ import annotations
 
 import re
+import json
 import subprocess
 import tomllib
 from pathlib import Path
@@ -45,13 +46,26 @@ def test_readme_status_line_restates_the_declared_release():
     release = policy.release()
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     expected = (
-        f"**Project status: v{release['version']} is the current released version "
-        f"(released {release['released']}).**"
+        f"**Project status: v{release['version']} is the declared release version "
+        f"(dated {release['released']}).**"
     )
     assert expected in readme
-    # No other sentence may name a different current version.
-    claims = re.findall(r"v(\d+\.\d+\.\d+) is the current released version", readme)
+    claims = re.findall(r"v(\d+\.\d+\.\d+) is the declared release version", readme)
     assert claims == [release["version"]]
+
+
+def test_plugin_manifests_restate_release_version():
+    version = policy.version()
+    for path, keys in (
+        ("plugin.json", ("version",)),
+        (".claude-plugin/plugin.json", ("version",)),
+        (".claude-plugin/marketplace.json", ("metadata", "version")),
+        (".cursor-plugin/plugin.json", ("version",)),
+    ):
+        value = json.loads((ROOT / path).read_text(encoding="utf-8"))
+        for key in keys:
+            value = value[key]
+        assert value == version, path
 
 
 def test_changelog_newest_released_heading_is_the_declared_release():

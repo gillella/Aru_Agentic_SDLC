@@ -3,11 +3,23 @@
 > A small, fail-closed rules-and-guidelines kernel that moves one approved
 > GitHub issue to one safely merged pull request.
 
-**Project status: v2.5.0 is the current released version (released 2026-09-21).**
-The version is declared once, in `scripts/policy.toml`; this line, the newest
-released heading in `CHANGELOG.md` and the newest `v*` tag restate it, and
-`tests/test_release_truth.py` fails when they disagree. Future kernel improvements
-should originate in evidence from real governed consumer projects.
+**Project status: v3.0.0 is the declared release version (dated 2026-10-12).**
+Publication requires a governed merge and annotated tag; check GitHub Releases for
+the latest published version. The version is declared in `scripts/policy.toml` and
+restated in `CHANGELOG.md` and the plugin manifests. The newest `v*` tag must not
+run ahead of it. Future kernel improvements should originate in evidence from
+real governed consumer projects.
+
+### Upgrade from v2.5.0
+
+The v3.0.0 migration (#783) changes reviewer policy: legacy `.aru/review.json` values such
+as `authority: human` and named `reviewers` no longer cause `merge_pr.py` to refuse
+an otherwise eligible non-author exact-head approval. Repositories that require
+human-only approval must configure GitHub ruleset required reviewers or
+`CODEOWNERS`. The exact-head check, one non-author approval, live `touches:`
+enforcement, runner assignment and governed merge still apply. Restricted
+unattended merge request source ships uninstalled and disabled; host proof and
+enablement are tracked in [#830](https://github.com/gillella/Aru_Agentic_SDLC/issues/830).
 
 Aru helps a developer or coding agent answer four questions before changing a
 software project:

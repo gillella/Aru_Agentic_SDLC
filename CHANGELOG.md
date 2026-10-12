@@ -1,6 +1,35 @@
 # Changelog
 
-## Unreleased
+## v3.0.0 - Focused source release - 2026-10-12
+
+This entry describes the governed release candidate. Publication follows the
+exact-head PR checks, independent approval, operator merge, and annotated tag.
+
+- **Breaking migration (#783):** `.aru/review.json` `authority: human` and named
+  `reviewers` no longer make `merge_pr.py` refuse an otherwise valid approval
+  from another account. Consumers requiring human-only approval must configure
+  GitHub ruleset required reviewers or `CODEOWNERS`. The one non-author exact-head
+  approval, findings, check, actual-diff `touches:` and governed merge gates remain.
+- The restricted unattended merge request integration (#821) ships as source and
+  an operator package, uninstalled and disabled by default. Host isolation,
+  installation, enablement and a real unattended governed merge remain unproven
+  and belong to [#830](https://github.com/gillella/Aru_Agentic_SDLC/issues/830).
+- Explicit authorized Backlog selection (#820) and affected story tests (#822)
+  add bounded workflows; full regression remains required for releases.
+- Approval-contract and consumer guidance repairs (#790, #791), separate Driver
+  source boundary (#818), report and review-summary fixes (#767, #787), and
+  local verification preflight (#770) retain the existing check names and the
+  account-assigned runner profiles. No real consumer was synchronized by this
+  release candidate.
+- The remaining v2.5.0-to-v3.0.0 commits repair post-merge check binding (#758),
+  stale client guidance (#764), and operator merge guidance (#789), or clarify
+  authority separation and planning/review evidence (#761, #769). They add no
+  further public API break. The complete 15-PR, 63-commit classification is in
+  the release PR evidence.
+- For a consumer rollback, restore the recorded v2.5.0 managed bytes and modes
+  using the v2.5.0 Factory, then confirm its manifest and consumer-owned review,
+  verification and instructions. This restores copied files only; it does not
+  reverse v3.0.0 reviewer policy on a server still running v3.0.0.
 
 - Permit optional, separately packaged Driver source under `driver/` while
   preserving independent Kernel use, the six skills, eleven commands, seven

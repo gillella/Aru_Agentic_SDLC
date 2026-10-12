@@ -82,8 +82,8 @@ def test_version_and_layer_truth_are_explicit():
 
     release = policy.release()
     assert (
-        f"**Project status: v{release['version']} is the current released version "
-        f"(released {release['released']}).**"
+        f"**Project status: v{release['version']} is the declared release version "
+        f"(dated {release['released']}).**"
     ) in readme
     assert "## v1.0.0 - Governed, Risk-Proportional Delivery" in changelog
     assert "v2 public API" in contract
@@ -92,6 +92,20 @@ def test_version_and_layer_truth_are_explicit():
     assert "authenticated GitHub Actions App" in enforcement
     assert all(name in contract for name in ("Kernel", "External Driver", "Consumer policy"))
     assert "Every pull request, whatever it changes, needs one approval" in " ".join(contract.split())
+
+
+def test_v3_release_documents_break_and_disabled_source():
+    readme = text(ROOT / "README.md")
+    changelog = text(ROOT / "CHANGELOG.md")
+    operations = text(ROOT / "docs" / "OPERATIONS.md")
+    for content in (readme, changelog, operations):
+        assert "#783" in content
+        assert "v3.0.0" in content
+        assert "CODEOWNERS" in content
+        assert "#830" in content
+        assert "disabled" in content
+    assert "unproven" in changelog
+    assert "uninstalled and disabled" in operations
 
 
 def test_optional_driver_source_boundary_is_documented_without_rollout_claims():

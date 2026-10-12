@@ -478,6 +478,14 @@ marker to disable new submissions while retaining `--check`, then removes the
 narrow sudo rule if all requests must stop. Removal cannot undo a request
 already admitted; refresh GitHub for any in-flight submission and close-out.
 
+For the focused v3.0.0 release, this restricted integration ships as reviewed
+source and an operator package only. It is uninstalled and disabled by default;
+the Factory release and consumer scaffold/sync do not install or enable it.
+Host isolation, installation, credential configuration, denial evidence,
+enablement and one real governed unattended merge have not been proven. They
+are tracked in [#830](https://github.com/gillella/Aru_Agentic_SDLC/issues/830).
+Do not claim unattended merging is delivered from the v3.0.0 source release.
+
 ### Bounded external continuation
 
 The external Driver owns when to invoke one bounded command, not lifecycle state.
@@ -672,6 +680,14 @@ The Kernel has no reviewer list, human-only posture, no-approval posture, or
 minimum approval-body length, and it does not request reviewers from that file.
 The proposed named-human migration above is an operator design, not an active
 control supplied by this inert declaration.
+
+For v2.5.0 to v3.0.0 migration, this is a breaking change to the old fail-closed
+reviewer-policy behavior (#783): a legacy `authority: human` or named `reviewers`
+declaration no longer makes `merge_pr.py` refuse a qualifying non-author
+exact-head approval. Consumers that need human-only approval must configure
+GitHub ruleset required reviewers or `CODEOWNERS`. The check names,
+account-assigned runner profiles, one exact-head approval, actual-diff `touches:`
+enforcement and operator-controlled merge remain in force.
 
 GitHub authenticates an account; it cannot establish that a person read the
 change. An agent using a person's credential is indistinguishable from that
@@ -1764,9 +1780,11 @@ the consumer project's own controls remain mandatory.
 ## 18. Release the Factory
 
 The version is declared once, as `[release]` in `scripts/policy.toml`. README's
-project-status line, the newest released heading in `CHANGELOG.md` and the newest
-`v*` tag restate it, and `tests/test_release_truth.py` fails when any restatement
-disagrees. A release is therefore an ordinary governed change plus one tag:
+project-status line, the newest release heading in `CHANGELOG.md` and plugin
+manifests restate it. `tests/test_release_truth.py` checks these surfaces and
+refuses a `v*` tag ahead of the declaration. A declaration ahead of the latest
+tag is a candidate, not a published release. A release is an ordinary governed
+change plus one tag:
 
 1. File an issue for the release. In its worktree set `[release] version` and
    `released`, rewrite the README status line to match, and in `CHANGELOG.md`
@@ -1783,6 +1801,19 @@ disagrees. A release is therefore an ordinary governed change plus one tag:
    is ahead of the newest tag, which the test tolerates; a tag ahead of the
    declaration is refused.
 5. Bring consumers up with `init_project.py --sync --directory <consumer>`.
+
+For the v2.5.0-to-v3.0.0 migration, rehearse each assigned runner profile in a
+disposable consumer before any real sync. Scaffold it with the v2.5.0 Factory,
+record the manifest and every managed file's bytes and mode, then use the
+v3.0.0 candidate `init_project.py --sync --directory <disposable>` and verify
+the manifest, workflow marker, check names and consumer-owned review,
+verification and outside-block instructions. Roll back with the v2.5.0 Factory's
+same `--sync` command and compare bytes and modes with the original snapshot.
+The v3.0.0 source package does not install or enable restricted unattended
+merging during scaffold or sync. This file rollback does not undo the #783
+reviewer-policy change on a server still running v3.0.0; use GitHub ruleset
+required reviewers or `CODEOWNERS` for human-only approval. Do not sync a real
+consumer as release-preparation evidence.
 
 Never tag a commit whose declared version differs from the tag, and never describe
 untagged work as released. Tags `v2.1.0`, `v2.2.0` and `v2.2.1` were cut before this
