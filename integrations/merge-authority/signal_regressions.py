@@ -110,7 +110,12 @@ def check_signal_contract(scenario, request, helper, head, tmp_path, monkeypatch
 
 
 def file_size_child(request_path, target):
-    spec = importlib.util.spec_from_file_location("request_under_test", request_path)
+    if Path(request_path).name != "request.py":
+        raise ValueError("expected request.py")
+    # Keep the caller's installed/package directory while bounding the filename.
+    spec = importlib.util.spec_from_file_location(
+        "request_under_test", Path(request_path).with_name("request.py"),
+    )
     request = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(request)
     helper = SimpleNamespace(KernelError=RuntimeError, merge_authority=SimpleNamespace(post=None))
@@ -135,6 +140,28 @@ def file_size_child(request_path, target):
         raise AssertionError("file-size limit did not raise OSError")
     assert posts == ["success", "failure"]
     assert signal.getsignal(signal.SIGXFSZ) is original
+
+
+def check_request_selection(tmp_path):
+    """Select the supplied installed/package copy, refusing other filenames."""
+    marker = tmp_path / "selected"
+    for name in ("request.py", "other.py"):
+        relocated = tmp_path / name
+        relocated.write_text("from pathlib import Path\n"
+                             f"Path({str(marker)!r}).write_text('selected')\n"
+                             "raise RuntimeError('relocated request selected')\n")
+        child = subprocess.run(
+            [sys.executable, "-I", __file__, str(relocated), str(tmp_path / "limited")],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert child.returncode != 0
+        if name == "request.py":
+            assert "relocated request selected" in child.stderr
+            assert marker.read_text() == "selected"
+            marker.unlink()
+        else:
+            assert "expected request.py" in child.stderr
+            assert not marker.exists()
 
 
 if __name__ == "__main__":

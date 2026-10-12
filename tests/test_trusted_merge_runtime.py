@@ -792,3 +792,7 @@ def test_installer_publishes_only_disabled_request_routing(tmp_path, monkeypatch
     assert policy.is_file() and validated == [["/usr/sbin/visudo", "-cf", str(policy.with_name(".aru-trusted-merge-candidate"))]]
     assert not (root / "enabled.json").exists()
     assert "--check" not in policy.read_text()  # Both shapes route; request enforces enablement.
+
+
+def test_file_size_child_preserves_request_selection(tmp_path):
+    SIGNAL_REGRESSIONS["check_request_selection"](tmp_path)
